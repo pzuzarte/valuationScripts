@@ -23,21 +23,22 @@ ARGUMENTS
                     for large-caps — which tends to be conservative vs analyst
                     consensus of 8–10%. Use this to align with external models.
 
-    --backtest DAYS Run a historical price backtest over the last N trading days.
-                    Fetches daily closing prices from Yahoo Finance and ranks each
-                    valuation method by how closely its fair value tracked the
-                    actual stock price. Adds a 'Backtesting' tab between 'Growth
-                    Analysis' and 'Glossary' with a ranked table and clear verdict.
-                    Example: --backtest 90  (90 trading days ≈ 4.5 months)
-                    Example: --backtest 252 (≈ 1 full trading year)
+    --backtest DAYS Number of trading days for the historical backtest (default: 1000 ≈ 4 years).
+                    Ranks each valuation method by how closely its fair value tracked
+                    the actual stock price over that window. Adds a 'Backtesting' tab
+                    with a ranked table, chart, and verdict.
+                    Set to 0 to skip the backtest entirely.
+                    Example: --backtest 252  (≈ 1 full trading year)
+                    Example: --backtest 500  (≈ 2 years)
+                    Example: --backtest 0    (skip backtest, faster run)
 
 EXAMPLES
 --------
-    python valuationMaster.py                           # AAPL, auto WACC
-    python valuationMaster.py NVDA                      # Nvidia, auto WACC
+    python valuationMaster.py                           # AAPL, 1000-day backtest
+    python valuationMaster.py NVDA                      # Nvidia, 1000-day backtest
     python valuationMaster.py AAPL --wacc 0.09          # AAPL, 9% WACC override
-    python valuationMaster.py SHOP --backtest 90        # Shopify, 90-day backtest
-    python valuationMaster.py MSFT --wacc 0.09 --backtest 252  # MSFT, full year backtest
+    python valuationMaster.py SHOP --backtest 252       # Shopify, 1-year backtest
+    python valuationMaster.py MSFT --backtest 0         # MSFT, skip backtest (faster)
 
 OUTPUT
 ------
@@ -792,18 +793,31 @@ def fetch_yfinance_extended(ticker: str) -> dict:
                 if equity is not None:
                     ext["stockholders_equity"] = equity
 
-                cur_assets = _annual_val(bs, ["Current Assets", "Total Current Assets"])
+                cur_assets = _annual_val(bs, [
+                    "Current Assets", "Total Current Assets",
+                    "Current Assets Total", "TotalCurrentAssets",
+                ])
                 if cur_assets is not None:
                     ext["total_current_assets"] = cur_assets
 
-                cur_liab = _annual_val(bs, ["Current Liabilities", "Total Current Liabilities"])
+                cur_liab = _annual_val(bs, [
+                    "Current Liabilities", "Total Current Liabilities",
+                    "Current Liabilities Total", "TotalCurrentLiabilities",
+                ])
                 if cur_liab is not None:
                     ext["total_current_liabilities"] = cur_liab
 
                 tot_liab = _annual_val(bs, [
                     "Total Liabilities Net Minority Interest",
                     "Total Liabilities",
+                    "Liabilities",
                 ])
+                # Fallback: total_assets - stockholders_equity
+                if tot_liab is None:
+                    tot_assets = _annual_val(bs, ["Total Assets", "Assets"])
+                    eq_val = ext.get("stockholders_equity")
+                    if tot_assets is not None and eq_val is not None:
+                        tot_liab = tot_assets - eq_val
                 if tot_liab is not None:
                     ext["total_liabilities"] = tot_liab
         except Exception:
@@ -848,16 +862,86 @@ def fetch_yfinance_extended(ticker: str) -> dict:
         except Exception:
             pass
 
-        # ── Historical multiples — only if wall-clock < 8s ────────────
+        # ── Historical multiples — only if wall-clock < 12s ───────────
         try:
-            if _time.time() - wall_start < 8.0:
-                hist_data = tk.history(period="5y")
-                if hist_data is not None and len(hist_data) > 50:
-                    inc5 = tk.income_stmt
-                    ni5 = _annual_val(inc5, ["Net Income", "Net Income Common Stockholders"]) if inc5 is not None else None
-                    # Simple proxies from current data (true historical series requires SEC EDGAR)
-                    # These are approximations using current multiples as anchors
-                    pass  # hist_pe_5y etc. remain None — they require per-period data
+            if _time.time() - wall_start < 12.0:
+                hist_prices = tk.history(period="5y")
+                if hist_prices is not None and len(hist_prices) > 50:
+                    inc5  = tk.income_stmt
+                    cf5   = tk.cash_flow
+                    bs5   = tk.balance_sheet
+                    shares_out = d.get("shares") if isinstance(d, dict) else ext.get("shares")
+
+                    pe_vals, pfcf_vals, eveb_vals = [], [], []
+
+                    if inc5 is not None and not inc5.empty and shares_out:
+                        for col_date in inc5.columns:
+                            yr = col_date.year
+                            yr_prices = hist_prices[hist_prices.index.year == yr]["Close"]
+                            if len(yr_prices) < 20:
+                                continue
+                            avg_price = float(yr_prices.mean())
+
+                            # P/E
+                            for k in ["Diluted EPS", "Basic EPS", "EPS"]:
+                                if k in inc5.index:
+                                    v = inc5.loc[k, col_date]
+                                    if v is not None and float(v) > 0.5:
+                                        pe = avg_price / float(v)
+                                        if 4 < pe < 200:
+                                            pe_vals.append(pe)
+                                        break
+
+                            # P/FCF
+                            if cf5 is not None and not cf5.empty and col_date in cf5.columns:
+                                for k in ["Free Cash Flow"]:
+                                    if k in cf5.index:
+                                        fcf_v = cf5.loc[k, col_date]
+                                        if fcf_v is not None and float(fcf_v) > 0:
+                                            fcf_ps = float(fcf_v) / shares_out
+                                            if fcf_ps > 0:
+                                                pfcf = avg_price / fcf_ps
+                                                if 4 < pfcf < 200:
+                                                    pfcf_vals.append(pfcf)
+                                        break
+
+                            # EV/EBITDA — need EBITDA and approximate EV
+                            if inc5 is not None and col_date in inc5.columns:
+                                ebitda_v = None
+                                for k in ["EBITDA", "Normalized EBITDA"]:
+                                    if k in inc5.index:
+                                        v = inc5.loc[k, col_date]
+                                        if v is not None:
+                                            ebitda_v = float(v)
+                                        break
+                                if ebitda_v and ebitda_v > 0 and bs5 is not None and not bs5.empty and col_date in bs5.columns:
+                                    debt_v = 0.0
+                                    for k in ["Total Debt", "Long Term Debt And Capital Lease Obligation"]:
+                                        if k in bs5.index:
+                                            v = bs5.loc[k, col_date]
+                                            if v is not None:
+                                                debt_v = float(v)
+                                            break
+                                    cash_v = 0.0
+                                    for k in ["Cash Cash Equivalents And Short Term Investments",
+                                              "Cash And Cash Equivalents"]:
+                                        if k in bs5.index:
+                                            v = bs5.loc[k, col_date]
+                                            if v is not None:
+                                                cash_v = float(v)
+                                            break
+                                    ev_approx = avg_price * shares_out + debt_v - cash_v
+                                    if ev_approx > 0:
+                                        eveb = ev_approx / ebitda_v
+                                        if 2 < eveb < 100:
+                                            eveb_vals.append(eveb)
+
+                    if pe_vals:
+                        ext["hist_pe_5y"]    = round(sum(pe_vals)   / len(pe_vals),   1)
+                    if pfcf_vals:
+                        ext["hist_pfcf_5y"]  = round(sum(pfcf_vals) / len(pfcf_vals), 1)
+                    if eveb_vals:
+                        ext["hist_eveb_5y"]  = round(sum(eveb_vals) / len(eveb_vals), 1)
         except Exception:
             pass
 
@@ -1733,6 +1817,69 @@ def _build_growth_html(d, gr, reliability=None):
                  '<p style="color:var(--muted);font-size:13px;margin-top:12px;">'
                  'Requires positive dividend per share data.</p></div>')
 
+    # 10. Mean Reversion
+    mr = gr.get("mean_reversion")
+    if mr:
+        fv = mr["fair_value"]; ud_s, ud_c = ud(fv)
+        fh, fc = gflag("Mean Reversion")
+        n_comp = mr.get("n_components", 0)
+        html += (
+            '<div class="gc' + fc + '" style="--gca:#87ceeb;">'
+            '<div class="gc-head"><span class="gc-name">Mean Reversion</span>'
+            '<span class="gc-badge">Historical Context</span></div>' + fh +
+            '<div class="gc-sub">Anchors valuation to each metric\'s own 5-year average multiple. '
+            'Captures when a stock is cheap or expensive relative to its own history.</div>'
+            '<div class="gc-fv">' + mo2(fv) + '</div>'
+            '<div class="gc-ud ' + ud_c + '">' + ud_s + ' vs current price</div>'
+            '<div class="gc-mos">MoS Price: ' + mo2(mr.get("mos_value")) + '</div><hr>'
+            '<table class="gc-tbl">'
+            '<tr><td>Components used</td><td>' + str(n_comp) + '</td></tr>' +
+            ('<tr><td>P/E component</td><td>' + mo2(mr.get("pe_component")) + '</td></tr>' if mr.get("pe_component") else '') +
+            ('<tr><td>P/FCF component</td><td>' + mo2(mr.get("pfcf_component")) + '</td></tr>' if mr.get("pfcf_component") else '') +
+            ('<tr><td>EV/EBITDA component</td><td>' + mo2(mr.get("eveb_component")) + '</td></tr>' if mr.get("eveb_component") else '') +
+            '</table></div>'
+        )
+    else:
+        html += ('<div class="gc" style="--gca:#87ceeb;"><div class="gc-head">'
+                 '<span class="gc-name">Mean Reversion</span></div>'
+                 '<p style="color:var(--muted);font-size:13px;margin-top:12px;">'
+                 'Requires 5-year historical P/E, P/FCF, or EV/EBITDA multiples.</p></div>')
+
+    # 11. Bayesian Ensemble
+    bayes = gr.get("bayesian")
+    if bayes:
+        fv = bayes["fair_value"]; ud_s, ud_c = ud(fv)
+        n_m = bayes.get("n_models_used", 0)
+        top3 = bayes.get("top_weighted_methods", [])
+        top3_html = "".join(
+            '<tr><td>' + t.get("method","") + '</td>'
+            '<td>' + mo2(t.get("fv")) + '</td>'
+            '<td>' + format(t.get("score",0), ".0f") + ' pts</td></tr>'
+            for t in top3
+        )
+        surp_adj = bayes.get("surprise_adj_applied", False)
+        html += (
+            '<div class="gc" style="--gca:#ffd700;">'
+            '<div class="gc-head"><span class="gc-name">Bayesian Ensemble</span>'
+            '<span class="gc-badge">Meta · Consensus</span></div>'
+            '<div class="gc-sub">Weighted average of all applicable models. Each model\'s weight equals '
+            'its applicability score (data quality + company fit + academic precision).</div>'
+            '<div class="gc-fv">' + mo2(fv) + '</div>'
+            '<div class="gc-ud ' + ud_c + '">' + ud_s + ' vs current price</div>'
+            '<div class="gc-mos">MoS Price: ' + mo2(bayes.get("mos_value")) + '</div><hr>'
+            '<table class="gc-tbl">'
+            '<tr><th>Top contributors</th><th>Fair Value</th><th>Weight</th></tr>' +
+            top3_html +
+            '<tr><td>Models in ensemble</td><td colspan="2">' + str(n_m) + '</td></tr>' +
+            ('<tr><td>Earnings surprise adj</td><td colspan="2">Applied (±5%)</td></tr>' if surp_adj else '') +
+            '</table></div>'
+        )
+    else:
+        html += ('<div class="gc" style="--gca:#ffd700;"><div class="gc-head">'
+                 '<span class="gc-name">Bayesian Ensemble</span></div>'
+                 '<p style="color:var(--muted);font-size:13px;margin-top:12px;">'
+                 'Requires at least 3 valid model results to compute weighted consensus.</p></div>')
+
     html+='</div>'  # close g-grid
 
     # ── Multi-method interpretation section ────────────────────────────────────
@@ -2185,10 +2332,58 @@ def _run_methods_for_snapshot(d_hist: dict, benchmarks: dict, erg_peer_data: dic
         if r and r.get("fair_value", 0) > 0:
             results["Three-Stage DCF"] = r["fair_value"]
 
+    if d_hist.get("fcf") and d_hist["fcf"] > 0 and d_hist.get("shares"):
+        r = run_monte_carlo_dcf(d_hist, n_sims=500)
+        if r and r.get("fair_value", 0) > 0:
+            results["Monte Carlo DCF"] = r["fair_value"]
+
     if d_hist.get("fcf_per_share") and d_hist["fcf_per_share"] > 0:
         r = run_fcf_yield(d_hist)
         if r and r.get("fair_value", 0) > 0:
             results["FCF Yield"] = r["fair_value"]
+
+    # Balance-sheet dependent models — use current ext data as proxy
+    # (book value, roic, etc. change slowly year-on-year; a reasonable approximation)
+    ext = d_hist.get("ext") or {}
+    if ext.get("book_value_ps") and ext["book_value_ps"] > 0 and d_hist.get("eps", 0) > 0:
+        r = run_rim(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["RIM"] = r["fair_value"]
+
+    if ext.get("roic") and ext.get("stockholders_equity"):
+        r = run_roic_excess_return(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["ROIC Excess Return"] = r["fair_value"]
+
+    if ext.get("total_current_assets") is not None and ext.get("total_liabilities") is not None:
+        r = run_ncav(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["NCAV"] = r["fair_value"]
+
+    if ext.get("dividends_per_share") and ext["dividends_per_share"] > 0:
+        r = run_ddm_hmodel(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["DDM"] = r["fair_value"]
+
+    if d_hist.get("revenue") and d_hist.get("est_growth") and d_hist.get("shares"):
+        r = run_scurve_tam(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["S-Curve TAM"] = r["fair_value"]
+
+    if d_hist.get("price") and d_hist.get("revenue") and d_hist.get("shares"):
+        r = run_pie(d_hist)
+        if r and r.get("fair_value", 0) > 0:
+            results["PIE"] = r["fair_value"]
+
+    # Bayesian Ensemble — weighted consensus of all snapshot results
+    if len(results) >= 3:
+        _result_dicts = [{"method": m, "fair_value": fv, "mos_value": fv * 0.8}
+                         for m, fv in results.items() if fv and fv > 0]
+        _appl = {m: score_model_applicability(m, {"method": m, "fair_value": fv}, d_hist, [])
+                 for m, fv in results.items() if fv and fv > 0}
+        r = run_bayesian_ensemble(d_hist, _result_dicts, _appl, None)
+        if r and r.get("fair_value", 0) > 0:
+            results["Bayesian Ensemble"] = r["fair_value"]
 
     return results
 
@@ -2418,7 +2613,7 @@ def run_backtest(d: dict, results: list, gr: dict, days: int, erg_peer_data: dic
         "current_date":      current_date,
     }
 
-def _build_backtest_html(bt: dict, d: dict) -> str:
+def _build_backtest_html(bt: dict, d: dict, top_8: list = None, applicability_scores: dict = None) -> str:
     """Generate the HTML for the Backtesting tab."""
     if "error" in bt:
         return (
@@ -2467,12 +2662,41 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
     PRED_EXTRA_FRAC = 0.10  # 10% extra width for prediction zone
 
     line_colors = {
-        "DCF":          "#4f8ef7", "P/FCF": "#00c896", "P/E": "#f0a500",
-        "EV/EBITDA":    "#bf6ff0", "Reverse DCF": "#e87c3e",
-        "Fwd PEG":      "#f0d500", "EV/NTM Rev": "#00e5c8",
-        "TAM Scenario": "#c45aff", "Rule of 40": "#ff7aa2",
-        "ERG":          "#38bdf8",
+        # Classic models
+        "DCF":              "#4f8ef7",
+        "Three-Stage DCF":  "#7baff7",
+        "Monte Carlo DCF":  "#a8c8fb",
+        "P/FCF":            "#00c896",
+        "P/E":              "#f0a500",
+        "EV/EBITDA":        "#bf6ff0",
+        "FCF Yield":        "#34d399",
+        "NCAV":             "#6ee7b7",
+        "ROIC Excess Return": "#f472b6",
+        "RIM":              "#fb923c",
+        "Mean Reversion":   "#facc15",
+        # Growth models
+        "Reverse DCF":      "#e87c3e",
+        "Fwd PEG":          "#f0d500",
+        "EV/NTM Rev":       "#00e5c8",
+        "TAM Scenario":     "#c45aff",
+        "S-Curve TAM":      "#a855f7",
+        "Rule of 40":       "#ff7aa2",
+        "ERG":              "#38bdf8",
+        "PIE":              "#ff6b9d",
+        "DDM":              "#27ae60",
+        # Meta models
+        "Bayesian Ensemble":    "#f59e0b",
+        "Multi-Factor":         "#10b981",
+        # Legacy alias
+        "Graham Number":    "#94a3b8",
     }
+
+    # Determine which methods are in the top 8 for special rendering
+    top_8_names = set()
+    if top_8:
+        for r in top_8:
+            if isinstance(r, dict) and "method" in r:
+                top_8_names.add(r["method"])
 
     # Y-axis range:
     # Include all FV values truthfully so lines sit at their correct dollar level.
@@ -2561,11 +2785,12 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
     pred_end_x = round(PAD_L + PW - 4, 1)
 
     for mname in sorted(stats.keys()):
-        clr     = line_colors.get(mname, "#aaaaaa")
-        is_best = (mname == best)
-        sw      = "2.5" if is_best else "1.5"
-        op      = "1.0" if is_best else "0.65"
-        gid     = _line_id(mname)
+        clr      = line_colors.get(mname, "#aaaaaa")
+        is_best  = (mname == best)
+        is_top8  = (mname in top_8_names)
+        sw       = "2.5" if is_best else ("2.0" if is_top8 else "1.5")
+        op       = "1.0" if is_best else ("0.85" if is_top8 else "0.55")
+        gid      = _line_id(mname)
 
         # Historical line: SOLID
         pts_list = []
@@ -2606,8 +2831,10 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
         elif last_fv is not None:
             method_final_y[mname] = to_svg_y(last_fv)
 
-        # Wrap in named group — hidden by default (user can toggle on via cards)
-        fv_polylines += '<g id="{gid}" style="display:none">{svg}</g>'.format(gid=gid, svg=method_svg)
+        # All lines start hidden — user toggles them on via the cards below the chart
+        fv_polylines += '<g id="{gid}" style="display:none">{svg}</g>'.format(
+            gid=gid, svg=method_svg
+        )
 
     # Order legend top-to-bottom by final Y value (smallest Y = highest on chart = drawn on top)
     # Price line (white) goes first in legend
@@ -2619,23 +2846,29 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
         'Price</span>'
     )
     for mname in legend_order:
-        clr     = line_colors.get(mname, "#aaaaaa")
-        is_best = (mname == best)
-        lc      = "#ffffff" if is_best else "#ccc"
-        fw      = "600" if is_best else "400"
-        star    = " ★" if is_best else ""
+        clr      = line_colors.get(mname, "#aaaaaa")
+        is_best  = (mname == best)
+        is_top8  = (mname in top_8_names)
+        lc       = "#ffffff" if is_best else ("#e2e8f0" if is_top8 else "#888")
+        fw       = "700" if is_best else ("600" if is_top8 else "400")
+        star     = " ★" if is_best else ""
+        top8_dot = (
+            ' <span style="font-size:8px;vertical-align:middle;color:#4f8ef7;">●</span>'
+        ) if is_top8 and not is_best else ""
+        line_h   = "2.5px" if is_top8 else "1.5px"
         fv_legend += (
             '<span style="display:inline-flex;align-items:center;gap:5px;'
             'margin:3px 10px 3px 0;font-size:11px;color:{lc};font-weight:{fw};">'
-            '<span style="display:inline-block;width:18px;height:2px;'
-            'background:{c};border-radius:2px;"></span>{n}{best}</span>'
-        ).format(c=clr, n=mname, lc=lc, fw=fw, best=star)
+            '<span style="display:inline-block;width:18px;height:{lh};'
+            'background:{c};border-radius:2px;"></span>{n}{best}{dot}</span>'
+        ).format(c=clr, lh=line_h, n=mname, lc=lc, fw=fw, best=star, dot=top8_dot)
 
-    # Add solid/dashed key to legend
+    # Add solid/dashed key + top-8 indicator key to legend
     fv_legend += (
         '<span style="display:inline-flex;align-items:center;gap:5px;'
         'margin:3px 10px 3px 0;font-size:10px;color:#777;">'
-        '( ── historical &nbsp; - - - current prediction )</span>'
+        '( ── historical &nbsp; - - - current prediction &nbsp;·&nbsp; '
+        '<span style="color:#4f8ef7;">●</span> = top-8 method )</span>'
     )
 
     # Vertical tick marks at each filing date boundary (labels inside top padding)
@@ -2732,13 +2965,18 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
         pt_err   = mst["point_in_time_error"]         # |fv_day1 - start_price| / start_price
         pt_clr   = "#00c896" if pt_err <= 10 else "#f0a500" if pt_err <= 25 else "#e05c5c"
         is_best  = (mname == best)
-        row_bg   = "rgba(79,142,247,.06)" if is_best else ""
+        is_top8  = (mname in top_8_names)
+        row_bg   = "rgba(79,142,247,.06)" if is_best else ("rgba(79,142,247,.02)" if is_top8 else "")
 
         best_tag = ""
         if is_best:
             best_tag = (' <span style="font-size:9px;background:rgba(79,142,247,.2);'
                         'color:#4f8ef7;padding:2px 6px;border-radius:3px;margin-left:6px;'
                         'font-family:\'DM Mono\',monospace;letter-spacing:1px;">BEST</span>')
+        elif is_top8:
+            best_tag = (' <span style="font-size:9px;background:rgba(79,142,247,.1);'
+                        'color:#4f8ef7;padding:2px 6px;border-radius:3px;margin-left:6px;'
+                        'font-family:\'DM Mono\',monospace;letter-spacing:1px;">TOP 8</span>')
 
         rows_html += """
         <tr style="background:{rbg};">
@@ -2813,35 +3051,96 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
     dir_total = len(stats)
 
     # Build clickable current prediction mini-cards (toggle chart lines on/off)
+    # All lines start hidden. Top-8 cards appear first (with TOP 8 badge) then other backtest methods.
+    def _make_card(mname, fv, clr, has_backtest_line):
+        """Return a toggle card HTML string for a method."""
+        gid        = _line_id(mname)
+        is_top8    = mname in top_8_names
+        upside_pct = (fv - d["price"]) / d["price"] * 100
+        up_clr     = "#00c896" if upside_pct >= 0 else "#e05c5c"
+        up_str     = ("+" if upside_pct >= 0 else "") + format(upside_pct, ".0f") + "%"
+        top8_badge = (
+            ' <span style="font-size:8px;background:rgba(79,142,247,.2);color:#4f8ef7;'
+            'padding:1px 5px;border-radius:3px;letter-spacing:1px;font-weight:700;">TOP 8</span>'
+        ) if is_top8 else ""
+        if has_backtest_line:
+            onclick_attr  = 'onclick="btToggleLine(\'{gid}\')"'.format(gid=gid)
+            cursor_style  = "cursor:pointer;"
+            title_attr    = 'title="Click to show/hide this line on the chart"'
+            eye_html      = '<div id="eye-{gid}" style="font-size:12px;opacity:0.7;">🙈</div>'.format(gid=gid)
+        else:
+            onclick_attr  = 'onclick="btNoLine(\'{mn}\')"'.format(mn=mname.replace("'", "\\'"))
+            cursor_style  = "cursor:default;"
+            title_attr    = 'title="No historical chart line — this model uses current-period data not available historically"'
+            eye_html      = '<div style="font-size:10px;opacity:0.4;">—</div>'
+        return (
+            '<div id="card-{gid}" '
+            '{onclick} '
+            'data-visible="false" '
+            'style="background:var(--surface2);border-radius:8px;padding:10px 14px;'
+            'min-width:120px;border-left:3px solid {clr};{cursor}'
+            'transition:opacity .2s,box-shadow .2s;user-select:none;opacity:0.35;" '
+            '{title}>'
+            '<div style="display:flex;align-items:center;justify-content:space-between;'
+            'margin-bottom:4px;gap:8px;">'
+            '<div style="font-size:11px;color:var(--muted);">{mname}{badge}</div>'
+            '{eye}'
+            '</div>'
+            '<div style="font-size:16px;font-weight:700;font-family:\'DM Mono\',monospace;">'
+            '${fv:.2f}</div>'
+            '<div style="font-size:11px;color:{up_clr};font-family:\'DM Mono\',monospace;">'
+            '{up_str} vs ${price:.2f}</div>'
+            '</div>'
+        ).format(
+            gid=gid, onclick=onclick_attr, clr=clr, cursor=cursor_style, title=title_attr,
+            mname=mname, badge=top8_badge, eye=eye_html,
+            fv=fv, up_clr=up_clr, up_str=up_str, price=d["price"]
+        )
+
+    def _resolve_fv(mname):
+        """Get the best available fair value for a method."""
+        fv = current_fvs.get(mname)
+        if not fv or fv <= 0:
+            for r2 in (top_8 or []):
+                if r2.get("method") == mname and r2.get("fair_value", 0) > 0:
+                    return r2["fair_value"]
+        return fv
+
+    # ── Top 12 by backtest accuracy — same ranking as All Methods tab ─
+    # Primary sort: methods tracked in backtest, by accuracy_score descending.
+    # Secondary: methods with no backtest line, by applicability score.
+    seen_methods = set()
+    all_available = []
+
+    for mname, mst in sorted(stats.items(), key=lambda x: x[1]["accuracy_score"], reverse=True):
+        fv = _resolve_fv(mname)
+        if fv and fv > 0 and mname not in seen_methods:
+            all_available.append((mname, fv))
+            seen_methods.add(mname)
+
+    # Supplement with top_8 models that have no backtest line (e.g. ext-data models)
+    for r2 in (top_8 or []):
+        mname = r2.get("method")
+        if mname not in seen_methods:
+            fv = _resolve_fv(mname)
+            if fv and fv > 0:
+                all_available.append((mname, fv))
+                seen_methods.add(mname)
+
+    top12_cards = [
+        _make_card(mname, fv, line_colors.get(mname, "#aaaaaa"), mname in method_final_y)
+        for mname, fv in all_available[:12]
+    ]
+
     current_pred_cards_html = ""
-    for mname in legend_order:
-        cur_fv = current_fvs.get(mname)
-        if cur_fv and cur_fv > 0:
-            clr      = line_colors.get(mname, "#aaaaaa")
-            gid      = _line_id(mname)
-            upside_pct = (cur_fv - d["price"]) / d["price"] * 100
-            up_clr   = "#00c896" if upside_pct >= 0 else "#e05c5c"
-            up_str   = ("+" if upside_pct >= 0 else "") + format(upside_pct, ".0f") + "%"
-            current_pred_cards_html += (
-                '<div id="card-{gid}" '
-                'onclick="btToggleLine(\'{gid}\')" '
-                'data-visible="false" '
-                'style="background:var(--surface2);border-radius:8px;padding:10px 14px;'
-                'min-width:120px;border-left:3px solid {clr};cursor:pointer;'
-                'transition:opacity .2s,box-shadow .2s;user-select:none;opacity:0.35;" '
-                'title="Click to show/hide this line on the chart">'
-                '<div style="display:flex;align-items:center;justify-content:space-between;'
-                'margin-bottom:4px;gap:8px;">'
-                '<div style="font-size:11px;color:var(--muted);">{mname}</div>'
-                '<div id="eye-{gid}" style="font-size:12px;opacity:0.7;">🙈</div>'
-                '</div>'
-                '<div style="font-size:16px;font-weight:700;font-family:\'DM Mono\',monospace;">'
-                '${fv:.2f}</div>'
-                '<div style="font-size:11px;color:{up_clr};font-family:\'DM Mono\',monospace;">'
-                '{up_str} vs ${price:.2f}</div>'
-                '</div>'
-            ).format(clr=clr, gid=gid, mname=mname, fv=cur_fv, up_clr=up_clr,
-                     up_str=up_str, price=d["price"])
+    if top12_cards:
+        current_pred_cards_html += (
+            '<div style="width:100%;font-size:10px;font-family:\'DM Mono\',monospace;'
+            'letter-spacing:2px;text-transform:uppercase;color:#4f8ef7;'
+            'margin-bottom:6px;">Top 12 Methods — Ranked by Backtest Tracking Accuracy</div>'
+            '<div style="display:flex;flex-wrap:wrap;gap:12px;">'
+            + "".join(top12_cards) + "</div>"
+        )
 
     # ── Assemble HTML ───────────────────────────────────────────────
     html = (
@@ -2894,9 +3193,7 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
         '<div style="font-family:\'DM Mono\',monospace;font-size:10px;letter-spacing:2px;'
         'text-transform:uppercase;color:var(--accent);margin-bottom:12px;">'
         'Current Fair Value Predictions (Live Data)</div>'
-        '<div style="display:flex;flex-wrap:wrap;gap:12px;">'
         '{current_pred_cards}'
-        '</div>'
         '<div style="font-size:11px;color:var(--muted);margin-top:10px;">'
         '&#128065; Click a card to show or hide its line on the chart above.'
         '</div>'
@@ -2973,7 +3270,7 @@ def _build_backtest_html(bt: dict, d: dict) -> str:
     return html
 
 
-def _build_all_methods_table(top_8: list, remainder: list, applicability_scores: dict, method_colors: dict, price: float) -> str:
+def _build_all_methods_table(top_8: list, remainder: list, applicability_scores: dict, method_colors: dict, price: float, bt: dict = None) -> str:
     """Build the ranked 'All Methods' table HTML."""
     CAT = {
         "DCF": "Classic", "P/FCF": "Classic", "P/E": "Classic",
@@ -2990,22 +3287,39 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
     }
     CAT_CSS = {"Classic": "cat-classic", "Growth": "cat-growth", "Meta": "cat-meta"}
 
+    # Extract backtest method stats if available
+    bt_stats = {}
+    if bt and "error" not in bt and "method_stats" in bt:
+        bt_stats = bt["method_stats"]
+    has_bt = bool(bt_stats)
+
+    all_models = list(top_8) + [r for r in (remainder or []) if r.get("fair_value") and r["fair_value"] > 0]
+    none_models = [r for r in (remainder or []) if not r.get("fair_value") or not r["fair_value"]]
+
+    # When backtest data is available, re-rank all models by tracking accuracy.
+    # Models with no backtest data sort below those that do (using applicability score as tiebreak).
+    if has_bt:
+        def _rank_key(r):
+            m = r.get("method", "")
+            if m in bt_stats:
+                return (1, bt_stats[m]["accuracy_score"])   # higher = better
+            return (0, applicability_scores.get(m, 0))      # no backtest → below ranked ones
+        all_models.sort(key=_rank_key, reverse=True)
+
     rows_html = ""
     rank = 0
-    all_models = list(top_8) + [r for r in (remainder or []) if r.get("fair_value") and r["fair_value"] > 0]
-    # Also collect None ones from remainder
-    none_models = [r for r in (remainder or []) if not r.get("fair_value") or not r["fair_value"]]
+    top_8_methods = {r.get("method") for r in top_8}
 
     for r in all_models:
         rank += 1
         method = r.get("method", "")
         fv = r.get("fair_value")
         mos = r.get("mos_value")
-        score = applicability_scores.get(method, 0)
+        appl_score = applicability_scores.get(method, 0)
         cat = CAT.get(method, "Classic")
         cat_css = CAT_CSS.get(cat, "cat-classic")
         col = method_colors.get(method, "#aaa")
-        is_top8 = rank <= len(top_8)
+        is_top8 = method in top_8_methods
         row_style = ' style="background:rgba(79,142,247,.03);"' if is_top8 else ""
 
         if fv and price and price > 0:
@@ -3016,9 +3330,31 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
             upside_str = "N/A"
             upside_col = "#6b7194"
 
-        fv_str = "${:,.2f}".format(fv) if fv else "N/A"
+        fv_str  = "${:,.2f}".format(fv)  if fv  else "N/A"
         mos_str = "${:,.2f}".format(mos) if mos else "N/A"
-        top8_badge = ' <span style="font-size:9px;background:rgba(79,142,247,.2);color:#4f8ef7;padding:1px 5px;border-radius:3px;">TOP 8</span>' if is_top8 else ""
+        top8_badge = (
+            ' <span style="font-size:9px;background:rgba(79,142,247,.2);color:#4f8ef7;'
+            'padding:1px 5px;border-radius:3px;">TOP 8</span>'
+        ) if is_top8 else ""
+
+        # Backtest accuracy cell
+        if has_bt and method in bt_stats:
+            bt_acc  = bt_stats[method]["accuracy_score"]
+            bt_mape = bt_stats[method]["mape"]
+            bt_clr  = "#00c896" if bt_acc >= 75 else "#f0a500" if bt_acc >= 50 else "#e05c5c"
+            bt_cell = (
+                "<td style='font-family:DM Mono,monospace;color:{c};text-align:center;'>"
+                "{acc:.0f} <span style='font-size:10px;color:#666;'>({mape:.0f}% err)</span>"
+                "</td>"
+            ).format(c=bt_clr, acc=bt_acc, mape=bt_mape)
+        elif has_bt:
+            bt_cell = "<td style='color:var(--muted);text-align:center;font-size:11px;'>No data</td>"
+        else:
+            bt_cell = ""
+
+        score_cell = (
+            "<td class='score-col' style='color:#888;'>{score:.0f}/100</td>"
+        ).format(score=appl_score)
 
         rows_html += (
             "<tr{row_style}>"
@@ -3028,18 +3364,24 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
             "<td style='font-family:DM Mono,monospace;'>{fv_str}</td>"
             "<td style='font-family:DM Mono,monospace;color:{upside_col};'>{upside_str}</td>"
             "<td style='font-family:DM Mono,monospace;'>{mos_str}</td>"
-            "<td class='score-col'>{score:.0f}/100</td>"
+            "{bt_cell}"
+            "{score_cell}"
             "</tr>"
         ).format(
             row_style=row_style, rank=rank, col=col, method=method,
             top8_badge=top8_badge, cat_css=cat_css, cat=cat,
             fv_str=fv_str, upside_col=upside_col, upside_str=upside_str,
-            mos_str=mos_str, score=score,
+            mos_str=mos_str, bt_cell=bt_cell, score_cell=score_cell,
         )
 
     # N/A section
+    na_colspan = "8" if has_bt else "7"
     if none_models:
-        rows_html += "<tr><td colspan='7' style='padding:12px 10px;color:var(--muted);font-size:11px;border-top:2px solid var(--border);'>Not Applicable (insufficient data)</td></tr>"
+        rows_html += (
+            "<tr><td colspan='{c}' style='padding:12px 10px;color:var(--muted);"
+            "font-size:11px;border-top:2px solid var(--border);'>"
+            "Not Applicable (insufficient data for this stock)</td></tr>"
+        ).format(c=na_colspan)
         for r in none_models:
             method = r.get("method", "")
             cat = CAT.get(method, "Classic")
@@ -3051,19 +3393,36 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
                 "<td class='rank-col'>—</td>"
                 "<td><span style='color:{col};'>{method}</span></td>"
                 "<td><span class='cat-badge {cat_css}'>{cat}</span></td>"
-                "<td colspan='4' style='color:var(--muted);'>{reason}</td>"
+                "<td colspan='{c}' style='color:var(--muted);'>{reason}</td>"
                 "</tr>"
-            ).format(col=col, method=method, cat_css=cat_css, cat=cat, reason=reason)
+            ).format(col=col, method=method, cat_css=cat_css, cat=cat,
+                     reason=reason, c=str(int(na_colspan) - 3))
+
+    bt_header = "<th style='text-align:center;'>Backtest Accuracy</th>" if has_bt else ""
+    rank_note = (
+        " <span style='font-size:10px;font-weight:400;color:var(--muted);'>"
+        "(ranked by backtest tracking accuracy)</span>"
+        if has_bt else
+        " <span style='font-size:10px;font-weight:400;color:var(--muted);'>"
+        "(ranked by applicability score — run with --backtest to rank by historical accuracy)</span>"
+    )
 
     return (
+        "<div style='font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.6;'>"
+        + ("Ranked by how closely each model tracked {}'s actual price over the backtest window. "
+           "Models with no historical data are listed below those with backtest results.".format("") if has_bt else
+           "Run with <code>--backtest DAYS</code> to rank by historical price-tracking accuracy.")
+        + "</div>"
         "<table class='all-methods-tbl'>"
         "<thead><tr>"
-        "<th>Rank</th><th>Method</th><th>Category</th>"
-        "<th>Fair Value</th><th>Upside%</th><th>MoS Price</th><th>Score</th>"
+        "<th>Rank{note}</th><th>Method</th><th>Category</th>"
+        "<th>Fair Value</th><th>Upside%</th><th>MoS Price</th>"
+        "{bt_header}"
+        "<th>Appl. Score</th>"
         "</tr></thead>"
         "<tbody>" + rows_html + "</tbody>"
         "</table>"
-    )
+    ).format(note=rank_note, bt_header=bt_header)
 
 
 def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict = None, reliability: dict = None, bt: dict = None, applicability_scores: dict = None, top_8: list = None, remainder: list = None) -> str:
@@ -4249,6 +4608,20 @@ function switchTab(n,b){{
 // Backtest chart line toggle
 // gid = the sanitised method id, e.g. "btline-dcf"
 // State is tracked on the card element via data-visible attribute.
+function btNoLine(methodName) {{
+  var msg = document.getElementById('bt-noline-msg');
+  if (!msg) {{
+    msg = document.createElement('div');
+    msg.id = 'bt-noline-msg';
+    msg.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1e2030;border:1px solid #333;border-radius:8px;padding:10px 20px;font-size:12px;color:#aaa;z-index:9999;pointer-events:none;transition:opacity .3s;';
+    document.body.appendChild(msg);
+  }}
+  msg.textContent = methodName + ': no historical chart line (uses current-period data only)';
+  msg.style.opacity = '1';
+  clearTimeout(msg._timer);
+  msg._timer = setTimeout(function(){{ msg.style.opacity = '0'; }}, 2500);
+}}
+
 function btToggleLine(gid) {{
   var line = document.getElementById(gid);
   var card = document.getElementById('card-' + gid);
@@ -4304,7 +4677,7 @@ function btToggleLine(gid) {{
             else "Weak signal — significant divergence exists. Treat any single estimate with caution."
         ),
         top8_count=len(top_8),
-        all_methods_table=_build_all_methods_table(top_8, remainder, applicability_scores, method_colors, d["price"]),
+        all_methods_table=_build_all_methods_table(top_8, remainder, applicability_scores, method_colors, d["price"], bt=bt),
         range_low=mo(conv["low"]),
         range_high=mo(conv["high"]),
         spread_pct=conv["spread_pct"],
@@ -4350,7 +4723,7 @@ function btToggleLine(gid) {{
         backtest_tab_panel=(
             '<div id="tab-backtest" class="tab-panel">'
             '<div class="container" style="padding-top:48px;">'
-            + _build_backtest_html(bt, d) +
+            + _build_backtest_html(bt, d, top_8=top_8, applicability_scores=applicability_scores) +
             '</div></div><!-- /tab-backtest -->'
         ) if bt is not None else (
             '<div id="tab-backtest" class="tab-panel">'
@@ -4388,13 +4761,12 @@ def main():
         )
     )
     parser.add_argument(
-        "--backtest", type=int, default=None, metavar="DAYS",
+        "--backtest", type=int, default=1000, metavar="DAYS",
         help=(
-            "Run a historical price backtest over the last N trading days.\n"
-            "Fetches daily prices from Yahoo Finance and measures how well\n"
-            "each valuation method's fair value tracked the actual stock price.\n"
-            "Adds a 'Backtesting' tab to the HTML report with a ranked verdict.\n"
-            "Example: python valuationMaster.py AAPL --backtest 90"
+            "Number of trading days to include in the historical backtest (default: 1000).\n"
+            "Set to 0 to skip the backtest entirely.\n"
+            "Example: python valuationMaster.py AAPL --backtest 252  (≈ 1 year)\n"
+            "Example: python valuationMaster.py AAPL --backtest 0    (skip backtest)"
         )
     )
     args   = parser.parse_args()
@@ -4443,6 +4815,7 @@ def main():
 
     print("[4/9] Running classic valuation models...")
     results = []
+    gr = {}
 
     if d["fcf"] and d["fcf"] > 0 and d["shares"]:
         r = run_dcf(d)
@@ -4522,10 +4895,11 @@ def main():
     else:
         print("  ROIC Excess Ret:  SKIPPED (no ROIC data)")
 
-    if ext.get("total_current_assets") and ext.get("total_liabilities") and d.get("shares"):
+    if ext.get("total_current_assets") is not None and ext.get("total_liabilities") is not None and d.get("shares"):
         r = run_ncav(d)
         if r:
             results.append(r)
+            gr["ncav"] = r   # store in gr for HTML access
             print("  NCAV:             " + mo(r["fair_value"]) + "  (" + r.get("graham_verdict","") + ")")
         else:
             print("  NCAV:             SKIPPED")
@@ -4536,6 +4910,7 @@ def main():
         r = run_mean_reversion(d)
         if r:
             results.append(r)
+            gr["mean_reversion"] = r   # also store in gr so Growth Deep-Dive tab can display it
             print("  Mean Reversion:   " + mo(r["fair_value"]) +
                   "  (" + str(r.get("n_components", 0)) + " components)")
         else:
@@ -4548,7 +4923,6 @@ def main():
         sys.exit(1)
 
     print("[5/9] Running growth analysis methods...")
-    gr = {}
     r = run_reverse_dcf(d)
     if r: gr["reverse_dcf"] = r;    print("  Reverse DCF:    implied " + format(r["implied_growth"]*100,".1f") + "% growth")
     else: print("  Reverse DCF:    SKIPPED (no positive FCF)")
@@ -4597,10 +4971,14 @@ def main():
 
     print("[8/9] Scoring applicability & ranking all models...")
     # Build unified list of all models that produced a fair value
+    # Deduplicate by method name (NCAV and Mean Reversion are stored in both results and gr)
     all_model_results = list(results)
+    _existing_methods = {r2["method"] for r2 in all_model_results}
     for gkey, gval in gr.items():
         if gval and isinstance(gval, dict) and gval.get("fair_value") is not None:
-            all_model_results.append(gval)
+            if gval.get("method") not in _existing_methods:
+                all_model_results.append(gval)
+                _existing_methods.add(gval["method"])
 
     reliability_flags = {m: f.get("flags", []) for m, f in reliability.items()}
     applicability_scores = {}
@@ -4613,9 +4991,10 @@ def main():
     remainder = sorted_models[8:]
 
     # Also collect models that returned None (for All Methods table)
+    # Note: Bayesian Ensemble is excluded here — it runs in step [9/9] and is handled there
     skipped_methods = []
     for mname in ["Three-Stage DCF","Monte Carlo DCF","FCF Yield","RIM","ROIC Excess Return",
-                   "NCAV","Mean Reversion","S-Curve TAM","PIE","DDM","Multi-Factor","Bayesian Ensemble"]:
+                   "NCAV","Mean Reversion","S-Curve TAM","PIE","DDM","Multi-Factor"]:
         if not any(r2.get("method") == mname for r2 in all_model_results):
             skipped_methods.append({"method": mname, "fair_value": None,
                                      "mos_value": None, "skip_reason": "Insufficient data"})
@@ -4636,6 +5015,8 @@ def main():
         print("  Bayesian Ensemble: $" + format(r["fair_value"],",.2f") + "  (n_models=" + str(r.get("n_models_used",0)) + ")")
     else:
         print("  Bayesian Ensemble: SKIPPED (fewer than 3 valid models)")
+        skipped_methods.append({"method": "Bayesian Ensemble", "fair_value": None,
+                                 "mos_value": None, "skip_reason": "Insufficient data"})
 
     conv = analyse_convergence([r2 for r2 in top_8 if r2.get("fair_value")], d["price"])
     print("  Conviction: " + conv["conviction"] + " (" + str(len(conv["converging"])) + "/" + str(len(top_8)) + " top methods converge)")
@@ -4643,8 +5024,8 @@ def main():
     print("  Verdict: " + conv["verdict"])
 
     bt = None
-    if args.backtest and args.backtest > 0:
-        backtest_days = min(args.backtest, 365 * 5)  # cap at 5 years
+    if args.backtest > 0:
+        backtest_days = min(args.backtest, 365 * 5)  # cap at 5 years (~1260 trading days)
         print("\n[Backtest] Running {}-day price backtest...".format(backtest_days))
         bt = run_backtest(d, results, gr, backtest_days, erg_peer_data)
         if "error" in bt:

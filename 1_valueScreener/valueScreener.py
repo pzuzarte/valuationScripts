@@ -590,17 +590,17 @@ def score_stock(d, bm_market, bm_sector):
     # ── P/FCF (sector median)
     if d["fcf_ps"] and d["fcf_ps"] > 0:
         fvs["P/FCF"] = (
-            d["fcf_ps"] * m["pf_t"]  +
+            d["fcf_ps"] * m["target_pfcf"]  +
             d["fcf_ps"] * sb["pfcf"] +
-            d["fcf_ps"] * m["pf_c"]
+            d["fcf_ps"] * m["conserv_pfcf"]
         ) / 3
 
     # ── P/E TTM (sector median)
     if d["eps"] and d["eps"] > 0:
         fvs["P/E"] = (
-            d["eps"] * m["pe_t"] +
+            d["eps"] * m["target_pe"] +
             d["eps"] * sb["pe"] +
-            d["eps"] * m["pe_c"]
+            d["eps"] * m["conserv_pe"]
         ) / 3
 
     # ── Forward P/E (analyst consensus next-FY EPS × sector median P/E)
@@ -609,18 +609,18 @@ def score_stock(d, bm_market, bm_sector):
     # pessimism that analysts don't share — a classic value signal.
     if d.get("eps_fwd_fy") and d["eps_fwd_fy"] > 0:
         fvs["Fwd P/E"] = (
-            d["eps_fwd_fy"] * m["pe_t"]  +
+            d["eps_fwd_fy"] * m["target_pe"]  +
             d["eps_fwd_fy"] * sb["pe"]   +
-            d["eps_fwd_fy"] * m["pe_c"]
+            d["eps_fwd_fy"] * m["conserv_pe"]
         ) / 3
 
     # ── EV/EBITDA (sector median)
     if d["ebitda"] and d["ebitda"] > 0 and d["shares"] and d["shares"] > 0:
         def ip(mult): return (d["ebitda"]*mult - d["debt"]) / d["shares"]
         mid = (
-            ip(m["ev_t"])       +
+            ip(m["target_eveb"])   +
             ip(sb["ev_ebitda"]) +
-            ip(m["ev_c"])
+            ip(m["conserv_eveb"])
         ) / 3
         if mid > 0: fvs["EV/EBITDA"] = mid
 
