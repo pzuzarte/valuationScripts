@@ -1070,6 +1070,41 @@ body { background: var(--bg); color: var(--tx); font-family: 'DM Sans', sans-ser
 .filters input::placeholder { color: var(--mu); }
 .filters input:focus, .filters select:focus { border-color: var(--bl); }
 
+/* ── COLUMN TOGGLE PANEL ── */
+.col-toggle {
+  padding: 0 72px; background: var(--bg);
+  border-bottom: 1px solid var(--bd); overflow: hidden;
+  transition: max-height .3s ease, padding .3s ease;
+}
+.col-toggle.collapsed { max-height: 0; padding-top: 0; padding-bottom: 0; border-bottom: none; }
+.col-toggle.expanded  { max-height: 500px; padding-top: 12px; padding-bottom: 14px; }
+.ct-hd {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 10px 72px; background: var(--bg); border-bottom: 1px solid var(--bd);
+  user-select: none;
+}
+.ct-hd:hover { background: var(--s2); }
+.ct-label { font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 3px;
+  text-transform: uppercase; color: var(--mu); }
+.ct-arrow { font-size: 10px; color: var(--mu); transition: transform .25s; margin-left: auto; }
+.ct-arrow.open { transform: rotate(180deg); }
+.ct-groups { display: flex; flex-wrap: wrap; gap: 20px; }
+.ct-group { min-width: 160px; }
+.ct-group-title { font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 2px;
+  text-transform: uppercase; color: var(--mu); margin-bottom: 8px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--bd); }
+.ct-cb { display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-family: 'DM Mono', monospace; font-size: 10px; color: var(--tx);
+  padding: 2px 0; user-select: none; }
+.ct-cb input[type=checkbox] { width: 12px; height: 12px; accent-color: var(--bl); cursor: pointer; }
+.ct-cb:hover { color: var(--bl); }
+.ct-actions { display: flex; gap: 8px; margin-bottom: 10px; }
+.ct-btn { font-family: 'DM Mono', monospace; font-size: 9px; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--mu); background: var(--s2);
+  border: 1px solid var(--bd); border-radius: 5px; padding: 4px 10px;
+  cursor: pointer; transition: color .15s, border-color .15s; }
+.ct-btn:hover { color: var(--tx); border-color: var(--bl); }
+
 /* ── MAIN ── */
 .main { padding: 0 72px 100px; }
 .tier { margin-top: 56px; }
@@ -1293,27 +1328,43 @@ document.querySelectorAll('th').forEach((th, i) => {
   });
 });
 
-let activeSector = '';
+const activeSectors = new Set();
 function setSector(sec, btn) {
-  activeSector = sec;
-  document.querySelectorAll('.sbtn').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+  if (sec === '') {
+    // "All Sectors" — clear selection
+    activeSectors.clear();
+  } else {
+    if (activeSectors.has(sec)) {
+      activeSectors.delete(sec);
+    } else {
+      activeSectors.add(sec);
+    }
+  }
+  // Sync button states
+  document.querySelectorAll('.sbtn:not(.all-btn)').forEach(b => {
+    b.classList.toggle('active', activeSectors.has(b.textContent.trim()));
+  });
+  const allBtn = document.querySelector('.sbtn.all-btn');
+  if (allBtn) allBtn.classList.toggle('active', activeSectors.size === 0);
   ft();
 }
 
 
 function ft() {
-  const tk = document.getElementById('fs').value.toUpperCase();
-  const sc = activeSector;
-  const ff = document.getElementById('ff').value;
-  const ms = parseFloat(document.getElementById('ms').value) || 0;
-  const ema = document.getElementById('ema').value;
-  const rsiF = document.getElementById('rsiF').value;
+  const tk     = document.getElementById('fs').value.toUpperCase();
+  const ff     = document.getElementById('ff').value;
+  const ms     = parseFloat(document.getElementById('ms').value) || 0;
+  const ema    = document.getElementById('ema').value;
+  const rsiF   = document.getElementById('rsiF').value;
+  const accumF = document.getElementById('accumF').value;
+  const mrgRaw = document.getElementById('mrg').value;
+  const mrg    = mrgRaw !== '' ? parseFloat(mrgRaw) : null;
   document.querySelectorAll('tr.sr').forEach(r => {
     const t   = r.querySelector('.tk')?.textContent || '';
     const s   = r.dataset.sector || '';
     const fl  = r.dataset.flags  || '';
     const gs  = parseFloat(r.dataset.score) || 0;
+    const sectorMatch = activeSectors.size === 0 || activeSectors.has(s);
     const flagMatch = ff === '' || (ff === 'clean' && fl === '') || (ff === 'flagged' && fl !== '');
     let emaMatch = true;
     if (ema) {
@@ -1331,8 +1382,15 @@ function ft() {
       else if (rsiF === 'ob70')    { rsiMatch = rv > 70; }
       else if (rsiF === 'ob80')    { rsiMatch = rv > 80; }
     }
+    const accumMatch = !accumF || (r.dataset.accum === accumF);
+    let revgMatch = true;
+    if (mrg !== null && !isNaN(mrg)) {
+      const rg = parseFloat(r.dataset.revgrowth);
+      revgMatch = !isNaN(rg) && rg >= mrg;
+    }
     r.classList.toggle('hidden',
-      (tk && !t.includes(tk)) || (sc && s !== sc) || !flagMatch || gs < ms || !emaMatch || !rsiMatch
+      (tk && !t.includes(tk)) || !sectorMatch || !flagMatch || gs < ms ||
+      !emaMatch || !rsiMatch || !accumMatch || !revgMatch
     );
   });
   document.querySelectorAll('.tier').forEach(tier => {
@@ -1350,6 +1408,36 @@ document.querySelectorAll('.tier').forEach((el, i) => {
   el.style.transition=`opacity .45s ease ${i*.06}s, transform .45s ease ${i*.06}s`;
   obs.observe(el);
 });
+
+// ── Column visibility toggle ──────────────────────────────────────────────────
+function toggleCol(n, checked) {
+  document.querySelectorAll('.sr-table').forEach(tbl => {
+    tbl.querySelectorAll('tr').forEach(row => {
+      const cell = row.children[n - 1];
+      if (cell) cell.style.display = checked ? '' : 'none';
+    });
+  });
+}
+function ctTogglePanel() {
+  const panel = document.getElementById('ct-panel');
+  const arrow = document.getElementById('ct-arrow');
+  const open  = panel.classList.contains('expanded');
+  panel.classList.toggle('expanded', !open);
+  panel.classList.toggle('collapsed', open);
+  arrow.classList.toggle('open', !open);
+}
+function ctShowAll() {
+  document.querySelectorAll('.ct-cb input[type=checkbox]').forEach(cb => {
+    cb.checked = true;
+    toggleCol(parseInt(cb.dataset.col), true);
+  });
+}
+function ctHideAll() {
+  document.querySelectorAll('.ct-cb input[type=checkbox]').forEach(cb => {
+    cb.checked = false;
+    toggleCol(parseInt(cb.dataset.col), false);
+  });
+}
 
 // Glossary panel
 function openGlossary() {
@@ -1607,10 +1695,13 @@ def build_html(results, ts, total, index_name="S&P 500"):
 
             # RSI value for filtering
             rsi_v = r.get("rsi")
-            rsi_data = f'{rsi_v:.1f}' if rsi_v is not None else ""
+            rsi_data   = f'{rsi_v:.1f}' if rsi_v is not None else ""
+            accum_data = (r.get("accumulation") or {}).get("label", "")
+            revg_v     = r.get("rev_growth")
+            revg_data  = f'{revg_v:.4f}' if revg_v is not None else ""
 
             rows += (
-                f'<tr class="sr" data-sector="{r["sector"]}" data-index="{r.get("index_label","")}" data-flags="{flag_data}" data-score="{gs}" data-ema13="{ema13_v}" data-ema50="{ema50_v}" data-ema200="{ema200_v}" data-rsi="{rsi_data}">'
+                f'<tr class="sr" data-sector="{r["sector"]}" data-index="{r.get("index_label","")}" data-flags="{flag_data}" data-score="{gs}" data-ema13="{ema13_v}" data-ema50="{ema50_v}" data-ema200="{ema200_v}" data-rsi="{rsi_data}" data-accum="{accum_data}" data-revgrowth="{revg_data}">'
                 f'<td><span class="gs {gs_cls}">{fsc(gs)}</span></td>'
                 f'<td><span class="tk">{r["ticker"]}</span></td>'
                 f'<td class="sec">{r["sector"]}</td>'
@@ -1663,7 +1754,7 @@ def build_html(results, ts, total, index_name="S&P 500"):
             f'<span class="tname" style="color:{color};">{tier_name}</span>'
             f'<span class="tcnt">{len(stocks)} stocks</span>'
             f'</div>'
-            f'<div class="tbl-wrap"><table>'
+            f'<div class="tbl-wrap"><table class="sr-table">'
             f'<thead><tr>'
             f'<th>Score</th><th>Ticker</th><th>Sector</th><th>Price</th>'
             f'<th>Bear Target</th><th>Base Target</th><th>Bull Target</th>'
@@ -1792,6 +1883,99 @@ def build_html(results, ts, total, index_name="S&P 500"):
     <option value="ob70">Overbought (RSI &gt; 70)</option>
     <option value="ob80">Extreme Overbought (RSI &gt; 80)</option>
   </select>
+  <select id="accumF" onchange="ft()" style="font-family:DM Mono,monospace;font-size:11px;">
+    <option value="">All (No Accum. Filter)</option>
+    <option value="Strong Accumulation">Strong Accumulation</option>
+    <option value="Accumulation">Accumulation</option>
+    <option value="Neutral">Neutral</option>
+    <option value="Distribution">Distribution</option>
+    <option value="Strong Distribution">Strong Distribution</option>
+  </select>
+  <label style="font-family:DM Mono,monospace;font-size:10px;color:var(--mu);display:flex;align-items:center;gap:6px;">
+    Min Rev Growth
+    <input id="mrg" type="number" placeholder="%" step="1" oninput="ft()" style="width:65px;">
+  </label>
+</div>
+
+<div class="ct-hd" onclick="ctTogglePanel()">
+  <span class="ct-label">Columns</span>
+  <span style="font-family:DM Mono,monospace;font-size:10px;color:var(--mu);">Show / hide individual columns</span>
+  <span class="ct-arrow" id="ct-arrow">▼</span>
+</div>
+<div class="col-toggle collapsed" id="ct-panel">
+  <div class="ct-actions">
+    <button class="ct-btn" onclick="ctShowAll()">Show All</button>
+    <button class="ct-btn" onclick="ctHideAll()">Hide All</button>
+  </div>
+  <div class="ct-groups">
+    <div class="ct-group">
+      <div class="ct-group-title">Identifiers &amp; Price</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="3" onchange="toggleCol(3,this.checked)"> Sector</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="4" onchange="toggleCol(4,this.checked)"> Price</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Targets &amp; Upside</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="5" onchange="toggleCol(5,this.checked)"> Bear Target</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="6" onchange="toggleCol(6,this.checked)"> Base Target</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="7" onchange="toggleCol(7,this.checked)"> Bull Target</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="8" onchange="toggleCol(8,this.checked)"> Upside %</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Valuation</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="9"  onchange="toggleCol(9,this.checked)"> Fwd PEG</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="10" onchange="toggleCol(10,this.checked)"> Fwd EPS</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="11" onchange="toggleCol(11,this.checked)"> EPS Src</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="29" onchange="toggleCol(29,this.checked)"> P/FCF</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="30" onchange="toggleCol(30,this.checked)"> EV/EBITDA</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Growth Rates</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="12" onchange="toggleCol(12,this.checked)"> Fwd EPS Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="13" onchange="toggleCol(13,this.checked)"> EPS Gth QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="14" onchange="toggleCol(14,this.checked)"> Rev Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="15" onchange="toggleCol(15,this.checked)"> Rev Gth QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="16" onchange="toggleCol(16,this.checked)"> Rev QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="17" onchange="toggleCol(17,this.checked)"> EPS QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="18" onchange="toggleCol(18,this.checked)"> GP Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="19" onchange="toggleCol(19,this.checked)"> NI Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="20" onchange="toggleCol(20,this.checked)"> FCF Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="21" onchange="toggleCol(21,this.checked)"> EBITDA Gth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="22" onchange="toggleCol(22,this.checked)"> R&amp;D %</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Quality Metrics</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="23" onchange="toggleCol(23,this.checked)"> Gross Margin</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="24" onchange="toggleCol(24,this.checked)"> Op Margin</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="25" onchange="toggleCol(25,this.checked)"> ROE</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="26" onchange="toggleCol(26,this.checked)"> ROIC</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="27" onchange="toggleCol(27,this.checked)"> ROA</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="28" onchange="toggleCol(28,this.checked)"> Curr Ratio</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Technical</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="31" onchange="toggleCol(31,this.checked)"> Earnings In</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="32" onchange="toggleCol(32,this.checked)"> Perf 1M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="33" onchange="toggleCol(33,this.checked)"> Perf 3M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="34" onchange="toggleCol(34,this.checked)"> Perf 6M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="35" onchange="toggleCol(35,this.checked)"> Momentum</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="36" onchange="toggleCol(36,this.checked)"> TV Signal</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Signal</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="37" onchange="toggleCol(37,this.checked)"> Sentiment</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="38" onchange="toggleCol(38,this.checked)"> Sent. Score</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="39" onchange="toggleCol(39,this.checked)"> Accumulation</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="40" onchange="toggleCol(40,this.checked)"> Accum. Score</label>
+    </div>
+    <div class="ct-group">
+      <div class="ct-group-title">Other</div>
+      <label class="ct-cb"><input type="checkbox" checked data-col="41" onchange="toggleCol(41,this.checked)"> Closely Held %</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="42" onchange="toggleCol(42,this.checked)"> Analyst Target</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="43" onchange="toggleCol(43,this.checked)"> Analyst Upside</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="44" onchange="toggleCol(44,this.checked)"> Mkt Cap</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="45" onchange="toggleCol(45,this.checked)"> Flags</label>
+    </div>
+  </div>
 </div>
 
 <main class="main">{sections_html}</main>

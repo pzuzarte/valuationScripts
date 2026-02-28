@@ -42,6 +42,10 @@ Optional flags
 --------------
   --wacc   RATE   Override WACC, e.g. 0.09 for 9%
   --growth RATE   Override estimated growth, e.g. 0.15 for 15%
+  --plot          Generate a price-history chart with the model fair value
+                  overlaid as a horizontal reference line (requires matplotlib)
+  --days   N      Number of trading days of history to show in the plot
+                  (default: 1000 ≈ 4 years)
 
 Examples
 --------
@@ -49,9 +53,12 @@ Examples
   python run_model.py AAPL all
   python run_model.py MSFT monte-carlo --wacc 0.09
   python run_model.py GOOG peg --growth 0.18
+  python run_model.py NVDA dcf --plot
+  python run_model.py AAPL all --plot --days 500
 """
 
-import sys, os, argparse, math
+import sys, os, argparse, math, csv, io, datetime
+import urllib.request, urllib.parse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ── Library imports ───────────────────────────────────────────────────────────
@@ -755,6 +762,614 @@ def run_one(model_key, d, benchmarks):
     return None
 
 
+# ── Backtest helpers (ported from valuationMaster.py) ─────────────────────────
+
+_REQ_HEADERS = {
+    "User-Agent": "ValuationScript/1.0 research@example.com",
+    "Accept":     "*/*",
+}
+
+def _http_get(url: str, timeout: int = 20) -> bytes:
+    try:
+        req = urllib.request.Request(url, headers=_REQ_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except Exception:
+        return b""
+
+def _edgar_cik(ticker: str) -> str:
+    raw = _http_get("https://www.sec.gov/files/company_tickers.json", timeout=15)
+    if raw:
+        try:
+            for entry in __import__("json").loads(raw).values():
+                if entry.get("ticker", "").upper() == ticker.upper():
+                    return str(entry["cik_str"]).zfill(10)
+        except Exception:
+            pass
+    return ""
+
+def _edgar_xbrl_facts(cik: str) -> dict:
+    raw = _http_get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json", timeout=30)
+    if not raw:
+        return {}
+    try:
+        return __import__("json").loads(raw).get("facts", {})
+    except Exception:
+        return {}
+
+def _xbrl_annual_series(facts: dict, *concepts) -> list:
+    for concept in concepts:
+        for ns in ("us-gaap", "dei"):
+            try:
+                units    = facts[ns][concept]["units"]
+                unit_key = "USD" if "USD" in units else list(units.keys())[0]
+                annual   = {}
+                for e in units[unit_key]:
+                    if e.get("form") not in ("10-K", "10-K/A"):
+                        continue
+                    end, val = e.get("end", ""), e.get("val")
+                    if end and val is not None:
+                        ex = annual.get(end)
+                        if ex is None or e.get("filed", "") > ex.get("filed", ""):
+                            annual[end] = {"date": end, "value": float(val),
+                                           "filed": e.get("filed", "")}
+                if annual:
+                    return sorted(annual.values(), key=lambda x: x["date"])
+            except (KeyError, TypeError, IndexError):
+                continue
+    return []
+
+def _fetch_prices(ticker: str, days: int) -> list:
+    """Fetch daily closes via Stooq. Returns [{date, close}, ...] oldest-first."""
+    end_dt   = datetime.date.today()
+    start_dt = end_dt - datetime.timedelta(days=int(days * 1.6) + 60)
+    df, dt   = start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d")
+    t        = ticker.lower()
+    for sym in list(dict.fromkeys([t+".us", t+".ca", t+".uk", t+".de", t])):
+        url = f"https://stooq.com/q/d/l/?s={sym}&d1={df}&d2={dt}&i=d"
+        raw = _http_get(url)
+        if not raw or b"No data" in raw or len(raw) < 50:
+            continue
+        try:
+            rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8", errors="replace"))))
+            pts  = [{"date": (r.get("Date") or r.get("date","")).strip(),
+                     "close": float(r.get("Close") or r.get("close") or 0)}
+                    for r in rows if float(r.get("Close") or r.get("close") or 0) > 0]
+            if len(pts) < 10:
+                continue
+            pts.sort(key=lambda x: x["date"])
+            print(f"  [Stooq] {len(pts)} price points for '{sym}'")
+            return pts[-days:]
+        except Exception:
+            continue
+    print(f"  [Stooq] All variants failed for '{ticker}'")
+    return []
+
+def _fetch_fundamentals(ticker: str) -> list:
+    """Fetch annual 10-K snapshots from SEC EDGAR XBRL. Returns list oldest-first."""
+    print(f"  [EDGAR] Looking up CIK for {ticker}…", end=" ", flush=True)
+    cik = _edgar_cik(ticker)
+    if not cik:
+        print("not found"); return []
+    print(f"CIK {cik}. Fetching XBRL…", end=" ", flush=True)
+    facts = _edgar_xbrl_facts(cik)
+    if not facts:
+        print("no data"); return []
+
+    rev_s  = _xbrl_annual_series(facts, "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet", "SalesRevenueGoodsNet")
+    ni_s   = _xbrl_annual_series(facts, "NetIncomeLoss", "NetIncome", "ProfitLoss")
+    opcf_s = _xbrl_annual_series(facts,
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations")
+    capx_s = _xbrl_annual_series(facts,
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsForCapitalImprovements")
+    debt_s = _xbrl_annual_series(facts,
+        "LongTermDebtNoncurrent", "LongTermDebt",
+        "LongTermDebtAndCapitalLeaseObligations")
+    gp_s   = _xbrl_annual_series(facts, "GrossProfit")
+    eb_s   = _xbrl_annual_series(facts,
+        "OperatingIncomeLoss", "IncomeLossFromContinuingOperationsBeforeIncomeTaxes")
+
+    def _d(s): return {e["date"]: e["value"] for e in s}
+    rev_d, ni_d, opcf_d = _d(rev_s), _d(ni_s), _d(opcf_s)
+    capx_d, debt_d      = _d(capx_s), _d(debt_s)
+    gp_d, eb_d          = _d(gp_s), _d(eb_s)
+
+    all_dates = sorted(set(list(rev_d) + list(ni_d) + list(opcf_d)))
+    if not all_dates:
+        print("no series"); return []
+
+    snaps = []
+    for date in all_dates:
+        rev, ni    = rev_d.get(date), ni_d.get(date)
+        opcf, capx = opcf_d.get(date), capx_d.get(date)
+        debt, gp   = debt_d.get(date), gp_d.get(date)
+        ebit       = eb_d.get(date)
+        fcf        = (opcf - capx) if (opcf and capx) else (opcf * 0.85 if opcf else None)
+        gm         = (gp / rev * 100)   if (gp   and rev and rev > 0) else None
+        op_mar     = (ebit / rev * 100) if (ebit and rev and rev > 0) else None
+        snaps.append({"date": date, "revenue": rev, "net_income": ni, "fcf": fcf,
+                      "total_debt": debt, "gross_margin": gm, "op_margin": op_mar})
+
+    print(f"{len(snaps)} snapshots ({snaps[0]['date']} → {snaps[-1]['date']})")
+    return snaps
+
+def _pick_snapshot(snaps: list, target: str) -> dict:
+    """Return most recent snapshot whose 10-K was publicly available by `target` date
+    (75-day filing lag after fiscal year end)."""
+    best = None
+    for s in snaps:
+        try:
+            avail = (datetime.datetime.strptime(s["date"], "%Y-%m-%d")
+                     + datetime.timedelta(days=75)).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+        if avail <= target:
+            best = s
+    return best
+
+def _rebuild_snapshot(d_cur: dict, snap: dict, hist_price: float, bm: dict) -> dict:
+    """Overlay historical snapshot financials onto a copy of the current d-dict."""
+    d = dict(d_cur)
+    shares = d_cur["shares"]
+
+    def _or(a, b):
+        return a if (a is not None and a == a) else b
+
+    rev    = _or(snap.get("revenue"),    d_cur["revenue"])
+    ni     = _or(snap.get("net_income"), d_cur["net_income"])
+    fcf    = _or(snap.get("fcf"),        d_cur["fcf"])
+    debt   = _or(snap.get("total_debt"), d_cur["total_debt"])
+    gm     = _or(snap.get("gross_margin"), d_cur["gross_margin"])
+    op_mar = _or(snap.get("op_margin"),  d_cur["op_margin"])
+
+    eps    = (ni  / shares) if (ni  and shares and shares > 0) else d_cur["eps"]
+    fcf_ps = (fcf / shares) if (fcf and shares and shares > 0) else d_cur["fcf_per_share"]
+    fcf_mr = (fcf / rev)    if (fcf and rev    and rev    > 0) else d_cur["fcf_margin"]
+
+    ebitda = None
+    if rev and op_mar:   ebitda = rev * (op_mar / 100) + rev * 0.05
+    elif ni:             ebitda = ni * 1.35
+
+    if   fcf_mr and fcf_mr > 0.40: growth = 0.15
+    elif fcf_mr and fcf_mr > 0.20: growth = 0.12
+    elif fcf_mr and fcf_mr > 0.10: growth = 0.09
+    else:                           growth = 0.06
+
+    mktcap    = hist_price * shares if shares else d_cur["market_cap"]
+    ev_approx = mktcap + debt
+
+    d.update({
+        "price": hist_price, "market_cap": mktcap, "revenue": rev, "net_income": ni,
+        "fcf": fcf, "fcf_per_share": fcf_ps, "fcf_margin": fcf_mr,
+        "total_debt": debt, "cash": d_cur["cash"],
+        "ebitda": ebitda, "gross_margin": gm, "op_margin": op_mar,
+        "eps": eps, "shares": shares, "est_growth": growth,
+        "growth_source": "FCF-margin proxy (historical)", "ev_approx": ev_approx,
+        "peg": ((hist_price / eps) / (growth * 100)) if (eps and eps > 0) else None,
+        "current_pe": (hist_price / eps) if (eps and eps > 0) else None,
+        "current_pfcf": (mktcap / fcf) if (fcf and fcf > 0) else None,
+        "fwd_eps": None, "fwd_rev": None,
+        "rev_growth_pct": None, "eps_growth_pct": None,
+        "wacc_override": d_cur.get("wacc_override"),
+        "wacc_raw":      d_cur.get("wacc_raw", {}),
+    })
+    return d
+
+# model-key → canonical method name used in _run_methods_for_snapshot result dict
+_KEY_TO_METHOD = {
+    "dcf":            "DCF",            "three-stage-dcf": "Three-Stage DCF",
+    "monte-carlo":    "Monte Carlo DCF","pfcf":            "P/FCF",
+    "pe":             "P/E",            "ev-ebitda":       "EV/EBITDA",
+    "fcf-yield":      "FCF Yield",      "rim":             "RIM",
+    "roic":           "ROIC Excess Return", "ncav":        "NCAV",
+    "reverse-dcf":    "Reverse DCF",    "peg":             "Fwd PEG",
+    "ev-ntm":         "EV/NTM Rev",     "tam":             "TAM Scenario",
+    "rule40":         "Rule of 40",     "erg":             "ERG",
+    "scurve":         "S-Curve TAM",    "pie":             "PIE",
+    "ddm":            "DDM",            "graham":          "Graham Number",
+    "multifactor":    "Multi-Factor",
+}
+
+def _run_one_snap(model_key: str, d_h: dict, bm: dict) -> float:
+    """Run a single model on a historical d-dict. Returns fair_value or None."""
+    try:
+        if model_key == "dcf":
+            if d_h.get("fcf") and d_h["fcf"] > 0 and d_h.get("shares"):
+                r = run_dcf(d_h); return r["fair_value"] if r else None
+        elif model_key == "three-stage-dcf":
+            if d_h.get("fcf") and d_h["fcf"] > 0 and d_h.get("shares"):
+                r = run_three_stage_dcf(d_h); return r["fair_value"] if r else None
+        elif model_key == "monte-carlo":
+            if d_h.get("fcf") and d_h["fcf"] > 0 and d_h.get("shares"):
+                r = run_monte_carlo_dcf(d_h, n_sims=500); return r["fair_value"] if r else None
+        elif model_key == "pfcf":
+            if d_h.get("fcf_per_share") and d_h["fcf_per_share"] > 0:
+                r = run_pfcf(d_h, bm); return r["fair_value"] if r else None
+        elif model_key == "pe":
+            if d_h.get("eps") and d_h["eps"] > 0:
+                r = run_pe(d_h, bm); return r["fair_value"] if r else None
+        elif model_key == "ev-ebitda":
+            if d_h.get("ebitda") and d_h["ebitda"] > 0 and d_h.get("shares"):
+                r = run_ev_ebitda(d_h, bm); return r["fair_value"] if r else None
+        elif model_key == "fcf-yield":
+            if d_h.get("fcf_per_share") and d_h["fcf_per_share"] > 0:
+                r = run_fcf_yield(d_h); return r["fair_value"] if r else None
+        elif model_key == "rim":
+            ext = d_h.get("ext") or {}
+            if ext.get("book_value_ps") and d_h.get("eps") and d_h["eps"] > 0:
+                r = run_rim(d_h); return r["fair_value"] if r else None
+        elif model_key == "roic":
+            ext = d_h.get("ext") or {}
+            if ext.get("roic") and ext.get("stockholders_equity"):
+                r = run_roic_excess_return(d_h); return r["fair_value"] if r else None
+        elif model_key == "ncav":
+            ext = d_h.get("ext") or {}
+            if ext.get("total_current_assets") is not None and ext.get("total_liabilities") is not None:
+                r = run_ncav(d_h); return r["fair_value"] if r else None
+        elif model_key == "reverse-dcf":
+            r = run_reverse_dcf(d_h)
+            if r:
+                for s in r.get("scenarios", []):
+                    if s.get("label") == "Street" and s.get("fv", 0) > 0:
+                        return s["fv"]
+        elif model_key == "peg":
+            r = run_forward_peg(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "ev-ntm":
+            r = run_ev_ntm_revenue(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "tam":
+            r = run_tam_scenario(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "rule40":
+            r = run_rule_of_40(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "erg":
+            mult = calibrate_erg_multiple(sector=d_h.get("sector"))
+            r = run_erg_valuation(d_h, mult); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "scurve":
+            r = run_scurve_tam(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "pie":
+            r = run_pie(d_h); return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "ddm":
+            ext = d_h.get("ext") or {}
+            if ext.get("dividends_per_share") and ext["dividends_per_share"] > 0:
+                r = run_ddm_hmodel(d_h); return r["fair_value"] if r else None
+        elif model_key == "graham":
+            fv = run_graham_number(d_h); return fv if (fv and fv > 0) else None
+        elif model_key == "multifactor":
+            r = run_multifactor_price_target(d_h, bm)
+            return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "mean-reversion":
+            r = run_mean_reversion(d_h)
+            return r["fair_value"] if (r and r.get("fair_value", 0) > 0) else None
+        elif model_key == "bayesian":
+            # For historical snapshots: run all models, return score-weighted mean
+            # (mirrors the full Bayesian ensemble without requiring live applicability data)
+            _snap_fvs = _run_all_snap(d_h, bm)
+            _valid = [v for v in _snap_fvs.values() if v and v > 0]
+            # Trim outliers: discard values beyond 3× median to avoid TAM/ERG distortion
+            if len(_valid) >= 3:
+                _med = sorted(_valid)[len(_valid) // 2]
+                _valid = [v for v in _valid if v <= _med * 3.0]
+            return (sum(_valid) / len(_valid)) if len(_valid) >= 3 else None
+    except Exception:
+        pass
+    return None
+
+def _run_all_snap(d_h: dict, bm: dict) -> dict:
+    """Run all applicable models on a historical snapshot.
+    Returns {method_name: fair_value} using the same keys as _KEY_TO_METHOD values."""
+    results = {}
+    for key in [k for k in ALL_MODELS if k not in ("bayesian",)]:
+        fv = _run_one_snap(key, d_h, bm)
+        if fv and fv > 0:
+            results[_KEY_TO_METHOD.get(key, key.upper())] = fv
+    return results
+
+
+# ── Backtest + plot ────────────────────────────────────────────────────────────
+def plot_backtest(ticker: str, d: dict, benchmarks: dict,
+                  model_key: str, days: int, label: str):
+    """
+    True rolling backtest: re-run the model at each annual fundamental snapshot
+    over the past `days` trading days, producing an evolving fair-value curve.
+    Plots the result with a polished dark-theme chart.
+    """
+    try:
+        import matplotlib
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        import matplotlib.ticker as mticker
+        import matplotlib.patches as mpatches
+    except ImportError:
+        print("\n  ERROR: matplotlib is not installed.  pip install matplotlib")
+        return
+
+    # ── 1. Fetch price history ────────────────────────────────────────────────
+    print(f"\n[Plot] Fetching {days}-day price history…")
+    prices = _fetch_prices(ticker, days)
+    if not prices:
+        print("  Cannot build plot — no price history available.")
+        return
+
+    # ── 2. Fetch annual fundamental snapshots ────────────────────────────────
+    print("[Plot] Fetching fundamental snapshots from SEC EDGAR…")
+    snaps = _fetch_fundamentals(ticker)
+    if not snaps:
+        print("  No EDGAR data — plotting price history only (no fair-value curve).")
+
+    # ── 3. Build time series ──────────────────────────────────────────────────
+    # Cache computed fair values by snapshot date so each snap is only run once.
+    snap_cache: dict = {}
+    is_all = (model_key == "all")
+
+    time_series = []          # [{date, price, fv or fvs}]
+    snap_change_dates = []    # dates where the active snapshot switches (for vertical markers)
+    prev_snap_date = None
+
+    for pt in prices:
+        date_str  = pt["date"]
+        hist_price = pt["close"]
+        snap = _pick_snapshot(snaps, date_str) if snaps else None
+
+        snap_date = snap["date"] if snap else None
+        if snap_date != prev_snap_date:
+            if prev_snap_date is not None:
+                snap_change_dates.append(date_str)
+            prev_snap_date = snap_date
+
+        if snap and snap_date not in snap_cache:
+            d_h = _rebuild_snapshot(d, snap, hist_price, benchmarks)
+            if is_all:
+                snap_cache[snap_date] = _run_all_snap(d_h, benchmarks)
+            else:
+                fv = _run_one_snap(model_key, d_h, benchmarks)
+                snap_cache[snap_date] = fv
+        elif snap is None:
+            snap_cache[None] = None
+
+        cached = snap_cache.get(snap_date)
+        time_series.append({
+            "date":  datetime.datetime.strptime(date_str, "%Y-%m-%d"),
+            "price": hist_price,
+            "fv":    cached,     # float (single) or dict (all) or None
+        })
+
+    if not time_series:
+        print("  No time-series data to plot.")
+        return
+
+    dates_dt = [p["date"] for p in time_series]
+    closes   = [p["price"] for p in time_series]
+
+    # ── 4. Compute MAPE / accuracy per model ──────────────────────────────────
+    def _mape_stats(fv_series, price_series):
+        errs = [abs(fv - pr) / pr * 100
+                for fv, pr in zip(fv_series, price_series)
+                if fv and fv > 0 and pr > 0]
+        if not errs:
+            return None, None
+        mape = sum(errs) / len(errs)
+        return round(mape, 1), round(100 - mape, 1)
+
+    if is_all:
+        # Collect all method names that have at least one data point
+        all_methods = sorted({m for pt in time_series
+                               if isinstance(pt["fv"], dict)
+                               for m in pt["fv"]})
+        method_fvs = {
+            m: [pt["fv"].get(m) if isinstance(pt["fv"], dict) else None
+                for pt in time_series]
+            for m in all_methods
+        }
+        method_stats_map = {
+            m: _mape_stats(method_fvs[m], closes) for m in all_methods
+        }
+    else:
+        fv_series = [pt["fv"] for pt in time_series]
+        mape, acc = _mape_stats(fv_series, closes)
+
+    # ── 5. Forward projection (1 year of business days beyond last price) ────────
+    _last_dt = dates_dt[-1]
+    future_dates: list = []
+    _fd = _last_dt
+    for _ in range(252):
+        _fd += datetime.timedelta(days=1)
+        while _fd.weekday() >= 5:        # skip Saturday / Sunday
+            _fd += datetime.timedelta(days=1)
+        future_dates.append(_fd)
+
+    # Run model(s) on the live d-dict for the forward projection extension
+    if is_all:
+        _current_fvs: dict = {}
+        for _key in [k for k in ALL_MODELS if k not in ("bayesian",)]:
+            _fv = _run_one_snap(_key, d, benchmarks)
+            if _fv and _fv > 0:
+                _current_fvs[_KEY_TO_METHOD.get(_key, _key.upper())] = _fv
+    else:
+        _current_fv_proj = _run_one_snap(model_key, d, benchmarks)
+
+    # ── 6. Plot ───────────────────────────────────────────────────────────────
+    BG           = "#0e1117"
+    PRICE_CLR    = "#ffffff"
+    PRED_CLR     = "#4f8ef7"
+    MODEL_COLORS = [
+        "#00c896", "#bf6ff0", "#f472b6", "#34d399", "#fb923c",
+        "#facc15", "#38bdf8", "#ff6b9d", "#27ae60", "#f59e0b",
+        "#e87c3e", "#a855f7", "#10b981", "#94a3b8", "#e05c5c",
+    ]
+
+    plt.style.use("dark_background")
+    fig, ax = plt.subplots(figsize=(15, 6.5))
+    fig.patch.set_facecolor(BG)
+    ax.set_facecolor(BG)
+
+    # ── Prediction zone shading (right of today) ──────────────────────────────
+    if future_dates:
+        ax.axvspan(_last_dt, future_dates[-1],
+                   alpha=0.045, color=PRED_CLR, zorder=0, label="_nolegend_")
+        ax.axvline(_last_dt, color="#555577", linewidth=0.9,
+                   linestyle="--", alpha=0.55, zorder=7, label="_nolegend_")
+        _mid_future = future_dates[len(future_dates) // 2]
+        ax.text(_mid_future, 0.985, "PROJECTION",
+                transform=ax.get_xaxis_transform(),
+                color="#555577", fontsize=8, va="top", ha="center",
+                fontfamily="monospace")
+
+    # ── Price line ────────────────────────────────────────────────────────────
+    ax.plot(dates_dt, closes, color=PRICE_CLR, linewidth=2.2,
+            label=f"{ticker}  (price)", zorder=5)
+    ax.fill_between(dates_dt, closes, alpha=0.05, color=PRICE_CLR, zorder=2)
+
+    if is_all:
+        # ── ALL mode: solid historical line + dashed projection per model ────
+        for ci, method in enumerate(all_methods):
+            col = MODEL_COLORS[ci % len(MODEL_COLORS)]
+            fvs = method_fvs[method]
+            # Draw contiguous solid segments (historical data only)
+            seg_x, seg_y = [], []
+            for dt, fv in zip(dates_dt, fvs):
+                if fv and fv > 0:
+                    seg_x.append(dt); seg_y.append(fv)
+                else:
+                    if seg_x:
+                        ax.plot(seg_x, seg_y, color=col, linewidth=1.4,
+                                linestyle="-", alpha=0.78, zorder=4)
+                        seg_x, seg_y = [], []
+            if seg_x:
+                mape_m, acc_m = method_stats_map[method]
+                lbl = (f"{method}  ${seg_y[-1]:,.0f}"
+                       + (f"  |  MAPE {mape_m:.0f}%" if mape_m else ""))
+                ax.plot(seg_x, seg_y, color=col, linewidth=1.4,
+                        linestyle="-", alpha=0.78, zorder=4, label=lbl)
+                # Dashed extension into projection zone
+                _fv_p = _current_fvs.get(method)
+                if future_dates and _fv_p and _fv_p > 0:
+                    ax.plot([_last_dt] + future_dates,
+                            [_fv_p] * (1 + len(future_dates)),
+                            color=col, linewidth=0.9, linestyle="--",
+                            alpha=0.40, zorder=4)
+    else:
+        # ── Single model: green/red fill + solid historical + dashed projection
+        fv_clean   = [fv if (fv and fv > 0) else None for fv in fv_series]
+        valid_mask = [fv is not None for fv in fv_clean]
+        fv_fill    = [fv if fv is not None else 0.0 for fv in fv_clean]
+
+        # Green fill where FV > price (undervalued zone)
+        ax.fill_between(dates_dt, fv_fill, closes,
+                        where=[m and fv >= pr
+                               for m, fv, pr in zip(valid_mask, fv_fill, closes)],
+                        alpha=0.12, color="#00c896", zorder=2, interpolate=True,
+                        label="_nolegend_")
+        # Red fill where FV < price (overvalued zone)
+        ax.fill_between(dates_dt, fv_fill, closes,
+                        where=[m and fv < pr
+                               for m, fv, pr in zip(valid_mask, fv_fill, closes)],
+                        alpha=0.09, color="#e05c5c", zorder=2, interpolate=True,
+                        label="_nolegend_")
+
+        # Solid historical fair-value line (steps at each new 10-K snapshot)
+        seg_x, seg_y = [], []
+        for dt, fv in zip(dates_dt, fv_clean):
+            if fv is not None:
+                seg_x.append(dt); seg_y.append(fv)
+            elif seg_x:
+                ax.plot(seg_x, seg_y, color=MODEL_COLORS[0], linewidth=2.0,
+                        linestyle="-", alpha=0.90, zorder=6)
+                seg_x, seg_y = [], []
+        if seg_x:
+            lbl = f"{label}  ${seg_y[-1]:,.2f}"
+            if mape:
+                lbl += f"  |  MAPE {mape:.0f}%  acc {acc:.0f}/100"
+            ax.plot(seg_x, seg_y, color=MODEL_COLORS[0], linewidth=2.0,
+                    linestyle="-", alpha=0.90, zorder=6, label=lbl)
+
+        # Dashed projection extension (current model on live data)
+        if future_dates and _current_fv_proj and _current_fv_proj > 0:
+            ax.plot([_last_dt] + future_dates,
+                    [_current_fv_proj] * (1 + len(future_dates)),
+                    color=MODEL_COLORS[0], linewidth=1.6, linestyle="--",
+                    alpha=0.55, zorder=6,
+                    label=f"projection  ${_current_fv_proj:,.2f}")
+
+    # ── Snapshot-change vertical markers ─────────────────────────────────────
+    first_marker = True
+    for sc_date in snap_change_dates:
+        try:
+            sc_dt = datetime.datetime.strptime(sc_date, "%Y-%m-%d")
+            kw = {"label": "New 10-K filing"} if first_marker else {"label": "_nolegend_"}
+            ax.axvline(sc_dt, color="#ffffff", linewidth=0.6, linestyle=":",
+                       alpha=0.18, zorder=3, **kw)
+            first_marker = False
+        except ValueError:
+            pass
+
+    # ── Stats annotation (single model only) ─────────────────────────────────
+    if not is_all and mape is not None:
+        acc_color = "#00c896" if acc >= 75 else "#f0a500" if acc >= 50 else "#e05c5c"
+        stats_txt = f"MAPE: {mape:.1f}%\nAccuracy: {acc:.0f}/100"
+        ax.text(0.985, 0.97, stats_txt,
+                transform=ax.transAxes, ha="right", va="top",
+                fontsize=9, fontfamily="monospace", color=acc_color,
+                bbox=dict(boxstyle="round,pad=0.5", facecolor="#0e1117",
+                          edgecolor="#2a2d3e", alpha=0.85))
+
+    # ── Axes & grid ───────────────────────────────────────────────────────────
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, _: f"${x:,.0f}")
+    )
+    tick_interval = max(1, days // 250)
+    ax.xaxis.set_major_locator(mdates.MonthLocator(interval=tick_interval))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b '%y"))
+    plt.xticks(rotation=30, ha="right", fontsize=8, color="#888888")
+    plt.yticks(fontsize=8, color="#888888")
+
+    for spine in ax.spines.values():
+        spine.set_color("#2a2d3e")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="#1a1c2c", linewidth=0.7, zorder=1)
+    ax.grid(axis="x", color="#161828", linewidth=0.5, zorder=1)
+    ax.set_xlim(dates_dt[0], future_dates[-1] if future_dates else dates_dt[-1])
+
+    # ── Title ─────────────────────────────────────────────────────────────────
+    n_snaps = len(snap_cache) - (1 if None in snap_cache else 0)
+    ax.set_title(
+        f"{ticker}  ·  {label}  ·  {len(prices)}-day backtest  "
+        f"({n_snaps} annual snapshot{'s' if n_snaps != 1 else ''})",
+        color="#cccccc", fontsize=12, pad=14, loc="left",
+        fontfamily="monospace",
+    )
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    n_legend_items = len(ax.get_legend_handles_labels()[1])
+    leg_cols = 2 if n_legend_items > 8 else 1
+    ax.legend(
+        loc="upper left", fontsize=8, framealpha=0.25, ncol=leg_cols,
+        facecolor=BG, edgecolor="#2a2d3e", labelcolor="#cccccc",
+        handlelength=2.2,
+    )
+
+    plt.tight_layout(pad=1.5)
+
+    # ── Save → open in default viewer (non-blocking) ──────────────────────────
+    safe_label = label.lower().replace(" ", "_").replace("/", "_")
+    fname = f"{ticker}_{safe_label}_{len(prices)}d_backtest.png"
+    plots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    fpath = os.path.join(plots_dir, fname)
+    plt.savefig(fpath, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"  Plot saved → {fpath}")
+    try:
+        import webbrowser
+        webbrowser.open(f"file://{fpath}")
+    except Exception:
+        pass
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     p = argparse.ArgumentParser(
@@ -766,6 +1381,9 @@ def main():
     p.add_argument("model",  help="Model name or alias (e.g. dcf, peg, all)")
     p.add_argument("--wacc",   type=float, default=None, help="Override WACC (e.g. 0.09 for 9%%)")
     p.add_argument("--growth", type=float, default=None, help="Override growth rate (e.g. 0.15 for 15%%)")
+    p.add_argument("--plot",   action="store_true",      help="Plot historical price with fair-value overlay")
+    p.add_argument("--days",   type=int,   default=1000, metavar="N",
+                   help="Number of trading days of price history to show in the plot (default: 1000)")
     args = p.parse_args()
 
     model_input = args.model.lower().strip()
@@ -828,10 +1446,17 @@ def main():
                 sign = "+" if pct >= 0 else ""
                 print(f"  {r['method']:<26} {_mo(fv):>10}  {sign}{pct:>6.1f}%  {_mo(mos):>10}")
             print(f"{'═'*W}")
+
+        if args.plot:
+            plot_backtest(ticker, d, benchmarks, "all", args.days, "All Models")
+
     else:
         label = model_key.upper().replace("-", " ")
         _header(ticker, label, price)
-        run_one(model_key, d, benchmarks)
+        result = run_one(model_key, d, benchmarks)
+
+        if args.plot:
+            plot_backtest(ticker, d, benchmarks, model_key, args.days, label)
 
     print()
 

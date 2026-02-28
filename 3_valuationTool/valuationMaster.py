@@ -862,11 +862,14 @@ def fetch_yfinance_extended(ticker: str) -> dict:
         except Exception:
             pass
 
-        # ── Historical multiples — only if wall-clock < 12s ───────────
+        # ── Historical multiples ───────────────────────────────────────
+        # Use a fresh timer budgeted per-operation (not the global wall_start)
+        # so earlier fetches (info, balance sheet, income_stmt, dividends)
+        # don't consume the time budget for history.
         try:
-            if _time.time() - wall_start < 12.0:
-                hist_prices = tk.history(period="5y")
-                if hist_prices is not None and len(hist_prices) > 50:
+            _hist_t0 = _time.time()
+            hist_prices = tk.history(period="5y")
+            if hist_prices is not None and len(hist_prices) > 50 and _time.time() - _hist_t0 < 20.0:
                     inc5  = tk.income_stmt
                     cf5   = tk.cash_flow
                     bs5   = tk.balance_sheet
@@ -4895,6 +4898,7 @@ def main():
     else:
         print("  ROIC Excess Ret:  SKIPPED (no ROIC data)")
 
+    _ncav_skip_reason = "Insufficient data"
     if ext.get("total_current_assets") is not None and ext.get("total_liabilities") is not None and d.get("shares"):
         r = run_ncav(d)
         if r:
@@ -4902,7 +4906,13 @@ def main():
             gr["ncav"] = r   # store in gr for HTML access
             print("  NCAV:             " + mo(r["fair_value"]) + "  (" + r.get("graham_verdict","") + ")")
         else:
-            print("  NCAV:             SKIPPED")
+            # Data available but NCAV is negative — compute descriptive reason
+            ncav_ps_raw = (ext["total_current_assets"] - ext["total_liabilities"]) / d["shares"]
+            _ncav_skip_reason = (
+                "Negative NCAV (${:.2f}/sh): stock trades above liquidation floor"
+                .format(round(ncav_ps_raw, 2))
+            )
+            print("  NCAV:             Not applicable — " + _ncav_skip_reason)
     else:
         print("  NCAV:             SKIPPED (no current assets / liabilities)")
 
@@ -4992,12 +5002,14 @@ def main():
 
     # Also collect models that returned None (for All Methods table)
     # Note: Bayesian Ensemble is excluded here — it runs in step [9/9] and is handled there
+    _skip_reasons = {"NCAV": _ncav_skip_reason}
     skipped_methods = []
     for mname in ["Three-Stage DCF","Monte Carlo DCF","FCF Yield","RIM","ROIC Excess Return",
                    "NCAV","Mean Reversion","S-Curve TAM","PIE","DDM","Multi-Factor"]:
         if not any(r2.get("method") == mname for r2 in all_model_results):
+            reason = _skip_reasons.get(mname, "Insufficient data")
             skipped_methods.append({"method": mname, "fair_value": None,
-                                     "mos_value": None, "skip_reason": "Insufficient data"})
+                                     "mos_value": None, "skip_reason": reason})
 
     print("  Top 8 models: " + ", ".join(r2["method"] for r2 in top_8))
 

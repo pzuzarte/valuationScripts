@@ -2383,13 +2383,18 @@ def run_ncav(d: dict) -> dict:
 
     ncav_total = cur_assets - tot_liab
     ncav_ps    = ncav_total / shares
-    fair_value = max(0.0, round(ncav_ps, 2))
 
+    # NCAV is only a valid price target when positive.
+    # Negative NCAV means total liabilities exceed current assets — not a floor,
+    # just not applicable as a target.  Return None so the caller can log a
+    # descriptive reason for the All Methods "N/A" section.
+    if ncav_ps <= 0:
+        return None
+
+    fair_value = round(ncav_ps, 2)
     vs_price_discount = ((ncav_ps - price) / price * 100) if price > 0 else None
 
-    if ncav_ps < 0:
-        graham_verdict = "Distressed: liabilities exceed current assets"
-    elif price > 0 and price < ncav_ps:
+    if price > 0 and price < ncav_ps:
         graham_verdict = "Deep Value: trading below liquidation value"
     else:
         graham_verdict = "Premium to liquidation value"
@@ -2401,10 +2406,11 @@ def run_ncav(d: dict) -> dict:
         "current_assets":       cur_assets,
         "total_liabilities":    tot_liab,
         "ncav_total":           round(ncav_total, 0),
+        "ncav_ps":              round(ncav_ps, 2),
         "vs_price_discount_pct": round(vs_price_discount, 1) if vs_price_discount else None,
         "graham_verdict":       graham_verdict,
-        "reliable":             ncav_total > 0,
-        "warning":              "Net current assets negative — distressed balance sheet." if ncav_total < 0 else None,
+        "reliable":             True,
+        "warning":              None,
     }
 
 

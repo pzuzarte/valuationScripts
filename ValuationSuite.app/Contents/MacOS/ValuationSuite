@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Activate conda env "py311" then launch
+source "/Users/pzuzarte/anaconda3/etc/profile.d/conda.sh" 2>/dev/null || true
+conda activate "py311" 2>/dev/null || true
+cd "/Users/pzuzarte/Desktop/valuationScripts_copy"
+python "/Users/pzuzarte/Desktop/valuationScripts_copy/launcher.py"
