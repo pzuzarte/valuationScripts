@@ -225,8 +225,8 @@ def fetch_tv_data(ticker: str) -> dict:
     print("  Forecast data: fwd_eps=" + str(fwd_eps) + "  fwd_rev=" + str(fwd_rev) +
           "  rev_growth_pct=" + str(rev_growth_pct) + "  eps_growth_pct=" + str(eps_growth_pct))
 
-    # ── WACC inputs: fetch from yfinance ───────────────────────────────────
-    wacc_raw = fetch_wacc_inputs(ticker_upper)
+    # ── WACC inputs: fetched later in main() via fetch_all_yfinance() ─────
+    wacc_raw = {}   # placeholder — populated after fetch_tv_data() returns
 
     # Growth rate priority:
     # 1. If analyst fwd EPS available → implied 1yr EPS growth (blended 70/30 with proxy)
@@ -970,6 +970,309 @@ def fetch_yfinance_extended(ticker: str) -> dict:
         eq   = "{:,.0f}".format(ext["stockholders_equity"]) if ext["stockholders_equity"] else "N/A",
     ))
     return ext
+
+
+def fetch_all_yfinance(ticker: str) -> tuple:
+    """
+    Single-pass yfinance fetch — creates ONE Ticker object and gathers all data
+    needed by both the WACC calculation and the extended valuation models.
+
+    Replaces the two-Ticker pattern (fetch_wacc_inputs + fetch_yfinance_extended)
+    with a single HTTP session, eliminating 4–8 duplicate API calls per run.
+
+    Returns
+    -------
+    (wacc_raw : dict, ext : dict)
+    """
+    import time as _time
+
+    wacc = {
+        "interest_expense":   None,
+        "income_tax_expense": None,
+        "pretax_income":      None,
+        "total_debt_yf":      None,
+        "beta_yf":            None,
+    }
+    ext = {
+        "book_value_ps":             None,
+        "stockholders_equity":       None,
+        "total_current_assets":      None,
+        "total_current_liabilities": None,
+        "total_liabilities":         None,
+        "roic":                      None,
+        "roe":                       None,
+        "invested_capital":          None,
+        "dividends_per_share":       None,
+        "dividend_growth_rate":      None,
+        "hist_pe_5y":                None,
+        "hist_pfcf_5y":              None,
+        "hist_eveb_5y":              None,
+        "earnings_surprise_pct":     None,
+    }
+
+    if not _YF_AVAILABLE:
+        return wacc, ext
+
+    try:
+        ticker_yf = ticker.split(":")[-1] if ":" in ticker else ticker
+        tk = yf.Ticker(ticker_yf)
+
+        def _first(df, candidates):
+            if df is None or df.empty:
+                return None
+            for name in candidates:
+                if name in df.index:
+                    return name
+            return None
+
+        def _ttm(df, candidates):
+            key = _first(df, candidates)
+            if key is None:
+                return None
+            vals = df.loc[key].dropna().iloc[:4]
+            return float(vals.sum()) if len(vals) else None
+
+        def _annual(df, candidates):
+            key = _first(df, candidates)
+            if key is None:
+                return None
+            row = df.loc[key].dropna()
+            return float(row.iloc[0]) if len(row) else None
+
+        IE_NAMES   = ["Interest Expense", "Interest Expense Non Operating",
+                      "Net Interest Income", "InterestExpense"]
+        TAX_NAMES  = ["Tax Provision", "Income Tax Expense",
+                      "IncomeTaxExpense", "Provision For Income Taxes"]
+        PRE_NAMES  = ["Pretax Income", "Income Before Tax",
+                      "EarningsBeforeTax", "PretaxIncome"]
+        DEBT_NAMES = ["Total Debt", "Long Term Debt And Capital Lease Obligation",
+                      "Long Term Debt", "TotalDebt"]
+
+        # ── Fetch each yfinance property ONCE ────────────────────────────────
+        q_inc = tk.quarterly_income_stmt
+        use_q = q_inc is not None and not q_inc.empty and q_inc.shape[1] >= 4
+        if use_q:
+            ie  = _ttm(q_inc, IE_NAMES)
+            tax = _ttm(q_inc, TAX_NAMES)
+            pre = _ttm(q_inc, PRE_NAMES)
+            src = "TTM (4Q sum)"
+        else:
+            a_inc = tk.income_stmt      # fetched once; reused below for ROIC + hist
+            ie  = _annual(a_inc, IE_NAMES)
+            tax = _annual(a_inc, TAX_NAMES)
+            pre = _annual(a_inc, PRE_NAMES)
+            src = "annual (most recent FY)"
+
+        if ie is not None:
+            ie = abs(ie)
+
+        bs   = tk.balance_sheet         # fetched once; reused for debt, equity, hist
+        info = {}
+        beta_yf = None
+        try:
+            info    = tk.info or {}
+            b = info.get("beta")
+            if b is not None:
+                b = float(b)
+                beta_yf = b if 0.1 <= b <= 4.0 else None
+            bv = info.get("bookValue")
+            if bv is not None:
+                ext["book_value_ps"] = float(bv)
+            div = info.get("dividendRate")
+            if div is not None and float(div) > 0:
+                ext["dividends_per_share"] = float(div)
+        except Exception:
+            pass
+
+        wacc.update({
+            "interest_expense":   ie,
+            "income_tax_expense": tax,
+            "pretax_income":      pre,
+            "total_debt_yf":      _annual(bs, DEBT_NAMES),
+            "beta_yf":            beta_yf,
+        })
+
+        print("  [WACC yfinance {src}] interest={ie}  tax={tax}  "
+              "pretax={pre}  debt={dbt}  beta_5y={beta}".format(
+            src=src,
+            ie   = "{:,.0f}".format(ie)                  if ie       is not None else "N/A",
+            tax  = "{:,.0f}".format(tax)                 if tax      is not None else "N/A",
+            pre  = "{:,.0f}".format(pre)                 if pre      is not None else "N/A",
+            dbt  = "{:,.0f}".format(wacc["total_debt_yf"]) if wacc["total_debt_yf"] is not None else "N/A",
+            beta = "{:.3f}".format(beta_yf)              if beta_yf  is not None else "N/A",
+        ))
+
+        # ── Balance sheet extended data ───────────────────────────────────────
+        try:
+            if bs is not None and not bs.empty:
+                equity = _annual(bs, ["Stockholders Equity", "Common Stock Equity",
+                                      "CommonStockEquity", "Total Equity Gross Minority Interest"])
+                if equity is not None:
+                    ext["stockholders_equity"] = equity
+
+                cur_a = _annual(bs, ["Current Assets", "Total Current Assets",
+                                     "Current Assets Total", "TotalCurrentAssets"])
+                if cur_a is not None:
+                    ext["total_current_assets"] = cur_a
+
+                cur_l = _annual(bs, ["Current Liabilities", "Total Current Liabilities",
+                                     "Current Liabilities Total", "TotalCurrentLiabilities"])
+                if cur_l is not None:
+                    ext["total_current_liabilities"] = cur_l
+
+                tot_l = _annual(bs, ["Total Liabilities Net Minority Interest",
+                                     "Total Liabilities", "Liabilities"])
+                if tot_l is None:
+                    tot_a = _annual(bs, ["Total Assets", "Assets"])
+                    eq_v  = ext.get("stockholders_equity")
+                    if tot_a is not None and eq_v is not None:
+                        tot_l = tot_a - eq_v
+                if tot_l is not None:
+                    ext["total_liabilities"] = tot_l
+        except Exception:
+            pass
+
+        # ── ROIC / ROE ────────────────────────────────────────────────────────
+        try:
+            inc = tk.income_stmt    # annual; reused below for hist P/E
+            if inc is not None and not inc.empty:
+                ni_ann = _annual(inc, ["Net Income", "Net Income Common Stockholders"])
+                if ni_ann is not None:
+                    eq2   = ext["stockholders_equity"]
+                    dbt2  = _annual(bs, ["Total Debt",
+                                         "Long Term Debt And Capital Lease Obligation"]) if bs is not None and not bs.empty else None
+                    cash2 = _annual(bs, ["Cash And Cash Equivalents",
+                                         "Cash Cash Equivalents And Short Term Investments"]) if bs is not None and not bs.empty else None
+                    if eq2 is not None and eq2 > 0:
+                        ext["roe"] = ni_ann / eq2
+                    if eq2 is not None and dbt2 is not None:
+                        ic = (dbt2 or 0) + eq2 - (cash2 or 0)
+                        ext["invested_capital"] = ic
+                        if ic > 0:
+                            ext["roic"] = ni_ann / ic
+        except Exception:
+            pass
+
+        # ── Dividend growth rate (5-yr CAGR) ─────────────────────────────────
+        try:
+            divs = tk.dividends
+            if divs is not None and len(divs) >= 2:
+                import pandas as _pd
+                divs_annual = divs.resample("Y").sum()
+                if len(divs_annual) >= 5:
+                    d_new = float(divs_annual.iloc[-1])
+                    d_old = (float(divs_annual.iloc[-6]) if len(divs_annual) >= 6
+                             else float(divs_annual.iloc[0]))
+                    if d_old > 0 and d_new > 0:
+                        n_yrs = min(5, len(divs_annual) - 1)
+                        ext["dividend_growth_rate"] = (d_new / d_old) ** (1.0 / n_yrs) - 1.0
+        except Exception:
+            pass
+
+        # ── Historical multiples (5-year avg P/E, P/FCF, EV/EBITDA) ─────────
+        try:
+            _hist_t0    = _time.time()
+            hist_prices = tk.history(period="5y")
+            if (hist_prices is not None and len(hist_prices) > 50
+                    and _time.time() - _hist_t0 < 20.0):
+                inc5 = tk.income_stmt   # yfinance caches — no extra HTTP call
+                cf5  = tk.cash_flow
+                bs5  = tk.balance_sheet
+                shares_out = (info.get("sharesOutstanding")
+                              or info.get("impliedSharesOutstanding"))
+
+                pe_vals, pfcf_vals, eveb_vals = [], [], []
+
+                if inc5 is not None and not inc5.empty and shares_out:
+                    for col_date in inc5.columns:
+                        yr = col_date.year
+                        yr_prices = hist_prices[hist_prices.index.year == yr]["Close"]
+                        if len(yr_prices) < 20:
+                            continue
+                        avg_price = float(yr_prices.mean())
+
+                        for k in ["Diluted EPS", "Basic EPS", "EPS"]:
+                            if k in inc5.index:
+                                v = inc5.loc[k, col_date]
+                                if v is not None and float(v) > 0.5:
+                                    pe = avg_price / float(v)
+                                    if 4 < pe < 200:
+                                        pe_vals.append(pe)
+                                break
+
+                        if cf5 is not None and not cf5.empty and col_date in cf5.columns:
+                            for k in ["Free Cash Flow"]:
+                                if k in cf5.index:
+                                    fcf_v = cf5.loc[k, col_date]
+                                    if fcf_v is not None and float(fcf_v) > 0:
+                                        fcf_ps = float(fcf_v) / shares_out
+                                        if fcf_ps > 0:
+                                            pfcf = avg_price / fcf_ps
+                                            if 4 < pfcf < 200:
+                                                pfcf_vals.append(pfcf)
+                                    break
+
+                        if col_date in inc5.columns:
+                            ebitda_v = None
+                            for k in ["EBITDA", "Normalized EBITDA"]:
+                                if k in inc5.index:
+                                    v = inc5.loc[k, col_date]
+                                    if v is not None:
+                                        ebitda_v = float(v)
+                                    break
+                            if (ebitda_v and ebitda_v > 0
+                                    and bs5 is not None and not bs5.empty
+                                    and col_date in bs5.columns):
+                                debt_v = cash_v = 0.0
+                                for k in ["Total Debt",
+                                          "Long Term Debt And Capital Lease Obligation"]:
+                                    if k in bs5.index:
+                                        v = bs5.loc[k, col_date]
+                                        if v is not None:
+                                            debt_v = float(v)
+                                        break
+                                for k in ["Cash Cash Equivalents And Short Term Investments",
+                                          "Cash And Cash Equivalents"]:
+                                    if k in bs5.index:
+                                        v = bs5.loc[k, col_date]
+                                        if v is not None:
+                                            cash_v = float(v)
+                                        break
+                                ev_approx = avg_price * shares_out + debt_v - cash_v
+                                if ev_approx > 0:
+                                    eveb = ev_approx / ebitda_v
+                                    if 2 < eveb < 100:
+                                        eveb_vals.append(eveb)
+
+                if pe_vals:   ext["hist_pe_5y"]   = round(sum(pe_vals)   / len(pe_vals),   1)
+                if pfcf_vals: ext["hist_pfcf_5y"]  = round(sum(pfcf_vals) / len(pfcf_vals), 1)
+                if eveb_vals: ext["hist_eveb_5y"]  = round(sum(eveb_vals) / len(eveb_vals), 1)
+        except Exception:
+            pass
+
+        # ── Earnings surprise ─────────────────────────────────────────────────
+        try:
+            eh = tk.earnings_history
+            if eh is not None and not eh.empty and len(eh) >= 1:
+                last   = eh.iloc[0]
+                actual = last.get("epsActual")  or last.get("Reported EPS")
+                est    = last.get("epsEstimate") or last.get("EPS Estimate")
+                if actual is not None and est is not None and abs(float(est)) > 0.001:
+                    ext["earnings_surprise_pct"] = (
+                        (float(actual) - float(est)) / abs(float(est)) * 100.0)
+        except Exception:
+            pass
+
+    except Exception as e:
+        print("  [yfinance] fetch_all_yfinance failed: " + str(e))
+
+    print("  [ext] book={bv}  ROIC={roic}  divs={divs}  eq={eq}".format(
+        bv   = "{:.2f}".format(ext["book_value_ps"])        if ext["book_value_ps"]        else "N/A",
+        roic = "{:.1%}".format(ext["roic"])                 if ext["roic"] is not None     else "N/A",
+        divs = "{:.2f}".format(ext["dividends_per_share"])  if ext["dividends_per_share"]  else "N/A",
+        eq   = "{:,.0f}".format(ext["stockholders_equity"]) if ext["stockholders_equity"]  else "N/A",
+    ))
+    return wacc, ext
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -4783,6 +5086,12 @@ def main():
 
     print("\n[1/9] Fetching fundamental data from TradingView...")
     d = fetch_tv_data(ticker)
+
+    print("[2/9] Fetching yfinance data (WACC inputs, book value, ROIC, dividends, history)...")
+    wacc_raw, ext = fetch_all_yfinance(ticker)
+    d["wacc_raw"] = wacc_raw   # populate before calculate_wacc
+    d["ext"]      = ext
+
     if args.wacc:
         d["wacc_override"] = args.wacc
         auto_wacc, auto_source = calculate_wacc(d)
@@ -4791,9 +5100,6 @@ def main():
         auto_wacc, auto_source = calculate_wacc(d)
         print(f"  WACC: {auto_wacc:.2%}  ({auto_source})")
     print("  OK: Price=" + mo(d["price"]) + " | FCF=" + B(d["fcf"]) + " | EPS=" + mo(d["eps"]))
-
-    print("[2/9] Fetching extended yfinance data (book value, ROIC, dividends, history)...")
-    d["ext"] = fetch_yfinance_extended(ticker)
 
     print("[3/9] Fetching live industry/sector benchmarks & ERG peer calibration data...")
     sector   = d.get("sector")

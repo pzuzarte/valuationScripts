@@ -42,6 +42,7 @@ import datetime
 import webbrowser
 import argparse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from valuation_models import growth_adjusted_multiples, run_graham_number
@@ -3827,64 +3828,91 @@ def main():
     tickers = [t for t in raw.keys()]
     print("  {} positions + ${:,.0f} cash".format(len(tickers), cash))
 
-    # 2. Fetch data for each ticker
-    print("\n[2/5] Fetching fundamentals & price history...")
-    stocks_data = {}
-    for ticker in tickers:
+    # 2. Fetch data for each ticker (parallel — one thread per ticker)
+    print("\n[2/5] Fetching fundamentals & price history (parallel)...")
+    backtest_days = args.backtest
+
+    def _fetch_ticker(ticker):
         entry      = raw[ticker]
         shares     = entry["shares"]     if isinstance(entry, dict) else float(entry)
         cost_basis = entry["cost_basis"] if isinstance(entry, dict) else None
-        print("  {}...".format(ticker), end="", flush=True)
 
         fund = fetch_tv_fundamentals(ticker)
         if not fund:
-            print(" SKIPPED (no data)")
-            continue
+            return ticker, None, shares, cost_basis, [], {}, {}
 
-        # Enrich with yfinance WACC inputs (mirrors valuationMaster)
         wacc_raw = fetch_wacc_inputs(ticker)
         fund["wacc_raw"] = wacc_raw
 
-        price = fund.get("price", 0) or 0
-        value = price * shares
-
-        bars      = fetch_price_history(ticker, args.backtest + 50)
+        bars      = fetch_price_history(ticker, backtest_days + 50)
         analyst   = fetch_analyst_forecasts(ticker)
         sentiment = fetch_market_sentiment(ticker)
 
-        # Cache analyst target in fund for Fwd PEG cap
-        fund["_analyst_cache"] = analyst
+        return ticker, fund, shares, cost_basis, bars, analyst, sentiment
 
-        # Merge sentiment into analyst dict for signal access
-        analyst["_sentiment"]     = sentiment
-        analyst["target_median"]  = sentiment.get("target_median") or analyst.get("target_median")
-        analyst["target_high"]    = sentiment.get("target_high")
-        analyst["target_low"]     = sentiment.get("target_low")
+    stocks_data = {}
+    with ThreadPoolExecutor(max_workers=min(len(tickers), 8)) as pool:
+        futures = {pool.submit(_fetch_ticker, t): t for t in tickers}
+        for future in as_completed(futures):
+            try:
+                ticker, fund, shares, cost_basis, bars, analyst, sentiment = future.result()
+            except Exception as exc:
+                print("  {} ERROR: {}".format(futures[future], exc))
+                continue
 
-        # Merge 52-week data from yfinance info into fund (supplement TV data)
-        if analyst.get("week52_high"): fund["week52_high_yf"] = analyst["week52_high"]
-        if analyst.get("week52_low"):  fund["week52_low_yf"]  = analyst["week52_low"]
+            if not fund:
+                print("  {} SKIPPED (no data)".format(ticker))
+                continue
 
-        cb_str = "(cost ${:.2f})".format(cost_basis) if cost_basis else ""
-        print(" ${:.2f}  {:.0f} bars  rec={}  target={}  inst_net={}  {}".format(
-            price, len(bars),
-            analyst.get("recommendation") or "—",
-            "${:.0f}".format(analyst["target_price"]) if analyst.get("target_price") else "—",
-            sentiment.get("inst_net_flow", "—"),
-            cb_str).rstrip())
+            price = fund.get("price", 0) or 0
+            value = price * shares
 
-        stocks_data[ticker] = {
-            "shares":     shares,
-            "cost_basis": cost_basis,
-            "value":      value,
-            "fund":       fund,
-            "bars":       bars,
-            "analyst":    analyst,
-            "sentiment":  sentiment,
-        }
+            # Cache analyst target in fund for Fwd PEG cap
+            fund["_analyst_cache"] = analyst
+
+            # Merge sentiment into analyst dict for signal access
+            analyst["_sentiment"]     = sentiment
+            analyst["target_median"]  = sentiment.get("target_median") or analyst.get("target_median")
+            analyst["target_high"]    = sentiment.get("target_high")
+            analyst["target_low"]     = sentiment.get("target_low")
+
+            # Merge 52-week data from yfinance info into fund (supplement TV data)
+            if analyst.get("week52_high"): fund["week52_high_yf"] = analyst["week52_high"]
+            if analyst.get("week52_low"):  fund["week52_low_yf"]  = analyst["week52_low"]
+
+            cb_str = "(cost ${:.2f})".format(cost_basis) if cost_basis else ""
+            print("  {} ${:.2f}  {:.0f} bars  rec={}  target={}  inst_net={}  {}".format(
+                ticker, price, len(bars),
+                analyst.get("recommendation") or "—",
+                "${:.0f}".format(analyst["target_price"]) if analyst.get("target_price") else "—",
+                sentiment.get("inst_net_flow", "—"),
+                cb_str).rstrip())
+
+            stocks_data[ticker] = {
+                "shares":     shares,
+                "cost_basis": cost_basis,
+                "value":      value,
+                "fund":       fund,
+                "bars":       bars,
+                "analyst":    analyst,
+                "sentiment":  sentiment,
+            }
+
+    # Restore original ticker order (as_completed is non-deterministic)
+    stocks_data = {t: stocks_data[t] for t in tickers if t in stocks_data}
 
     # 3. Compute technicals, classification, valuation, backtest
     print("\n[3/5] Computing technicals & signals...")
+
+    # Pre-fetch benchmarks once per unique (sector, industry) pair — avoids a redundant
+    # TradingView query for every stock when multiple holdings share the same sector.
+    _bm_cache = {}
+    for _sd in stocks_data.values():
+        _key = (_sd["fund"].get("sector"), _sd["fund"].get("industry"))
+        if _key not in _bm_cache:
+            _bm_cache[_key] = fetch_market_benchmarks(
+                sector=_key[0], industry=_key[1])
+
     for ticker, sd in stocks_data.items():
         fund    = sd["fund"]
         bars    = sd["bars"]
@@ -3893,9 +3921,9 @@ def main():
         tech = compute_technicals(bars) if bars else {}
         cls  = classify_stock(fund)
 
-        # Fetch live industry/sector benchmarks for this stock
-        benchmarks = fetch_market_benchmarks(
-            sector=fund.get("sector"), industry=fund.get("industry"))
+        benchmarks = _bm_cache.get(
+            (fund.get("sector"), fund.get("industry")),
+            fetch_market_benchmarks(sector=fund.get("sector"), industry=fund.get("industry")))
 
         bt        = backtest_methods(fund, bars, benchmarks) if bars else {}
         signal    = generate_signal(fund, tech, cls, bt, analyst, benchmarks)
