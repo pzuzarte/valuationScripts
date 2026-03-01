@@ -533,6 +533,388 @@ def clr(v):
         return "#6b7194"
     return "#00c896" if v >= 0 else "#e05c5c"
 
+
+# ── Interpretation helpers ──────────────────────────────────────────────────
+def _b(txt):
+    return f'<span style="color:var(--up);font-weight:600">{txt}</span>'
+
+def _r(txt):
+    return f'<span style="color:var(--down);font-weight:600">{txt}</span>'
+
+def _w(txt):
+    return f'<span style="color:var(--warn);font-weight:600">{txt}</span>'
+
+def _v(txt):
+    return f'<strong>{txt}</strong>'
+
+def _interp_card(title: str, bullets: list) -> str:
+    """Analyst write-up card rendered at the bottom of a dashboard tab."""
+    if not bullets:
+        return ""
+    h = f'<div class="interp-card"><h4>{title}</h4><ul class="interp-list">'
+    for b in bullets:
+        h += f'<li>{b}</li>'
+    h += '</ul></div>'
+    return h
+
+
+def _interp_overview(regime: dict, cross: dict) -> str:
+    bullets = []
+    score = regime["score"]
+    comps = regime.get("components", {})
+
+    # Overall regime
+    if score >= 80:    mood = _b("strongly risk-on")
+    elif score >= 62:  mood = _b("moderately bullish")
+    elif score >= 42:  mood = _w("neutral / mixed")
+    elif score >= 25:  mood = _r("cautious / risk-off tilt")
+    else:              mood = _r("risk-off")
+    bullets.append(f'The Macro Regime Score is {_v(f"{score}/100")} ({mood}). All five components are factored in — a score below 42 warrants defensive positioning.')
+
+    # Component strengths / drags
+    strong = [c["label"] for c in comps.values() if c.get("score") is not None and c["score"] >= 14]
+    weak   = [c["label"] for c in comps.values() if c.get("score") is not None and c["score"] < 8]
+    if strong:
+        bullets.append(f'Constructive signals: {_b(", ".join(strong))}.')
+    if weak:
+        bullets.append(f'Drag on the score: {_r(", ".join(weak))} — these are in cautionary territory and worth monitoring.')
+
+    # SPY 1M
+    spy    = cross.get("SPY", {})
+    spy_1m = spy.get("1M")
+    spy_vs200 = spy.get("vs_200")
+    if spy_1m is not None:
+        if spy_1m > 2:
+            bullets.append(f'The S&P 500 (SPY) returned {_b(fmt_pct(spy_1m))} over the past month, confirming near-term bullish price action.')
+        elif spy_1m > -2:
+            bullets.append(f'The S&P 500 (SPY) returned {_w(fmt_pct(spy_1m))} over the past month — essentially flat, consistent with a neutral/consolidating market.')
+        else:
+            bullets.append(f'The S&P 500 (SPY) fell {_r(fmt_pct(spy_1m))} over the past month, reflecting genuine selling pressure.')
+    if spy_vs200 is not None:
+        if spy_vs200 > 0:
+            bullets.append(f'SPY is trading {_b(fmt_pct(spy_vs200))} above its 200-day moving average — the primary trend remains up.')
+        else:
+            bullets.append(f'SPY is {_r(fmt_pct(spy_vs200))} below its 200-day MA — the primary uptrend has broken, a meaningful caution signal.')
+
+    # Gold vs equities
+    gld_1m = cross.get("GLD", {}).get("1M")
+    if gld_1m is not None and spy_1m is not None:
+        if gld_1m > spy_1m + 3:
+            bullets.append(f'Gold ({_b(fmt_pct(gld_1m))} 1M) is significantly outperforming equities — a classic flight-to-safety pattern suggesting elevated risk aversion.')
+        elif spy_1m > gld_1m + 3:
+            bullets.append(f'Equities ({_b(fmt_pct(spy_1m))} 1M) are outpacing gold ({fmt_pct(gld_1m)}) — capital is rotating into risk assets.')
+
+    # Breadth (IWM vs SPY 3M)
+    iwm_3m = cross.get("IWM", {}).get("3M")
+    spy_3m = cross.get("SPY", {}).get("3M")
+    if iwm_3m is not None and spy_3m is not None:
+        diff = iwm_3m - spy_3m
+        if diff > 2:
+            bullets.append(f'Small-caps (IWM) are outperforming large-caps (SPY) over 3 months — broad participation supports the bull case.')
+        elif diff < -4:
+            bullets.append(f'Small-caps lag large-caps by {_r(f"{abs(diff):.1f}pp")} over 3 months — narrow leadership is a health warning for this rally.')
+
+    return _interp_card("Analyst Read — Overview", bullets)
+
+
+def _interp_rates(treasury: dict, yf_yields: dict) -> str:
+    bullets = []
+    cur = treasury.get("current", {})
+    y10 = cur.get("10Y")
+    y2  = cur.get("2Y")
+    y3m = cur.get("3M")
+
+    if y10 is None:
+        return ""
+
+    # 10Y level
+    if y10 > 5.0:
+        bullets.append(f'The 10-year yield is {_r(f"{y10:.2f}%")} — historically restrictive. High rates compress equity valuations (higher discount rate) and increase financing costs economy-wide.')
+    elif y10 > 4.0:
+        bullets.append(f'The 10-year yield stands at {_w(f"{y10:.2f}%")} — elevated by post-GFC standards. The equity risk premium has compressed, making bonds a legitimate income alternative for the first time in years.')
+    elif y10 > 2.5:
+        bullets.append(f'The 10-year yield is {_b(f"{y10:.2f}%")} — within a broadly neutral range. Rates are not an acute headwind to equity multiples at current levels.')
+    else:
+        bullets.append(f'The 10-year yield is {_b(f"{y10:.2f}%")} — low, which historically supports equity multiple expansion and growth asset valuations.')
+
+    # Yield curve shape
+    if y2 is not None:
+        spread = round(y10 - y2, 2)
+        if spread < -0.5:
+            bullets.append(f'The 10Y–2Y curve is {_r(f"inverted ({spread:+.2f}%)")} — a historically reliable (if lagged) recession warning. Every US recession since 1955 has been preceded by yield-curve inversion.')
+        elif spread < 0:
+            bullets.append(f'The yield curve is mildly {_w(f"inverted ({spread:+.2f}%)")}. Mild inversion warrants monitoring; sustained or deepening inversion materially increases recession odds.')
+        elif spread < 0.5:
+            bullets.append(f'The yield curve is {_w(f"nearly flat ({spread:+.2f}%)")} — consistent with a mature economic cycle or uncertainty around the Fed\'s next move.')
+        else:
+            bullets.append(f'The yield curve has a {_b(f"positive slope ({spread:+.2f}%)")} — a normal, healthy configuration supportive of bank lending and economic expansion.')
+
+    # 10Y–3M spread (NY Fed preferred measure)
+    if y3m is not None:
+        spread_3m = round(y10 - y3m, 2)
+        if spread_3m < -0.25:
+            bullets.append(f'The 10Y–3M spread ({_r(f"{spread_3m:+.2f}%")}) is negative — the NY Fed\'s preferred recession-signal measure. This inversion is the primary input into the NY Fed recession model.')
+
+    # Equity valuation impact
+    if y10 > 4.5:
+        bullets.append(f'At {y10:.2f}%, fixed income now provides meaningful competition to equities. A 10Y above 4.5% historically keeps a lid on P/E multiple expansion.')
+
+    return _interp_card("Analyst Read — Rates & Yield Curve", bullets)
+
+
+def _interp_volatility(vix: dict, cross: dict, credit: dict) -> str:
+    bullets = []
+    vix_val = vix.get("current")
+    vix_avg = vix.get("avg_1y")
+    vvix    = vix.get("vvix")
+
+    if vix_val is None:
+        return ""
+
+    # VIX level
+    if vix_val < 15:
+        bullets.append(f'VIX is {_b(f"{vix_val:.1f}")} — low, signalling market complacency. Sustained sub-15 VIX environments can persist in bull markets but often precede larger vol spikes; asymmetric downside risk is elevated.')
+    elif vix_val < 20:
+        bullets.append(f'VIX is {_b(f"{vix_val:.1f}")} — within the normal range. Investors are not paying a premium for protection; market sentiment is broadly constructive.')
+    elif vix_val < 28:
+        bullets.append(f'VIX is {_w(f"{vix_val:.1f}")} — elevated. Uncertainty is rising; institutional hedging is increasing. Equity dip-buyers should be selective.')
+    elif vix_val < 40:
+        bullets.append(f'VIX is {_r(f"{vix_val:.1f}")} — high fear territory. Significant institutional hedging is underway. Historically, readings above 30 have been excellent contrarian entry points 6–12 months forward.')
+    else:
+        bullets.append(f'VIX is {_r(f"{vix_val:.1f}")} — crisis-level volatility. Past instances (COVID-19, GFC, post-9/11) have historically marked excellent long-term buying opportunities for patient capital.')
+
+    # VIX vs 1Y average
+    if vix_avg:
+        vs_avg = round(vix_val - vix_avg, 1)
+        if vs_avg > 5:
+            bullets.append(f'VIX is {_r(f"{vs_avg:+.1f} pts")} above its 1-year average ({vix_avg:.1f}) — meaningfully elevated. Current fear is well above the recent regime baseline.')
+        elif vs_avg < -3:
+            bullets.append(f'VIX is {_b(f"{vs_avg:+.1f} pts")} below its 1-year average — unusually calm relative to recent history. Watch for vol mean reversion.')
+        else:
+            bullets.append(f'VIX is near its 1-year average ({vix_avg:.1f}) — current volatility is in line with recent norms, neither stressed nor complacent.')
+
+    # VVIX
+    if vvix:
+        if vvix > 120:
+            bullets.append(f'VVIX (vol-of-vol) is {_r(f"{vvix:.0f}")} — extreme. Options on VIX are very expensive; expect outsized VIX swings in either direction. Tail hedges are crowded.')
+        elif vvix > 100:
+            bullets.append(f'VVIX is {_w(f"{vvix:.0f}")} — elevated. The options market is pricing in continued VIX uncertainty; tail-risk protection demand is above average.')
+        else:
+            bullets.append(f'VVIX is {_b(f"{vvix:.0f}")} — benign. Vol-of-vol is calm, consistent with a relatively stable near-term volatility regime.')
+
+    # HYG vs LQD credit divergence
+    hyg_1m = cross.get("HYG", {}).get("1M")
+    lqd_1m = cross.get("LQD", {}).get("1M")
+    if hyg_1m is not None and lqd_1m is not None:
+        diff = hyg_1m - lqd_1m
+        if diff < -2:
+            bullets.append(f'High-yield (HYG {fmt_pct(hyg_1m)}) is underperforming investment-grade bonds (LQD {fmt_pct(lqd_1m)}) by {_r(f"{abs(diff):.1f}pp")} — a divergence that signals rising credit stress and declining risk appetite.')
+        elif diff > 2:
+            bullets.append(f'High-yield (HYG {fmt_pct(hyg_1m)}) is outperforming investment-grade (LQD {fmt_pct(lqd_1m)}) — credit markets are risk-on; spreads are compressing, which is supportive for equities.')
+        else:
+            bullets.append(f'High-yield (HYG {fmt_pct(hyg_1m)}) and investment-grade bonds (LQD {fmt_pct(lqd_1m)}) are moving in tandem — no significant credit stress signal from the bond market.')
+
+    # HY OAS level
+    hy_cur = credit.get("hy", {}).get("current")
+    if hy_cur is not None:
+        if hy_cur > 7:
+            bullets.append(f'HY OAS of {_r(f"{hy_cur:.2f}%")} is in stress territory (>7%). Corporate credit is pricing in meaningful default risk — a significant risk-off warning.')
+        elif hy_cur > 4:
+            bullets.append(f'HY OAS of {_w(f"{hy_cur:.2f}%")} is in the caution zone (4–7%). Spreads signal rising but not acute credit risk.')
+        else:
+            bullets.append(f'HY OAS of {_b(f"{hy_cur:.2f}%")} is tight (<4%) — credit is in risk-on mode with strong demand for yield.')
+
+    return _interp_card("Analyst Read — Volatility & Credit", bullets)
+
+
+def _interp_sectors(sectors: dict) -> str:
+    bullets = []
+
+    # Sort sectors by 1M
+    ranked = sorted(
+        [(ticker, SECTORS[ticker], sectors.get(ticker, {})) for ticker in SECTORS],
+        key=lambda x: x[2].get("1M") or -999,
+        reverse=True
+    )
+
+    top3 = [(t, n, d.get("1M")) for t, n, d in ranked[:3]  if d.get("1M") is not None]
+    bot3 = [(t, n, d.get("1M")) for t, n, d in ranked[-3:] if d.get("1M") is not None]
+    bot3.reverse()
+
+    if top3:
+        top_str = ", ".join(f'{_b(n)} ({fmt_pct(v)})' for t, n, v in top3)
+        bullets.append(f'Leading sectors (1M): {top_str}.')
+    if bot3:
+        bot_str = ", ".join(f'{_r(n)} ({fmt_pct(v)})' for t, n, v in bot3)
+        bullets.append(f'Lagging sectors (1M): {bot_str}.')
+
+    # Leadership character
+    defensive = {"XLU", "XLP", "XLRE", "XLV"}
+    growth    = {"XLK", "XLC", "XLY"}
+    cyclical  = {"XLF", "XLI", "XLB", "XLE"}
+    top3_t = {t for t, n, v in top3}
+    bot3_t = {t for t, n, v in bot3}
+
+    if len(top3_t & defensive) >= 2:
+        bullets.append(f'Defensive sectors are leading — Utilities, Staples, and/or Healthcare outperforming. This signals {_r("risk-off rotation")}: investors are preferring capital preservation over growth.')
+    elif len(top3_t & growth) >= 2:
+        bullets.append(f'Growth/tech sectors are leading — a {_b("risk-on signal")} consistent with strong earnings expectations and/or falling rate expectations.')
+    elif len(top3_t & cyclical) >= 2:
+        bullets.append(f'Cyclical sectors are leading (Financials, Industrials, Materials, Energy) — consistent with {_b("early-to-mid cycle dynamics")} or improving economic growth expectations.')
+
+    if len(bot3_t & defensive) >= 2:
+        bullets.append(f'Defensive sectors are lagging — investors are rotating {_b("out of safety")} into higher-beta names, consistent with improving risk appetite.')
+
+    # Breadth: how many sectors are positive 1M
+    pos_1m = sum(1 for _, _, d in ranked if (d.get("1M") or 0) > 0)
+    if pos_1m >= 9:
+        bullets.append(f'{_b(f"{pos_1m}/11")} sectors are positive over the past month — very broad participation, a constructive breadth signal.')
+    elif pos_1m >= 6:
+        bullets.append(f'{_w(f"{pos_1m}/11")} sectors are positive over the past month — moderate breadth; leadership is reasonably broad but not universal.')
+    else:
+        bullets.append(f'Only {_r(f"{pos_1m}/11")} sectors are positive over the past month — narrow breadth. Be cautious of index-level strength masking underlying weakness.')
+
+    return _interp_card("Analyst Read — Sector Rotation", bullets)
+
+
+def _interp_macro(buffett: dict, cape: dict, recession: dict, credit: dict,
+                  money_mkt: dict, global_eq: dict) -> str:
+    bullets = []
+
+    # Combined valuation picture
+    bi_val   = buffett.get("current")
+    bi_label = buffett.get("label", "")
+    cape_val = cape.get("current")
+    cape_avg = cape.get("avg")
+
+    if bi_val is not None and cape_val is not None:
+        if bi_val > 150 and cape_val > 30:
+            bullets.append(f'Both the Buffett Index ({_r(f"{bi_val:.0f}%")}) and Shiller CAPE ({_r(f"{cape_val:.1f}×")}) are in historically elevated territory. Dual confirmation of stretched valuations raises long-term risk of below-average returns — even if the market can remain elevated for an extended period.')
+        elif bi_val > 100 or cape_val > 25:
+            bullets.append(f'Buffett Index ({_w(f"{bi_val:.0f}%")}) and/or CAPE ({_w(f"{cape_val:.1f}×")}) signal above-average valuation. Elevated multiples compress prospective 10-year returns but do not dictate the near-term direction.')
+        else:
+            bullets.append(f'Buffett Index ({_b(f"{bi_val:.0f}%")}) and CAPE ({_b(f"{cape_val:.1f}×")}) are at or below historical averages — valuations are not a meaningful headwind here.')
+    elif cape_val is not None and cape_avg is not None:
+        premium = round((cape_val / cape_avg - 1) * 100)
+        if premium > 40:
+            bullets.append(f'Shiller CAPE of {_r(f"{cape_val:.1f}×")} sits {_r(f"{premium:.0f}%")} above its historical average ({cape_avg:.1f}×). At this premium, expected 10-year S&P 500 returns historically average 2–5% annually — well below the long-run mean.')
+        elif premium > 15:
+            bullets.append(f'CAPE of {_w(f"{cape_val:.1f}×")} is {_w(f"{premium:.0f}%")} above its historical average — elevated but not extreme. Future returns may be below-average without implying an imminent correction.')
+
+    # Recession probability
+    rec_val   = recession.get("current")
+    rec_label = recession.get("label", "")
+    if rec_val is not None:
+        if rec_val >= 30:
+            bullets.append(f'The NY Fed recession model shows {_r(f"{rec_val:.1f}%")} 12-month probability ({_r(rec_label)}). Historically, readings above 30% have been associated with elevated near-term economic risk. Note: the model is published with a ~3-month lag.')
+        elif rec_val >= 15:
+            bullets.append(f'Recession probability is {_w(f"{rec_val:.1f}%")} ({rec_label}) — the yield-curve model is flashing caution. Watch for confirmation in leading economic indicators (PMI, initial claims).')
+        else:
+            bullets.append(f'NY Fed recession probability is {_b(f"{rec_val:.1f}%")} ({rec_label}) — the yield-curve signal is benign, consistent with continued economic expansion.')
+
+    # Credit spreads
+    hy_cur = credit.get("hy", {}).get("current")
+    ig_cur = credit.get("ig", {}).get("current")
+    if hy_cur is not None:
+        if hy_cur > 7:
+            bullets.append(f'HY OAS of {_r(f"{hy_cur:.2f}%")} is in stress territory — corporate credit is pricing in meaningful default risk, a significant risk-off signal from the bond market.')
+        elif hy_cur > 4:
+            bullets.append(f'HY OAS of {_w(f"{hy_cur:.2f}%")} is in the caution zone (4–7%). Spreads are elevated above the tightest levels; credit risk is rising but not yet systemic.')
+        else:
+            bullets.append(f'HY OAS of {_b(f"{hy_cur:.2f}%")} is tight (<4%) — credit markets are firmly risk-on, with strong demand for yield and compressed default-risk premiums.')
+
+    # Money markets
+    mm_val = money_mkt.get("current")
+    mm_chg = money_mkt.get("change_yoy")
+    if mm_val is not None:
+        if mm_chg is not None and mm_chg > 0.5:
+            bullets.append(f'US money market assets stand at {_v(f"${mm_val:.2f}T")} (+${mm_chg:.2f}T YoY). Rising cash balances represent "dry powder" — historically, record MMF balances have been a contrarian positive once sentiment stabilises and cash rotates back into equities.')
+        elif mm_chg is not None and mm_chg < -0.3:
+            bullets.append(f'Money market assets ({_v(f"${mm_val:.2f}T")}, {fmt_pct(abs(mm_chg / mm_val * 100))} outflows YoY) are declining — cash is rotating back into risk assets, a constructive near-term signal for equities.')
+        else:
+            bullets.append(f'Money market assets are at {_v(f"${mm_val:.2f}T")} — broadly stable, reflecting neither an acute flight to safety nor a broad rush into risk.')
+
+    # US vs International
+    spy_ytd = global_eq.get("SPY", {}).get("YTD")
+    efa_ytd = global_eq.get("EFA", {}).get("YTD")
+    eem_ytd = global_eq.get("EEM", {}).get("YTD")
+    if spy_ytd is not None and efa_ytd is not None:
+        diff = spy_ytd - efa_ytd
+        if diff > 5:
+            bullets.append(f'US equities (SPY {fmt_pct(spy_ytd)} YTD) are significantly outperforming developed international markets (EFA {fmt_pct(efa_ytd)} YTD) — the US exceptionalism trade remains intact.')
+        elif diff < -5:
+            bullets.append(f'International developed markets (EFA {fmt_pct(efa_ytd)} YTD) are outperforming US equities (SPY {fmt_pct(spy_ytd)} YTD) by {abs(diff):.1f}pp — a notable rotation away from US assets, potentially driven by USD weakness or relative valuation.')
+        if eem_ytd is not None and eem_ytd > spy_ytd + 5:
+            bullets.append(f'Emerging markets (EEM {fmt_pct(eem_ytd)} YTD) are also outperforming US equities — a broad risk-on / global growth-positive signal.')
+
+    return _interp_card("Analyst Read — Macro Signals", bullets)
+
+
+def _interp_commodities(commodities: dict) -> str:
+    bullets = []
+
+    gld  = commodities.get("GLD",  {})
+    slv  = commodities.get("SLV",  {})
+    uso  = commodities.get("USO",  {})
+    ung  = commodities.get("UNG",  {})
+    cper = commodities.get("CPER", {})
+
+    gld_1m  = gld.get("1M")
+    gld_1y  = gld.get("1Y")
+    uso_1m  = uso.get("1M")
+    cper_1m = cper.get("1M")
+    slv_1m  = slv.get("1M")
+
+    # Gold
+    if gld_1m is not None:
+        if gld_1m > 5:
+            bullets.append(f'Gold surged {_b(fmt_pct(gld_1m))} over the past month — a strong safe-haven / inflation-hedge signal. Sustained gold outperformance typically reflects USD weakness, geopolitical risk, and/or declining real interest rates.')
+        elif gld_1m > 2:
+            bullets.append(f'Gold gained {_b(fmt_pct(gld_1m))} over the past month — modest safe-haven demand with the precious metals complex in an uptrend.')
+        elif gld_1m < -3:
+            bullets.append(f'Gold fell {_r(fmt_pct(gld_1m))} over the past month — a risk-on environment where investors are reducing safe-haven exposure in favour of equities.')
+        else:
+            bullets.append(f'Gold returned {fmt_pct(gld_1m)} over the past month — broadly flat, with no strong directional safe-haven or risk-on signal.')
+
+    if gld_1y is not None and gld_1y > 20:
+        bullets.append(f'Gold\'s 1-year return of {_b(fmt_pct(gld_1y))} is exceptional. Sustained central bank buying, de-dollarisation trends, and/or persistent inflation expectations are likely drivers.')
+
+    # Gold / Copper ratio (risk sentiment)
+    if gld_1m is not None and cper_1m is not None:
+        gc_diff = gld_1m - cper_1m
+        if gc_diff > 5:
+            bullets.append(f'Gold is outperforming copper by {_r(f"{gc_diff:.1f}pp")} (1M). A rising Gold/Copper ratio is a classic {_r("risk-off / recession-concern")} signal — gold\'s safe-haven premium is expanding relative to industrial demand.')
+        elif gc_diff < -5:
+            bullets.append(f'Copper is outperforming gold by {_b(f"{abs(gc_diff):.1f}pp")} (1M). A falling Gold/Copper ratio signals {_b("economic optimism")} — industrial demand is outpacing safe-haven demand.')
+
+    # Oil
+    if uso_1m is not None:
+        if uso_1m > 5:
+            bullets.append(f'Crude oil (USO) gained {_b(fmt_pct(uso_1m))} over the past month — consistent with supply tightness or recovering demand. Elevated oil adds inflationary pressure and can weigh on consumer and transport margins.')
+        elif uso_1m < -5:
+            bullets.append(f'Crude oil (USO) fell {_r(fmt_pct(uso_1m))} over the past month — disinflationary, which can support consumer spending and reduce margin pressure on energy-intensive businesses.')
+
+    # Gold vs Silver (industrial vs pure safe haven)
+    if gld_1m is not None and slv_1m is not None:
+        gs_diff = slv_1m - gld_1m
+        if gs_diff > 4:
+            bullets.append(f'Silver is outperforming gold by {_b(f"{gs_diff:.1f}pp")} (1M) — when silver leads, it signals rising industrial activity alongside precious-metal demand, a broadly bullish macro read.')
+        elif gs_diff < -4:
+            bullets.append(f'Gold is outperforming silver by {abs(gs_diff):.1f}pp (1M) — indicating pure safe-haven demand rather than industrial growth. Silver\'s lag suggests muted near-term economic growth expectations.')
+
+    # Overall commodity complex tone
+    comm_vals = [commodities.get(t, {}).get("1M") for t in ["GLD", "SLV", "USO", "CPER"]]
+    valid = [v for v in comm_vals if v is not None]
+    if valid:
+        avg_comm = sum(valid) / len(valid)
+        if avg_comm > 3:
+            bullets.append(f'The commodity complex is broadly rising (avg 1M: {_b(fmt_pct(avg_comm))}) — consistent with rising inflation expectations, strong global demand, or supply constraints.')
+        elif avg_comm < -2:
+            bullets.append(f'The commodity complex is broadly declining (avg 1M: {_r(fmt_pct(avg_comm))}) — disinflationary, often a signal of weakening global demand or easing supply bottlenecks.')
+
+    return _interp_card("Analyst Read — Commodities", bullets)
+
+
 def _perf_from_hist(close, n_days):
     if len(close) <= n_days:
         return None
@@ -1247,6 +1629,18 @@ h3{display:flex;align-items:center;gap:0}
   background:none;border:none;color:var(--muted);
   font-size:20px;line-height:1;cursor:pointer;padding:0}
 #help-pop-close:hover{color:var(--text)}
+/* ── Interpretation card ── */
+.interp-card{background:var(--sf2);border:1px solid var(--border);
+  border-left:4px solid var(--accent);border-radius:var(--r);
+  padding:20px 24px;margin-top:24px;margin-bottom:4px}
+.interp-card h4{font-size:12px;font-weight:700;color:var(--accent);
+  text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}
+.interp-list{list-style:none;padding:0;margin:0}
+.interp-list li{padding:6px 0 6px 18px;position:relative;
+  font-size:13px;color:var(--text);border-bottom:1px solid var(--border);line-height:1.55}
+.interp-list li:last-child{border-bottom:none}
+.interp-list li::before{content:'›';position:absolute;left:0;
+  color:var(--accent);font-weight:700}
 """
 
 # ── HTML builder ───────────────────────────────────────────────────────────────
@@ -2589,8 +2983,14 @@ if(ogCtx){{
     js += "\n});\n"  # close commodities defer
 
     # ── 8. Cross-asset 1M performance (horizontal bar, overview tab — direct) ──
-    ca_names  = [name for _, name, _ in CROSS_ASSET]
-    ca_1m     = [cross.get(t, {}).get("1M") or 0 for t, _, _ in CROSS_ASSET]
+    # Sort best → worst so chart reads top-to-bottom in descending order
+    ca_pairs  = sorted(
+        [(name, cross.get(t, {}).get("1M") or 0) for t, name, _ in CROSS_ASSET],
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    ca_names  = [p[0] for p in ca_pairs]
+    ca_1m     = [p[1] for p in ca_pairs]
     ca_colors = ["#00c896aa" if v >= 0 else "#e05c5caa" for v in ca_1m]
     js += f"""
 var caCtx = document.getElementById('chart-cross-asset');
@@ -2666,21 +3066,32 @@ def build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_
     h += '<div class="sec-hdr">1-Month Performance</div>'
     h += f'<div class="chart-card"><h3>Cross-Asset — 1 Month Return {help_btn("cross-asset-chart")}</h3>'
     h += f'<div class="chart-wrap" style="height:{len(CROSS_ASSET)*36}px"><canvas id="chart-cross-asset"></canvas></div></div>'
+    h += _interp_overview(regime, cross)
     h += '</div>'
 
-    h += f'<div id="tab-rates" class="tab-panel">{_tab_rates(treasury, yf_yields)}</div>'
-    h += f'<div id="tab-volatility" class="tab-panel">{_tab_volatility(vix, cross)}</div>'
+    h += f'<div id="tab-rates" class="tab-panel">'
+    h += _tab_rates(treasury, yf_yields)
+    h += _interp_rates(treasury, yf_yields)
+    h += '</div>'
+
+    h += f'<div id="tab-volatility" class="tab-panel">'
+    h += _tab_volatility(vix, cross)
+    h += _interp_volatility(vix, cross, credit)
+    h += '</div>'
 
     h += f'<div id="tab-sectors" class="tab-panel">'
     h += _tab_sectors(sectors)
+    h += _interp_sectors(sectors)
     h += '</div>'
 
     h += f'<div id="tab-macro" class="tab-panel">'
     h += _tab_macro_signals(buffett, money_mkt, global_eq, cape, recession, credit)
+    h += _interp_macro(buffett, cape, recession, credit, money_mkt, global_eq)
     h += '</div>'
 
     h += f'<div id="tab-commodities" class="tab-panel">'
     h += _tab_commodities(commodities)
+    h += _interp_commodities(commodities)
     h += '</div>'
 
     h += '</div>'  # container
