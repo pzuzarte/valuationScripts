@@ -24,6 +24,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["-m", "http.server", "8004", "--directory", "4_portfolioAnalyzer/portfolioData"],
       "port": 8004
+    },
+    {
+      "name": "sentimentAnalyzer-reports",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "8006", "--directory", "6_sentimentAnalyzer/sentimentData"],
+      "port": 8006
     }
   ]
 }

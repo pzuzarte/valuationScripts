@@ -32,6 +32,38 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 # ── Script catalogue ──────────────────────────────────────────────────────────
 
 SCRIPTS = {
+    "Macro Dashboard": {
+        "path": os.path.join(ROOT, "7_macroDashboard", "macroDashboard.py"),
+        "desc": "Macro regime dashboard — rates, yield curve, volatility, credit, sector rotation & cross-asset performance.",
+        "icon": "🌐",
+        "params": [],
+    },
+    "Value Screener": {
+        "path": os.path.join(ROOT, "1_valueScreener", "valueScreener.py"),
+        "desc": "Screen S&P 500, Nasdaq 100, Russell 2000, or TSX for undervalued stocks.",
+        "icon": "🔍",
+        "params": [
+            dict(id="index", label="Index",      type="option", flag="--index",
+                 required=True,  default="SPX",  values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",   label="Top N",      type="entry",  flag="--top",
+                 required=False, default="50"),
+            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
+    "Growth Screener": {
+        "path": os.path.join(ROOT, "2_growthScreener", "growthScreener.py"),
+        "desc": "Screen indices for high-growth stocks using a 4-pillar quality + momentum model.",
+        "icon": "📈",
+        "params": [
+            dict(id="index", label="Index",      type="option", flag="--index",
+                 required=True,  default="NDX",  values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",   label="Top N",      type="entry",  flag="--top",
+                 required=False, default="50"),
+            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
     "Valuation Master": {
         "path": os.path.join(ROOT, "3_valuationTool", "valuationMaster.py"),
         "desc": "Deep single-stock valuation — 5-tab HTML report with 20+ methods.",
@@ -68,30 +100,16 @@ SCRIPTS = {
                  required=False, default="1000"),
         ],
     },
-    "Value Screener": {
-        "path": os.path.join(ROOT, "1_valueScreener", "valueScreener.py"),
-        "desc": "Screen S&P 500, Nasdaq 100, Russell 2000, or TSX for undervalued stocks.",
-        "icon": "🔍",
+    "Sentiment Analyzer": {
+        "path": os.path.join(ROOT, "6_sentimentAnalyzer", "sentimentAnalyzer.py"),
+        "desc": "Multi-source sentiment — news, social, short interest, insider activity, options, analyst ratings, SEC filings & congressional trading.",
+        "icon": "📡",
         "params": [
-            dict(id="index", label="Index",      type="option", flag="--index",
-                 required=True,  default="SPX",  values=["SPX", "NDX", "RUT", "TSX"]),
-            dict(id="top",   label="Top N",      type="entry",  flag="--top",
-                 required=False, default="50"),
-            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
-                 required=False, default=True),
-        ],
-    },
-    "Growth Screener": {
-        "path": os.path.join(ROOT, "2_growthScreener", "growthScreener.py"),
-        "desc": "Screen indices for high-growth stocks using a 4-pillar quality + momentum model.",
-        "icon": "📈",
-        "params": [
-            dict(id="index", label="Index",      type="option", flag="--index",
-                 required=True,  default="NDX",  values=["SPX", "NDX", "RUT", "TSX"]),
-            dict(id="top",   label="Top N",      type="entry",  flag="--top",
-                 required=False, default="50"),
-            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
-                 required=False, default=True),
+            dict(id="csvfile", label="Portfolio CSV", type="file",  positional=True,
+                 required=True,
+                 default=os.path.join(ROOT, "4_portfolioAnalyzer", "FilPortfolio.csv")),
+            dict(id="days",    label="Lookback days", type="entry", flag="--days",
+                 required=False, default="30"),
         ],
     },
     "Portfolio Analyzer": {
@@ -107,6 +125,14 @@ SCRIPTS = {
         ],
     },
 }
+
+# Sidebar group layout — defines sections and order shown in the UI
+SIDEBAR_GROUPS = [
+    {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
+    {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener"]},
+    {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model"]},
+    {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
+]
 
 # ── Active runs ───────────────────────────────────────────────────────────────
 # run_id → {"proc": Popen, "q": Queue, "done": bool, "tmpfile": path|None}
@@ -159,6 +185,11 @@ def index():
 @app.route("/api/scripts")
 def api_scripts():
     return jsonify(SCRIPTS)
+
+
+@app.route("/api/groups")
+def api_groups():
+    return jsonify(SIDEBAR_GROUPS)
 
 
 @app.route("/api/run", methods=["POST"])
@@ -253,6 +284,12 @@ def api_stop(run_id: str):
     return jsonify({"ok": True})
 
 
+@app.route("/api/exit", methods=["POST"])
+def api_exit():
+    threading.Timer(0.3, lambda: os._exit(0)).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     """Save an uploaded portfolio CSV to the portfolioAnalyzer directory."""
@@ -301,7 +338,11 @@ HTML = r"""<!DOCTYPE html>
   .topbar  { display: flex; align-items: center; gap: 10px;
              background: var(--panel); border-bottom: 1px solid var(--border);
              padding: 0 20px; height: 52px; flex-shrink: 0; }
-  .topbar h1 { font-size: 17px; font-weight: 700; color: var(--text); }
+  .topbar h1 { font-size: 17px; font-weight: 700; color: var(--text); flex: 1; }
+  .btn-exit { font-size: 12px; font-weight: 600; padding: 6px 16px; border: 1px solid var(--border);
+              border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer;
+              transition: background .15s, color .15s, border-color .15s; }
+  .btn-exit:hover { background: var(--btn-stp); border-color: var(--btn-stp); color: #fff; }
   .body    { display: flex; flex: 1; overflow: hidden; }
 
   /* ── Sidebar ── */
@@ -396,6 +437,7 @@ HTML = r"""<!DOCTYPE html>
   <!-- Top bar -->
   <div class="topbar">
     <h1>📊&nbsp; Valuation Suite</h1>
+    <button class="btn-exit" onclick="exitApp()">Exit</button>
   </div>
 
   <div class="body">
@@ -433,19 +475,25 @@ let currentRunId  = null;
 let currentES     = null;   // EventSource
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────
-fetch("/api/scripts")
-  .then(r => r.json())
-  .then(data => {
-    SCRIPTS = data;
-    const sidebar = document.getElementById("sidebar");
-    const label   = document.createElement("div");
-    label.className = "sidebar-label";
-    label.textContent = "SCRIPTS";
-    sidebar.appendChild(label);
-    const hr = document.createElement("hr");
-    sidebar.appendChild(hr);
+Promise.all([
+  fetch("/api/scripts").then(r => r.json()),
+  fetch("/api/groups").then(r => r.json()),
+]).then(([scripts, groups]) => {
+  SCRIPTS = scripts;
+  const sidebar = document.getElementById("sidebar");
 
-    Object.keys(SCRIPTS).forEach(name => {
+  groups.forEach((group, gi) => {
+    if (gi > 0) {
+      const hr = document.createElement("hr");
+      sidebar.appendChild(hr);
+    }
+    const lbl = document.createElement("div");
+    lbl.className = "sidebar-label";
+    lbl.textContent = group.label;
+    sidebar.appendChild(lbl);
+
+    group.scripts.forEach(name => {
+      if (!SCRIPTS[name]) return;
       const b = document.createElement("button");
       b.className   = "sbtn";
       b.textContent = SCRIPTS[name].icon + "  " + name;
@@ -453,9 +501,12 @@ fetch("/api/scripts")
       b.id          = "sbtn-" + name;
       sidebar.appendChild(b);
     });
-
-    selectScript(Object.keys(SCRIPTS)[0]);
   });
+
+  // Select first script of first group by default
+  const firstName = groups[0]?.scripts[0];
+  if (firstName && SCRIPTS[firstName]) selectScript(firstName);
+});
 
 // ── Script selection ───────────────────────────────────────────────────────
 function selectScript(name) {
@@ -679,6 +730,17 @@ function logLine(text, cls) {
 
 function clearConsole() {
   document.getElementById("console").innerHTML = "";
+}
+
+// ── Exit ───────────────────────────────────────────────────────────────────
+function exitApp() {
+  if (currentRunId) stopScript();
+  logLine("\n  Shutting down server…\n", "warn");
+  fetch("/api/exit", { method: "POST" })
+    .catch(() => {})
+    .finally(() => {
+      setTimeout(() => window.close(), 400);
+    });
 }
 </script>
 </body>
