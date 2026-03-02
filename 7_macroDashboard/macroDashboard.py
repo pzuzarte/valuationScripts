@@ -73,6 +73,41 @@ COMMODITIES = [
     ("DBA",  "Agriculture",  "agriculture"),
 ]
 
+CAP_SIZE = [
+    ("SPY",  "S&P 500",         "large"),
+    ("MDY",  "S&P MidCap 400",  "mid"),
+    ("IWM",  "Russell 2000",    "small"),
+    ("IWC",  "Micro-Cap",       "micro"),
+]
+
+CAP_STYLE = [
+    ("IVW",  "Large Cap Growth", "large-growth"),
+    ("IVE",  "Large Cap Value",  "large-value"),
+    ("IJK",  "Mid Cap Growth",   "mid-growth"),
+    ("IJJ",  "Mid Cap Value",    "mid-value"),
+    ("IWO",  "Small Cap Growth", "small-growth"),
+    ("IWN",  "Small Cap Value",  "small-value"),
+]
+
+GLOBAL_INDICES = [
+    ("QQQ",  "Nasdaq 100 (Growth)",       "us"),
+    ("SPY",  "S&P 500",                   "us"),
+    ("DIA",  "Dow Jones",                 "us"),
+    ("IWM",  "Russell 2000 (Small Cap)",  "us"),
+    ("VGK",  "Europe",                    "developed"),
+    ("EWJ",  "Japan",                     "developed"),
+    ("EWG",  "Germany",                   "developed"),
+    ("EWU",  "United Kingdom",            "developed"),
+    ("EWC",  "Canada",                    "developed"),
+    ("EWA",  "Australia",                 "developed"),
+    ("EFA",  "Developed ex-US",           "developed"),
+    ("MCHI", "China",                     "emerging"),
+    ("INDA", "India",                     "emerging"),
+    ("EWZ",  "Brazil",                    "emerging"),
+    ("EEM",  "Emerging Markets",          "emerging"),
+    ("VT",   "All-World",                 "global"),
+]
+
 # ── Help popover content ───────────────────────────────────────────────────────
 _HELP_DATA = {
     # Overview
@@ -472,6 +507,91 @@ _HELP_DATA = {
             "Supply shocks (wars, weather, OPEC decisions) can temporarily override economic signals."
         ),
     },
+    # Cap Size & Style
+    "cap-size": {
+        "title": "Cap Size Rotation",
+        "body": (
+            "<b>What it shows:</b> Price performance across the four market-cap tiers: "
+            "Large (SPY), Mid (MDY), Small (IWM), and Micro (IWC).<br><br>"
+            "<b>Why it matters:</b> Small-cap outperformance signals broad economic confidence — "
+            "investors are willing to take on more risk. Small-cap underperformance signals "
+            "defensiveness or credit stress (small caps are more leveraged and rate-sensitive).<br><br>"
+            "<b>Classic signal:</b> IWM leading SPY by 3%+ over 3 months = healthy bull market breadth. "
+            "IWM lagging by 4%+ = narrowing leadership, caution flag."
+        ),
+    },
+    "cap-style": {
+        "title": "Growth vs Value — Across Cap Sizes",
+        "body": (
+            "<b>What it shows:</b> Returns for growth and value ETFs at each cap tier, "
+            "covering Large, Mid, and Small.<br><br>"
+            "<b>Growth vs Value rotation:</b> Growth outperforms when rates are falling or expected to fall "
+            "(future earnings worth more at lower discount rates). Value outperforms when rates rise, "
+            "inflation is elevated, or the economic cycle is early-to-mid stage.<br><br>"
+            "<b>Key ratio to watch:</b> IVW/IVE (Large Cap Growth/Value). "
+            "Rising = growth regime. Falling = value rotation. "
+            "This ratio closely tracks the 10Y Treasury yield — rising yields compress growth multiples."
+        ),
+    },
+    "cap-size-chart": {
+        "title": "Cap Size — 1Y Normalised Chart",
+        "body": (
+            "<b>What it shows:</b> SPY, MDY, IWM, and IWC all set to 100 at the start of the "
+            "12-month window, so you can directly compare relative performance across cap tiers.<br><br>"
+            "<b>How to read it:</b> A widening gap between large (SPY) and small (IWM/IWC) suggests "
+            "mega-cap concentration driving index returns. Converging lines = broader participation. "
+            "IWC leading everything = very risk-on environment."
+        ),
+    },
+    "growth-value-ratio": {
+        "title": "Growth / Value Ratio (IVW ÷ IVE)",
+        "body": (
+            "<b>What it shows:</b> The price ratio of iShares Large Cap Growth (IVW) divided by "
+            "iShares Large Cap Value (IVE) over the past 12 months.<br><br>"
+            "<b>Rising ratio:</b> Growth outperforming value — typically driven by falling rate "
+            "expectations, strong tech earnings, or risk-on sentiment.<br><br>"
+            "<b>Falling ratio:</b> Value rotation — often driven by rising rates, early economic "
+            "cycle conditions, inflation, or a shift from momentum to cheapness.<br><br>"
+            "<b>Historical context:</b> Growth dramatically outperformed value 2017–2021 (zero rates). "
+            "Value rebounded sharply in 2022 as rates surged."
+        ),
+    },
+    # Global Indices
+    "global-indices": {
+        "title": "Global Market Indices",
+        "body": (
+            "<b>What it shows:</b> Performance across 16 major global ETFs spanning US, "
+            "Developed, Emerging, and All-World markets — sorted by 1-month return.<br><br>"
+            "<b>Region colour codes:</b> Blue = US · Green = Developed ex-US · "
+            "Orange = Emerging Markets · Purple = All-World.<br><br>"
+            "<b>How to use it:</b> Look for regional leadership rotation. "
+            "When EFA or EEM outperform SPY, it often signals USD weakness, "
+            "relative valuation opportunities abroad, or improving global growth. "
+            "US dominance (QQQ/SPY leading) signals dollar strength and US earnings premium."
+        ),
+    },
+    "global-norm-chart": {
+        "title": "QQQ vs Global — 1Y Normalised Chart",
+        "body": (
+            "<b>What it shows:</b> Key global indices all set to 100 at the start of the "
+            "12-month window. QQQ (Nasdaq growth) is shown in bold blue as the benchmark.<br><br>"
+            "<b>How to read it:</b> Lines above QQQ mean that region is outperforming US growth. "
+            "Lines below = underperformance vs the Nasdaq benchmark.<br><br>"
+            "<b>Why QQQ as benchmark?</b> QQQ represents the highest-returning US equity benchmark "
+            "of the past decade. Any global region that outperforms it deserves serious attention "
+            "as a potential rotation target."
+        ),
+    },
+    "global-bar-chart": {
+        "title": "Global 1M Returns — Ranked",
+        "body": (
+            "<b>What it shows:</b> 1-month return for every tracked global index, "
+            "sorted best to worst from top to bottom.<br><br>"
+            "<b>How to use it:</b> Quickly identify which geographies are leading and lagging "
+            "the current month. Persistent leadership from the same region across multiple months "
+            "is a rotation signal worth acting on."
+        ),
+    },
 }
 
 
@@ -778,7 +898,7 @@ def _interp_sectors(sectors: dict) -> str:
 
 
 def _interp_macro(buffett: dict, cape: dict, recession: dict, credit: dict,
-                  money_mkt: dict, global_eq: dict) -> str:
+                  money_mkt: dict, global_idx: dict) -> str:
     bullets = []
 
     # Combined valuation picture
@@ -835,9 +955,9 @@ def _interp_macro(buffett: dict, cape: dict, recession: dict, credit: dict,
             bullets.append(f'Money market assets are at {_v(f"${mm_val:.2f}T")} — broadly stable, reflecting neither an acute flight to safety nor a broad rush into risk.')
 
     # US vs International
-    spy_ytd = global_eq.get("SPY", {}).get("YTD")
-    efa_ytd = global_eq.get("EFA", {}).get("YTD")
-    eem_ytd = global_eq.get("EEM", {}).get("YTD")
+    spy_ytd = global_idx.get("SPY", {}).get("YTD")
+    efa_ytd = global_idx.get("EFA", {}).get("YTD")
+    eem_ytd = global_idx.get("EEM", {}).get("YTD")
     if spy_ytd is not None and efa_ytd is not None:
         diff = spy_ytd - efa_ytd
         if diff > 5:
@@ -1388,6 +1508,72 @@ def fetch_credit_spreads() -> dict:
     return result
 
 
+def fetch_cap_size() -> dict:
+    """Cap size (SPY/MDY/IWM/IWC) and style (growth/value) ETF performance."""
+    tickers = list(dict.fromkeys(
+        [t for t, _, _ in CAP_SIZE] + [t for t, _, _ in CAP_STYLE]
+    ))
+    result = {}
+
+    def _one(ticker):
+        try:
+            h = yf.Ticker(ticker).history(period="1y")
+            if h.empty:
+                return ticker, None
+            close = h["Close"]
+            price = float(close.iloc[-1])
+            return ticker, {
+                "price":  round(price, 2),
+                "1W":     _perf_from_hist(close, 5),
+                "1M":     _perf_from_hist(close, 21),
+                "3M":     _perf_from_hist(close, 63),
+                "6M":     _perf_from_hist(close, 126),
+                "YTD":    _ytd_perf(h),
+                "dates":  [str(d.date()) for d in h.index],
+                "closes": [round(float(v), 4) for v in close],
+            }
+        except Exception:
+            return ticker, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for ticker, data in pool.map(_one, tickers):
+            if data:
+                result[ticker] = data
+    return result
+
+
+def fetch_global_indices() -> dict:
+    """Comprehensive global market indices ETF performance."""
+    tickers = list(dict.fromkeys([t for t, _, _ in GLOBAL_INDICES]))
+    result = {}
+
+    def _one(ticker):
+        try:
+            h = yf.Ticker(ticker).history(period="1y")
+            if h.empty:
+                return ticker, None
+            close = h["Close"]
+            price = float(close.iloc[-1])
+            return ticker, {
+                "price":  round(price, 2),
+                "1W":     _perf_from_hist(close, 5),
+                "1M":     _perf_from_hist(close, 21),
+                "3M":     _perf_from_hist(close, 63),
+                "6M":     _perf_from_hist(close, 126),
+                "YTD":    _ytd_perf(h),
+                "dates":  [str(d.date()) for d in h.index],
+                "closes": [round(float(v), 4) for v in close],
+            }
+        except Exception:
+            return ticker, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for ticker, data in pool.map(_one, tickers):
+            if data:
+                result[ticker] = data
+    return result
+
+
 def fetch_commodities() -> dict:
     """Commodity ETF price history for the Commodities tab."""
     tickers = [t for t, _, _ in COMMODITIES]
@@ -1871,7 +2057,7 @@ def _vix_in_range(v, rng):
         return False
 
 
-def _tab_sectors(sectors: dict) -> str:
+def _tab_sectors(sectors: dict, cap_size: dict) -> str:
     h = ""
 
     def _hcell(v):
@@ -1928,10 +2114,74 @@ def _tab_sectors(sectors: dict) -> str:
     h += '</div>'
 
     h += '</div>'  # two-col
+
+    # ── Cap Size & Style Rotation ──────────────────────────────────────────────
+    h += '<div class="sec-hdr" style="margin-top:32px">Cap Size &amp; Style Rotation</div>'
+
+    cap_tier_colors = {"large": "#4f8ef7", "mid": "#00c896", "small": "#f0a500", "micro": "#a78bfa"}
+
+    # Size table
+    h += f'<div class="card-title">By Market Capitalisation {help_btn("cap-size")}</div>'
+    size_sorted = sorted(CAP_SIZE, key=lambda x: cap_size.get(x[0], {}).get("1M") or -999, reverse=True)
+    h += '<div class="tbl-wrap"><table>'
+    h += ('<thead><tr><th>ETF</th><th>Index</th><th>Tier</th>'
+          '<th class="num">Price</th>'
+          '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
+          '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
+    for ticker, name, tier in size_sorted:
+        d     = cap_size.get(ticker, {})
+        price = d.get("price", 0)
+        tc    = cap_tier_colors.get(tier, "#6b7194")
+        h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
+              f'<td><span class="pill" style="background:{tc}22;color:{tc}">{tier}</span></td>'
+              f'<td class="num">${price:.2f}</td>'
+              f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}'
+              f'{_hcell(d.get("3M"))}{_hcell(d.get("6M"))}{_hcell(d.get("YTD"))}</tr>')
+    h += '</tbody></table></div>'
+
+    # Style table
+    style_colors = {
+        "large-growth": "#4f8ef7", "large-value": "#00c896",
+        "mid-growth":   "#60a5fa", "mid-value":   "#4fc08d",
+        "small-growth": "#f0a500", "small-value": "#e07b39",
+    }
+    h += f'<div class="card-title" style="margin-top:20px">Growth vs Value — Across Cap Sizes {help_btn("cap-style")}</div>'
+    style_sorted = sorted(CAP_STYLE, key=lambda x: cap_size.get(x[0], {}).get("1M") or -999, reverse=True)
+    h += '<div class="tbl-wrap"><table>'
+    h += ('<thead><tr><th>ETF</th><th>Style</th><th>Bias</th>'
+          '<th class="num">Price</th>'
+          '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
+          '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
+    for ticker, name, style in style_sorted:
+        d          = cap_size.get(ticker, {})
+        price      = d.get("price", 0)
+        sc         = style_colors.get(style, "#6b7194")
+        bias_lbl   = style.split("-")[1].title()
+        h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
+              f'<td><span class="pill" style="background:{sc}22;color:{sc}">{bias_lbl}</span></td>'
+              f'<td class="num">${price:.2f}</td>'
+              f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}'
+              f'{_hcell(d.get("3M"))}{_hcell(d.get("6M"))}{_hcell(d.get("YTD"))}</tr>')
+    h += '</tbody></table></div>'
+
+    # Charts
+    h += '<div class="two-col" style="margin-top:20px">'
+    h += (f'<div class="chart-card">'
+          f'<h3>Cap Size — 1Y Normalised (Base = 100) {help_btn("cap-size-chart")}</h3>'
+          '<div class="chart-wrap" style="height:260px"><canvas id="chart-cap-size"></canvas></div>'
+          '<p class="note" style="margin-top:8px">All ETFs set to 100 at start of window. '
+          'Divergence shows whether small or large caps are leading the rally.</p></div>')
+    h += (f'<div class="chart-card">'
+          f'<h3>Growth / Value Ratio — Large Cap (IVW ÷ IVE) {help_btn("growth-value-ratio")}</h3>'
+          '<div class="chart-wrap" style="height:260px"><canvas id="chart-growth-value"></canvas></div>'
+          '<p class="note" style="margin-top:8px">Rising = growth outperforming value '
+          '(falling rates / tech leadership). Falling = value rotation (rising rates / cyclicals).</p></div>')
+    h += '</div>'
+
     return h
 
 
-def _tab_macro_signals(buffett: dict, money_mkt: dict, global_eq: dict,
+def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
                        cape: dict, recession: dict, credit: dict) -> str:
     h = ""
 
@@ -2086,42 +2336,63 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_eq: dict,
           '</div>')
     h += '</div>'  # two-col
 
-    # ── US vs International Equity ─────────────────────────────────────────────
-    h += '<div class="sec-hdr">US vs International Equity Rotation</div>'
+    # ── Global Market Indices ───────────────────────────────────────────────────
+    h += '<div class="sec-hdr">Global Market Indices — Comprehensive Comparison</div>'
 
     def _td(v):
         c = clr(v)
         return f'<td class="num" style="color:{c};font-weight:600">{fmt_pct(v)}</td>'
 
-    h += f'<div class="card"><div class="card-title">SPY vs EFA (Developed ex-US) vs EEM (Emerging Markets) {help_btn("us-vs-intl")}</div>'
+    region_colors = {
+        "us":        "#4f8ef7",
+        "developed": "#00c896",
+        "emerging":  "#f0a500",
+        "global":    "#a78bfa",
+    }
+
+    # Comprehensive heatmap table — sorted by 1M
+    global_sorted = sorted(
+        GLOBAL_INDICES,
+        key=lambda x: global_idx.get(x[0], {}).get("1M") or -999,
+        reverse=True,
+    )
+    h += f'<div class="card"><div class="card-title">All Major Indices — 1W / 1M / 3M / 6M / YTD {help_btn("global-indices")}</div>'
     h += '<div class="tbl-wrap"><table>'
-    h += ('<thead><tr><th>ETF</th><th>Description</th><th class="num">Price</th>'
-          '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
+    h += ('<thead><tr><th>ETF</th><th>Market</th><th>Region</th>'
+          '<th class="num">Price</th>'
+          '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
-    for ticker, desc in [
-        ("SPY", "US Large Cap (S&amp;P 500)"),
-        ("EFA", "Developed Markets ex-US (MSCI EAFE)"),
-        ("EEM", "Emerging Markets (MSCI EM)"),
-    ]:
-        d         = global_eq.get(ticker, {})
+    for ticker, name, region in global_sorted:
+        d         = global_idx.get(ticker, {})
         price     = d.get("price")
         price_str = f"${price:.2f}" if price else "—"
-        h += (f'<tr><td class="sym">{ticker}</td><td>{desc}</td>'
+        rc        = region_colors.get(region, "#6b7194")
+        h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
+              f'<td><span class="pill" style="background:{rc}22;color:{rc}">{region}</span></td>'
               f'<td class="num">{price_str}</td>'
               f'{_td(d.get("1W"))}{_td(d.get("1M"))}{_td(d.get("3M"))}'
               f'{_td(d.get("6M"))}{_td(d.get("YTD"))}</tr>')
     h += '</tbody></table></div></div>'
 
+    # Charts
     h += '<div class="two-col" style="margin-top:16px">'
-    h += (f'<div class="chart-card"><h3>SPY vs EFA vs EEM — 1Y Normalized (Base = 100) {help_btn("us-vs-intl")}</h3>'
-          '<div class="chart-wrap" style="height:250px"><canvas id="chart-global-norm"></canvas></div>'
-          '<p class="note" style="margin-top:8px">All set to 100 at start of 12-month window. '
-          'Shows relative outperformance vs underperformance.</p></div>')
-    h += (f'<div class="chart-card"><h3>SPY / EFA Ratio — US vs Developed World {help_btn("us-vs-intl")}</h3>'
-          '<div class="chart-wrap" style="height:250px"><canvas id="chart-spy-efa-ratio"></canvas></div>'
-          '<p class="note" style="margin-top:8px">Rising = US outperforming. Falling = rotation '
-          'to international. Key driver: USD direction and earnings divergence.</p></div>')
+    h += (f'<div class="chart-card">'
+          f'<h3>QQQ vs Global Indices — 1Y Normalised (Base = 100) {help_btn("global-norm-chart")}</h3>'
+          '<div class="chart-wrap" style="height:300px"><canvas id="chart-global-norm"></canvas></div>'
+          '<p class="note" style="margin-top:8px">All set to 100 at start of window. '
+          'QQQ shown in bold blue as the growth benchmark. Sampled weekly for clarity.</p></div>')
+    h += (f'<div class="chart-card">'
+          f'<h3>Global 1M Returns — Ranked Best to Worst {help_btn("global-bar-chart")}</h3>'
+          '<div class="chart-wrap" style="height:300px"><canvas id="chart-global-bar"></canvas></div>'
+          '<p class="note" style="margin-top:8px">1-month return across all tracked '
+          'global indices, colour-coded by region.</p></div>')
     h += '</div>'
+
+    h += (f'<div class="chart-card" style="margin-top:16px">'
+          f'<h3>SPY / EFA Ratio — US vs Developed World {help_btn("us-vs-intl")}</h3>'
+          '<div class="chart-wrap" style="height:200px"><canvas id="chart-spy-efa-ratio"></canvas></div>'
+          '<p class="note" style="margin-top:8px">Rising = US outperforming. '
+          'Falling = rotation to international. Key driver: USD direction and earnings divergence.</p></div>')
 
     return h
 
@@ -2222,8 +2493,8 @@ def _tab_commodities(commodities: dict) -> str:
     return h
 
 
-def _build_charts_js(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_eq,
-                     cape, recession, credit, commodities) -> str:
+def _build_charts_js(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_idx,
+                     cape, recession, credit, commodities, cap_size) -> str:
     js = ""
 
     # ── 1. Regime gauge ────────────────────────────────────────────────────────
@@ -2573,6 +2844,99 @@ if(sCtx){{
 }}
 """
 
+    # ── 7c. Cap size normalised 1Y ────────────────────────────────────────────
+    # Build aligned date axis (use SPY as reference, sample weekly)
+    spy_cs    = cap_size.get("SPY", {})
+    cs_dates  = spy_cs.get("dates", [])[::5]
+    n_cs      = len(cs_dates)
+
+    def _cs_norm(ticker):
+        vals = cap_size.get(ticker, {}).get("closes", [])[::5]
+        if not vals or vals[0] == 0:
+            return [None] * n_cs
+        base = vals[0]
+        padded = (vals + [None] * n_cs)[:n_cs]
+        return [round(v / base * 100, 2) if v else None for v in padded]
+
+    cs_datasets = [
+        {"ticker": "SPY",  "label": "SPY (Large)",  "color": "#4f8ef7", "width": 2.5},
+        {"ticker": "MDY",  "label": "MDY (Mid)",    "color": "#00c896", "width": 2},
+        {"ticker": "IWM",  "label": "IWM (Small)",  "color": "#f0a500", "width": 2},
+        {"ticker": "IWC",  "label": "IWC (Micro)",  "color": "#a78bfa", "width": 2},
+    ]
+    ds_json = json.dumps([
+        {"label": d["label"],
+         "data":  _cs_norm(d["ticker"]),
+         "borderColor": d["color"],
+         "borderWidth": d["width"],
+         "pointRadius": 0,
+         "tension": 0.2,
+         "spanGaps": True}
+        for d in cs_datasets
+    ])
+    js += f"""
+var csCtx = document.getElementById('chart-cap-size');
+if(csCtx){{
+  new Chart(csCtx,{{
+    type:'line',
+    data:{{labels:{json.dumps(cs_dates)},datasets:{ds_json}}},
+    options:{{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{{
+        legend:{{labels:{{color:'#6b7194',boxWidth:12}}}},
+        tooltip:{{mode:'index',intersect:false,
+          callbacks:{{label:ctx=>ctx.dataset.label+': '+ctx.parsed.y?.toFixed(1)}}}}
+      }},
+      scales:{{
+        x:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',maxTicksLimit:8}}}},
+        y:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',callback:v=>v.toFixed(0)}}}}
+      }}
+    }}
+  }});
+}}
+"""
+
+    # ── 7d. Growth / Value ratio (IVW ÷ IVE) ─────────────────────────────────
+    ivw_d = cap_size.get("IVW", {})
+    ive_d = cap_size.get("IVE", {})
+    ivw_closes = ivw_d.get("closes", [])[::5]
+    ive_closes = ive_d.get("closes", [])[::5]
+    gv_dates   = ivw_d.get("dates",  [])[::5]
+    gv_len     = min(len(ivw_closes), len(ive_closes))
+    gv_ratio   = [
+        round(ivw_closes[i] / ive_closes[i], 4) if ive_closes[i] else None
+        for i in range(gv_len)
+    ]
+    js += f"""
+var gvCtx = document.getElementById('chart-growth-value');
+if(gvCtx){{
+  new Chart(gvCtx,{{
+    type:'line',
+    data:{{
+      labels:{json.dumps(gv_dates[:gv_len])},
+      datasets:[{{
+        label:'IVW / IVE (Growth ÷ Value)',
+        data:{json.dumps(gv_ratio)},
+        borderColor:'#4f8ef7',borderWidth:2.5,
+        pointRadius:0,tension:0.2,spanGaps:true,
+        fill:{{target:'origin',above:'rgba(79,142,247,0.07)'}}
+      }}]
+    }},
+    options:{{
+      responsive:true,maintainAspectRatio:false,
+      plugins:{{
+        legend:{{display:false}},
+        tooltip:{{callbacks:{{label:ctx=>'Growth/Value: '+ctx.parsed.y?.toFixed(3)}}}}
+      }},
+      scales:{{
+        x:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',maxTicksLimit:8}}}},
+        y:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',callback:v=>v.toFixed(2)}}}}
+      }}
+    }}
+  }});
+}}
+"""
+
     # ── Close sectors deferred ─────────────────────────────────────────────────
     js += "\n});\n"
 
@@ -2657,45 +3021,50 @@ if(mmCtx){{
 }}
 """
 
-    # ── 11. SPY vs EFA vs EEM normalized ──────────────────────────────────────
-    spy_d  = global_eq.get("SPY", {})
-    efa_d  = global_eq.get("EFA", {})
-    eem_d  = global_eq.get("EEM", {})
-    # Sample weekly
-    spy_dates  = spy_d.get("dates",  [])[::5]
-    spy_closes = spy_d.get("closes", [])[::5]
-    efa_closes = efa_d.get("closes", [])[::5]
-    eem_closes = eem_d.get("closes", [])[::5]
+    # ── 11. Global indices normalised (QQQ vs World) ──────────────────────────
+    # Chart subset: QQQ, SPY, VGK, EWJ, EFA, MCHI, INDA, EEM — 8 lines, weekly
+    gi_spec = [
+        ("QQQ",  "QQQ (US Growth)",    "#4f8ef7", 3.0),
+        ("SPY",  "SPY (US)",           "#60a5fa", 1.8),
+        ("VGK",  "VGK (Europe)",       "#00c896", 1.8),
+        ("EWJ",  "EWJ (Japan)",        "#4fc08d", 1.8),
+        ("EFA",  "EFA (Dev. ex-US)",   "#34d399", 1.5),
+        ("MCHI", "MCHI (China)",       "#f0a500", 1.8),
+        ("INDA", "INDA (India)",       "#fb923c", 1.8),
+        ("EEM",  "EEM (Emerging)",     "#e07b39", 1.5),
+    ]
+    ref_gi   = global_idx.get("QQQ", {})
+    gi_dates = ref_gi.get("dates", [])[::5]
+    n_gi     = len(gi_dates)
 
-    def _norm(vals, n):
+    def _gi_norm(ticker):
+        vals = global_idx.get(ticker, {}).get("closes", [])[::5]
         if not vals or vals[0] == 0:
-            return [None] * n
+            return [None] * n_gi
         base = vals[0]
-        padded = (vals + [None] * n)[:n]
+        padded = (vals + [None] * n_gi)[:n_gi]
         return [round(v / base * 100, 2) if v else None for v in padded]
 
-    n = len(spy_dates)
-    spy_norm = _norm(spy_closes, n)
-    efa_norm = _norm(efa_closes, n)
-    eem_norm = _norm(eem_closes, n)
-
+    gi_ds_json = json.dumps([
+        {"label": lbl,
+         "data":  _gi_norm(t),
+         "borderColor": col,
+         "borderWidth": bw,
+         "pointRadius": 0,
+         "tension": 0.2,
+         "spanGaps": True}
+        for t, lbl, col, bw in gi_spec
+    ])
     js += f"""
 var gnCtx = document.getElementById('chart-global-norm');
 if(gnCtx){{
   new Chart(gnCtx,{{
     type:'line',
-    data:{{
-      labels:{json.dumps(spy_dates)},
-      datasets:[
-        {{label:'SPY (US)',data:{json.dumps(spy_norm)},borderColor:'#4f8ef7',borderWidth:2,pointRadius:0,tension:0.2,spanGaps:true}},
-        {{label:'EFA (Developed)',data:{json.dumps(efa_norm)},borderColor:'#00c896',borderWidth:2,pointRadius:0,tension:0.2,spanGaps:true}},
-        {{label:'EEM (Emerging)',data:{json.dumps(eem_norm)},borderColor:'#f0a500',borderWidth:2,pointRadius:0,tension:0.2,spanGaps:true}}
-      ]
-    }},
+    data:{{labels:{json.dumps(gi_dates)},datasets:{gi_ds_json}}},
     options:{{
       responsive:true,maintainAspectRatio:false,
       plugins:{{
-        legend:{{labels:{{color:'#6b7194',boxWidth:12}}}},
+        legend:{{labels:{{color:'#6b7194',boxWidth:10,font:{{size:10}}}}}},
         tooltip:{{mode:'index',intersect:false,
           callbacks:{{label:ctx=>ctx.dataset.label+': '+ctx.parsed.y?.toFixed(1)}}}}
       }},
@@ -2708,20 +3077,66 @@ if(gnCtx){{
 }}
 """
 
-    # ── 12. SPY / EFA ratio ────────────────────────────────────────────────────
-    min_len    = min(len(spy_closes), len(efa_closes))
+    # ── 12. Global 1M returns — horizontal bar, sorted best to worst ──────────
+    gi_region_colors = {
+        "us":        "#4f8ef7",
+        "developed": "#00c896",
+        "emerging":  "#f0a500",
+        "global":    "#a78bfa",
+    }
+    gi_pairs = sorted(
+        [(name, global_idx.get(t, {}).get("1M") or 0, region)
+         for t, name, region in GLOBAL_INDICES],
+        key=lambda x: x[1], reverse=True
+    )
+    gi_bar_labels  = [p[0] for p in gi_pairs]
+    gi_bar_vals    = [p[1] for p in gi_pairs]
+    gi_bar_colors  = [gi_region_colors.get(p[2], "#6b7194") + "bb" for p in gi_pairs]
+    js += f"""
+var gbCtx = document.getElementById('chart-global-bar');
+if(gbCtx){{
+  new Chart(gbCtx,{{
+    type:'bar',
+    data:{{
+      labels:{json.dumps(gi_bar_labels)},
+      datasets:[{{
+        label:'1M %',
+        data:{json.dumps(gi_bar_vals)},
+        backgroundColor:{json.dumps(gi_bar_colors)},
+        borderRadius:4
+      }}]
+    }},
+    options:{{
+      indexAxis:'y',
+      responsive:true,maintainAspectRatio:false,
+      plugins:{{legend:{{display:false}},tooltip:{{callbacks:{{label:ctx=>ctx.parsed.x.toFixed(2)+'%'}}}}}},
+      scales:{{
+        x:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',callback:v=>v.toFixed(1)+'%'}}}},
+        y:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',font:{{size:10}}}}}}
+      }}
+    }}
+  }});
+}}
+"""
+
+    # ── 13. SPY / EFA ratio ────────────────────────────────────────────────────
+    spy_gi  = global_idx.get("SPY", {})
+    efa_gi  = global_idx.get("EFA", {})
+    spy_closes_gi = spy_gi.get("closes", [])[::5]
+    efa_closes_gi = efa_gi.get("closes", [])[::5]
+    spy_dates_gi  = spy_gi.get("dates",  [])[::5]
+    sr_len    = min(len(spy_closes_gi), len(efa_closes_gi))
     ratio_vals = [
-        round(spy_closes[i] / efa_closes[i], 4) if efa_closes[i] else None
-        for i in range(min_len)
+        round(spy_closes_gi[i] / efa_closes_gi[i], 4) if efa_closes_gi[i] else None
+        for i in range(sr_len)
     ]
-    ratio_dates = spy_dates[:min_len]
     js += f"""
 var srCtx = document.getElementById('chart-spy-efa-ratio');
 if(srCtx){{
   new Chart(srCtx,{{
     type:'line',
     data:{{
-      labels:{json.dumps(ratio_dates)},
+      labels:{json.dumps(spy_dates_gi[:sr_len])},
       datasets:[{{
         label:'SPY / EFA',
         data:{json.dumps(ratio_vals)},
@@ -3021,8 +3436,8 @@ if(caCtx){{
     return js
 
 
-def build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_eq,
-               cape, recession, credit, commodities) -> str:
+def build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_idx,
+               cape, recession, credit, commodities, cap_size) -> str:
     now = datetime.datetime.now().strftime("%B %d, %Y  %H:%M")
 
     h  = '<!DOCTYPE html><html lang="en"><head>'
@@ -3080,13 +3495,13 @@ def build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_
     h += '</div>'
 
     h += f'<div id="tab-sectors" class="tab-panel">'
-    h += _tab_sectors(sectors)
+    h += _tab_sectors(sectors, cap_size)
     h += _interp_sectors(sectors)
     h += '</div>'
 
     h += f'<div id="tab-macro" class="tab-panel">'
-    h += _tab_macro_signals(buffett, money_mkt, global_eq, cape, recession, credit)
-    h += _interp_macro(buffett, cape, recession, credit, money_mkt, global_eq)
+    h += _tab_macro_signals(buffett, money_mkt, global_idx, cape, recession, credit)
+    h += _interp_macro(buffett, cape, recession, credit, money_mkt, global_idx)
     h += '</div>'
 
     h += f'<div id="tab-commodities" class="tab-panel">'
@@ -3106,8 +3521,8 @@ def build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_
           'document.getElementById("tab-"+id).classList.add("active");'
           'btn.classList.add("active");'
           'if(window._dc[id]){window._dc[id].forEach(f=>f());delete window._dc[id];}}\n')
-    h += _build_charts_js(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_eq,
-                          cape, recession, credit, commodities)
+    h += _build_charts_js(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_idx,
+                          cape, recession, credit, commodities, cap_size)
     # Help popover shared JS
     import json as _json
     help_js_obj = _json.dumps({k: v for k, v in _HELP_DATA.items()})
@@ -3167,18 +3582,20 @@ def main():
     print("\n  🌐  Macro Dashboard\n")
 
     steps = [
-        ("[1/12] Fetching Treasury yield curve...",    fetch_treasury_yields),
-        ("[2/12] Fetching VIX & volatility data...",   fetch_vix),
-        ("[3/12] Fetching cross-asset prices...",      fetch_cross_asset),
-        ("[4/12] Fetching sector ETFs...",             fetch_sectors),
-        ("[5/12] Fetching yfinance yield history...",  fetch_yf_yield_history),
-        ("[6/12] Fetching Buffett Index (FRED)...",    fetch_buffett_index),
-        ("[7/12] Fetching money market data (FRED)...",fetch_money_markets),
-        ("[8/12] Fetching global equity (EFA/EEM)...", fetch_global_equity),
-        ("[9/12] Fetching Shiller CAPE (FRED)...",     fetch_shiller_cape),
-        ("[10/12] Fetching recession probability...",  fetch_recession_prob),
-        ("[11/12] Fetching credit spreads (FRED)...",  fetch_credit_spreads),
-        ("[12/12] Fetching commodity prices...",       fetch_commodities),
+        ("[1/14] Fetching Treasury yield curve...",      fetch_treasury_yields),
+        ("[2/14] Fetching VIX & volatility data...",     fetch_vix),
+        ("[3/14] Fetching cross-asset prices...",        fetch_cross_asset),
+        ("[4/14] Fetching sector ETFs...",               fetch_sectors),
+        ("[5/14] Fetching yfinance yield history...",    fetch_yf_yield_history),
+        ("[6/14] Fetching Buffett Index (FRED)...",      fetch_buffett_index),
+        ("[7/14] Fetching money market data (FRED)...",  fetch_money_markets),
+        ("[8/14] Fetching global indices (comprehensive)...", fetch_global_indices),
+        ("[9/14] Fetching Shiller CAPE...",              fetch_shiller_cape),
+        ("[10/14] Fetching recession probability...",    fetch_recession_prob),
+        ("[11/14] Fetching credit spreads (FRED)...",    fetch_credit_spreads),
+        ("[12/14] Fetching commodity prices...",         fetch_commodities),
+        ("[13/14] Fetching cap size ETFs...",            fetch_cap_size),
+        ("[14/14] Fetching global equity legacy...",     fetch_global_equity),
     ]
 
     results = []
@@ -3187,16 +3604,17 @@ def main():
         results.append(fn())
 
     (treasury, vix, cross, sectors, yf_yields,
-     buffett, money_mkt, global_eq,
-     cape, recession, credit, commodities) = results
+     buffett, money_mkt, global_idx,
+     cape, recession, credit, commodities,
+     cap_size, _global_eq_legacy) = results
 
     print("\n  Computing macro regime score...")
     regime = compute_regime(cross, vix, treasury)
     print(f"  Regime: {regime['label']} ({regime['score']}/100)\n")
 
     print("  Generating report...")
-    html = build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_eq,
-                      cape, recession, credit, commodities)
+    html = build_html(regime, cross, vix, treasury, yf_yields, sectors, buffett, money_mkt, global_idx,
+                      cape, recession, credit, commodities, cap_size)
 
     date_prefix = datetime.datetime.now().strftime("%Y_%m_%d")
     outfile     = os.path.join(OUTPUT_DIR, f"{date_prefix}_macro.html")

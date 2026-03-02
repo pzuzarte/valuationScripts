@@ -1276,6 +1276,431 @@ def fetch_all_yfinance(ticker: str) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────
+#  SEASONALITY & CYCLE ANALYSIS
+# ─────────────────────────────────────────────────────────────────
+
+_CYCLE_MAP = {
+    "Technology":             ("Secular Growth",    "Long-term structural adoption; partially insulated from short cycles; rate-regime sensitive"),
+    "Consumer Cyclical":      ("Cyclical",           "Highly sensitive to consumer confidence and disposable income; peaks mid-expansion"),
+    "Industrials":            ("Cyclical",           "Tracks manufacturing output and capital spending; early beneficiary of expansions"),
+    "Basic Materials":        ("Cyclical",           "Commodity-price driven; leads economic cycles; high earnings volatility"),
+    "Financial Services":     ("Cyclical",           "Credit cycle sensitive; benefits from rate spread widening in early expansion"),
+    "Energy":                 ("Cyclical",           "Oil/gas price driven; late-cycle outperformer; underperforms in recessions"),
+    "Healthcare":             ("Defensive",          "Non-discretionary demand; relatively immune to GDP cycles; earnings stability"),
+    "Consumer Defensive":     ("Defensive",          "Staple spending persists through downturns; low but predictable growth"),
+    "Utilities":              ("Defensive",          "Regulated revenues; rate-sensitive; outperforms in late-cycle contractions"),
+    "Real Estate":            ("Defensive",          "Income-like; rate-sensitive; underperforms when rates rise sharply"),
+    "Communication Services": ("Secular Growth",     "Hybrid: cyclical ad revenue + defensive subscription/telecom revenue"),
+}
+
+_CYCLE_COLORS = {
+    "Secular Growth":   "#4f8ef7",
+    "Cyclical":         "#f0a500",
+    "Defensive":        "#00c896",
+    "Counter-Cyclical": "#e87c3e",
+}
+
+_MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun",
+               "Jul","Aug","Sep","Oct","Nov","Dec"]
+
+
+# ── Info-button help data ──────────────────────────────────────────────────
+_VM_HELP_DATA = {
+    "DCF": {
+        "title": "Discounted Cash Flow (DCF)",
+        "body": "Projects free cash flows over 5 years using an estimated growth rate, then discounts them back using WACC. Adds a terminal value (Gordon Growth Model) and subtracts net debt. Most sensitive to WACC and growth rate assumptions."
+    },
+    "P/FCF": {
+        "title": "Price / Free Cash Flow (P/FCF)",
+        "body": "Applies the sector median P/FCF multiple to TTM free cash flow per share. Assumes the market prices the stock in line with peers on a cash-generation basis. Reliable when FCF is stable; noisy for capital-intensive or early-stage companies."
+    },
+    "P/E (TTM)": {
+        "title": "Price / Earnings — TTM",
+        "body": "Applies the sector median P/E multiple to trailing twelve-month EPS. Classic relative valuation — the stock should trade at a similar earnings multiple to its peers. Less useful for companies with volatile or negative earnings."
+    },
+    "EV/EBITDA": {
+        "title": "EV / EBITDA",
+        "body": "Benchmarks the stock's enterprise value against sector-median EV/EBITDA, then back-solves for implied price. Capital-structure neutral, useful for comparing companies with different debt levels."
+    },
+    "Three-Stage DCF": {
+        "title": "Three-Stage DCF",
+        "body": "A DCF with three phases: high growth (years 1–5), fade-down (years 6–10), and terminal growth (year 11+). More realistic than single-stage for hyper-growth companies gradually maturing. Requires a credible long-term terminal growth assumption."
+    },
+    "Monte Carlo DCF": {
+        "title": "Monte Carlo DCF",
+        "body": "Runs thousands of DCF simulations with randomly varied inputs (growth rate, WACC, terminal growth). Returns a probability-weighted median fair value and a confidence range. Captures model uncertainty that a single-point DCF ignores."
+    },
+    "FCF Yield": {
+        "title": "FCF Yield",
+        "body": "Inverts the P/FCF multiple: Fair Value = FCF per share / target yield. The target yield is derived from the risk-free rate plus a risk premium. A higher required yield (riskier company) implies a lower fair value."
+    },
+    "Residual Income (RIM)": {
+        "title": "Residual Income Model (RIM)",
+        "body": "Starts from book value and adds the present value of future residual income (net income minus equity cost of capital × book value). Rewards companies earning above their cost of equity. Works well for financials and capital-intensive companies."
+    },
+    "ROIC Excess Return": {
+        "title": "ROIC Excess Return",
+        "body": "Values a company based on how much its return on invested capital (ROIC) exceeds WACC. Companies earning above WACC create economic value; those below destroy it. Penalises mediocre capital allocators even with high reported growth."
+    },
+    "DDM": {
+        "title": "Dividend Discount Model (DDM)",
+        "body": "Values a stock as the present value of all future dividends: Fair Value = D1 / (r − g), where D1 = next year's expected dividend, r = required return, g = sustainable dividend growth rate. Only applicable to dividend-paying companies."
+    },
+    "NCAV": {
+        "title": "Net Current Asset Value (NCAV)",
+        "body": "Graham's deep-value floor: NCAV = Current Assets − Total Liabilities. Stocks trading below NCAV/share may be liquidation bargains. A blunt instrument — most modern profitable companies trade well above NCAV. Best used as a safety margin lower bound."
+    },
+    "S-Curve TAM": {
+        "title": "S-Curve TAM Model",
+        "body": "Models revenue growth along an S-curve adoption path within a defined Total Addressable Market. Peak revenue is estimated from TAM penetration; a logistic growth curve maps the trajectory. Useful for early-stage or platform companies."
+    },
+    "PIE": {
+        "title": "PIE (Price-Implied Expectations)",
+        "body": "Reverse-engineers what the market implies about long-term growth, margins, and returns by solving for the growth rate that justifies today's price. High PIE growth = market is pricing in aggressive expansion. Compare to your own conviction."
+    },
+    "Mean Reversion": {
+        "title": "Mean Reversion",
+        "body": "Assumes valuation multiples (P/E, P/FCF, EV/EBITDA) will revert toward historical sector averages. Fair value is estimated by applying normalised multiples to today's fundamentals. Less useful for structural growth stories where the old average no longer applies."
+    },
+    "Bayesian Ensemble": {
+        "title": "Bayesian Ensemble",
+        "body": "Combines all other valuation methods using a weighted average, where weights are set by each method's applicability score and historical tracking accuracy. Acts as a meta-model — reduces the impact of any single method's blind spots."
+    },
+    "Multi-Factor": {
+        "title": "Multi-Factor Model",
+        "body": "Scores the stock across multiple fundamental factors (quality, growth, value, momentum) and maps the combined score to a fair value premium or discount vs. the sector. Useful for relative attractiveness within a peer group rather than absolute intrinsic value."
+    },
+    "Fwd PEG": {
+        "title": "Forward PEG",
+        "body": "Applies Peter Lynch's PEG rule: fair value when forward P/E equals EPS growth rate (PEG = 1.0). Fair Value = NTM EPS × growth rate × PEG multiple. Three variants: conservative (1.0×), base (1.5×), premium (2.0×). Quality moats often sustain PEG above 1.0."
+    },
+    "EV/NTM Rev": {
+        "title": "EV / NTM Revenue",
+        "body": "Applies a forward revenue multiple to next-twelve-months revenue. The multiple is tiered by gross margin (higher-margin businesses command higher multiples) and blended with the current market multiple. Popular for high-growth SaaS and tech companies."
+    },
+    "TAM Scenario": {
+        "title": "TAM Scenario",
+        "body": "Three-scenario (bear/base/bull) valuation based on the company's total addressable market. Each scenario assumes different market-share penetration at maturity, applies a margin estimate, and discounts back to today. Useful for platform companies."
+    },
+    "Rule of 40": {
+        "title": "Rule of 40",
+        "body": "Scores SaaS companies by Revenue Growth % + FCF Margin %. Scores above 40 indicate high-quality growth efficiency. Derives a fair EV/Rev multiple from the R40 score using empirical benchmarks, then back-solves for implied price per share."
+    },
+    "ERG": {
+        "title": "ERG (EV/Revenue/Growth)",
+        "body": "Normalises EV/Revenue by the company's revenue growth rate: ERG = (EV/Rev) / Growth%. Flags when a revenue multiple is expensive or cheap relative to growth speed. Fair value derived by applying a target ERG multiple (typically 1.0–2.0×) to forward revenue."
+    },
+    "Reverse DCF": {
+        "title": "Reverse DCF",
+        "body": "Flips the standard DCF: solves for the FCF growth rate implicitly baked into today's stock price. If implied growth >> Street estimates, the stock may be priced for perfection. If implied growth << Street, the market may be overly pessimistic."
+    },
+    "Graham Number": {
+        "title": "Graham Number",
+        "body": "Graham's simple intrinsic value formula: √(22.5 × EPS × Book Value per Share). The 22.5 constant reflects P/E ≤ 15 and P/B ≤ 1.5 combined. Conservative floor for mature, asset-heavy businesses; typically too pessimistic for high-growth or asset-light companies."
+    },
+    "wacc": {
+        "title": "WACC — Weighted Average Cost of Capital",
+        "body": "The blended rate a company must earn on its assets to satisfy both debt and equity investors. Calculated via CAPM: WACC ≈ Rf + β × ERP, where Rf = risk-free rate (10Y Treasury), β = market beta, ERP = equity risk premium. Override with --wacc for a specific view."
+    },
+    "convergence": {
+        "title": "Convergence Analysis",
+        "body": "Measures agreement among the top 8 most applicable valuation methods. A method 'converges' when its fair value estimate falls within ±15% of the median. HIGH conviction = most methods agree; LOW conviction = wide disagreement. Divergence suggests one method's assumptions may be outliers."
+    },
+    "mos": {
+        "title": "Margin of Safety (MoS)",
+        "body": "The MoS price is the consensus mean fair value discounted by 20%. Buying below MoS builds a buffer against estimation errors and adverse surprises — a core principle of value investing (Graham, Buffett). MoS entry is not a sell target; it is the maximum prudent entry price."
+    },
+    "applicability": {
+        "title": "Applicability Score",
+        "body": "A 0–100 score measuring how well each valuation method fits this specific company. Factors: data availability, profitability, dividend status, capital intensity, and sector. Methods with higher applicability are weighted more in the Top 8 selection."
+    },
+    "divergence": {
+        "title": "Divergence Analysis",
+        "body": "When methods produce widely different fair values, divergence analysis highlights the largest outliers. Common reasons: different sensitivity to growth (DCF vs. multiples), differing treatment of debt, or methods designed for different business models."
+    },
+    "fundamentals": {
+        "title": "Company Fundamentals",
+        "body": "Key financial metrics used as inputs across all valuation models. Revenue, net income, FCF, and EBITDA are trailing twelve months (TTM). Cash is estimated from the EV/market-cap relationship unless a direct figure is available."
+    },
+    "benchmarks": {
+        "title": "Live Industry Benchmarks",
+        "body": "Sector median multiples (P/E, P/FCF, EV/EBITDA) pulled live from TradingView at report generation time. Used as the reference multiple for relative valuation methods. Benchmark multiples vary with market sentiment; cheap vs. sector is not necessarily cheap in absolute terms."
+    },
+    "cycle_profile": {
+        "title": "Economic Cycle Profile",
+        "body": "Classifies the company's sector into Secular Growth, Cyclical, Defensive, or Counter-Cyclical based on how its earnings historically respond to the economic cycle. Cyclicals amplify GDP swings; Defensives are insulated; Secular Growth companies follow structural adoption curves."
+    },
+    "quarterly_seasonality": {
+        "title": "Quarterly Financial Seasonality",
+        "body": "Shows how revenue, net income, and FCF are distributed across the four fiscal quarters. Seasonal Index = quarter share ÷ 25% (1.0 = perfectly even). Indices above 1.10 indicate a structurally strong quarter; below 0.90 a seasonally weak one."
+    },
+    "monthly_seasonality": {
+        "title": "Monthly Price Seasonality",
+        "body": "Average price return per calendar month over the last 5 years, plus win rate (% of years with positive return). WR > 60% + positive avg return = historically favourable month. Past seasonal patterns are not guaranteed to repeat."
+    },
+    "top8": {
+        "title": "Top 8 Most Applicable Methods",
+        "body": "The 8 valuation methods with the highest applicability scores for this specific company. Applicability considers data quality, company characteristics, and method fit for the sector. These 8 methods drive the conviction score, convergence analysis, and consensus mean fair value."
+    },
+    "conv_spectrum": {
+        "title": "Convergence Spectrum",
+        "body": "A visual spectrum positioning each method's fair value estimate relative to the current price. When estimates cluster tightly around the price, conviction is high. Wide spread signals model uncertainty — investigate which method diverges most and whether its assumptions are defensible."
+    },
+    "val_summary": {
+        "title": "Valuation Summary",
+        "body": "Aggregates all top-8 method outputs into a bear/consensus/bull range. Bear Case = lowest estimate, Bull Case = highest, Consensus Mean = simple average, MoS Entry = mean × 80%. Use the range — not a single number — as your decision anchor."
+    },
+    "all_methods": {
+        "title": "All Valuation Methods",
+        "body": "All 20+ valuation methods ranked by applicability score (or backtest accuracy when --backtest is used). Methods with insufficient data are listed separately as N/A. Click any method row for more detail on inputs and assumptions."
+    },
+}
+
+
+def _vm_help_btn(key):
+    """Return an info button HTML snippet for the given help key."""
+    return (
+        "<button class='vm-help-btn' onclick='showVmHelp(\"{k}\",event)' "
+        "aria-label='More info' title='Click for more info'>&#9432;</button>"
+    ).format(k=key)
+
+
+def fetch_seasonality(ticker: str, sector: str = None) -> dict:
+    """
+    Compute quarterly financial seasonality and monthly price seasonality
+    for a given ticker. Also classifies the stock by economic cycle type.
+
+    Key design decisions:
+    - Detects fiscal year end month from tk.info so grouping works for any
+      company regardless of whether its fiscal year matches the calendar year.
+    - Requires only 4 quarters (1 complete fiscal year) rather than 8, because
+      yfinance typically returns only 5–6 quarters of quarterly data.
+    - Uses fiscal quarter numbers (Q1–Q4 relative to the company's fiscal year).
+    """
+    import datetime as _dt
+    from collections import defaultdict
+
+    out = {
+        "error": None,
+        "q_rev_pct":   None,
+        "q_eps_pct":   None,
+        "q_fcf_pct":   None,
+        "q_rev_idx":   None,
+        "q_eps_idx":   None,
+        "q_fcf_idx":   None,
+        "q_end_months": None,  # [Q1_end_month, Q2_end_month, Q3_end_month, Q4_end_month]
+        "q_years_rev": 0,
+        "q_years_eps": 0,
+        "q_years_fcf": 0,
+        "monthly_avg":  None,
+        "monthly_wr":   None,
+        "monthly_n":    None,
+        "best_months":  [],
+        "worst_months": [],
+        "price_years":  0,
+        "cycle_class": "Unknown",
+        "cycle_desc":  "Sector data not available.",
+        "current_q":     None,
+        "current_month": None,
+        "fy_end_month":  12,
+    }
+
+    if sector and sector in _CYCLE_MAP:
+        out["cycle_class"], out["cycle_desc"] = _CYCLE_MAP[sector]
+    elif sector:
+        out["cycle_class"] = "Cyclical"
+        out["cycle_desc"]  = "No specific cycle profile mapped for this sector."
+
+    now = _dt.datetime.now()
+    out["current_month"] = now.month
+
+    if not _YF_AVAILABLE:
+        out["error"] = "yfinance not available"
+        return out
+
+    try:
+        ticker_yf = ticker.split(":")[-1] if ":" in ticker else ticker
+        tk = yf.Ticker(ticker_yf)
+
+        # ── Determine fiscal year end month ──────────────────────────────────
+        # We check lastFiscalYearEnd first (most reliable), then fall back to
+        # inferring from the quarterly data itself.
+        fy_end_month = 12  # safe default
+        try:
+            info = tk.info or {}
+            for key in ["lastFiscalYearEnd", "nextFiscalYearEnd", "mostRecentQuarter"]:
+                ts = info.get(key)
+                if ts and isinstance(ts, (int, float)) and ts > 0:
+                    fy_end_month = _dt.datetime.fromtimestamp(int(ts)).month
+                    break
+        except Exception:
+            pass
+        out["fy_end_month"] = fy_end_month
+
+        # Build fiscal quarter map: {period_end_month: fiscal_q_number}
+        # Q4 ends at fy_end_month; step back 3 months each time for Q3/Q2/Q1.
+        fy_q_map = {}
+        m = fy_end_month
+        for fq in range(4, 0, -1):
+            fy_q_map[m] = fq
+            m = ((m - 4) % 12) + 1   # go back exactly 3 months
+
+        # Fiscal quarter -> period-end month (for display labels)
+        fq_to_month = {v: k for k, v in fy_q_map.items()}
+        out["q_end_months"] = [fq_to_month.get(fq, 0) for fq in [1, 2, 3, 4]]
+
+        # Determine which fiscal quarter the current calendar month falls in.
+        # Each fiscal quarter covers the 3 months ending at its period-end month.
+        sorted_fq = sorted(fy_q_map.items())   # [(end_month, fq), ...] by end_month
+        current_fq = sorted_fq[-1][1]          # fallback: last fq
+        for end_month, fq in sorted_fq:
+            if now.month <= end_month:
+                current_fq = fq
+                break
+        out["current_q"] = current_fq
+
+        # ── Quarterly financial data ─────────────────────────────────────────
+        REV_NAMES   = ["Total Revenue", "Revenue", "Net Revenue"]
+        NI_NAMES    = ["Net Income", "Net Income Common Stockholders"]
+        FCF_NAMES   = ["Free Cash Flow"]
+        CFO_NAMES   = ["Operating Cash Flow", "Cash Flow From Operations"]
+        CAPEX_NAMES = ["Capital Expenditure", "Purchase Of Plant And Equipment",
+                       "Capital Expenditures"]
+
+        def _q_series(df, candidates):
+            if df is None or df.empty:
+                return None
+            for name in candidates:
+                if name in df.index:
+                    return df.loc[name].dropna()
+            return None
+
+        q_inc = tk.quarterly_income_stmt
+        q_cf  = tk.quarterly_cash_flow
+
+        rev_s = _q_series(q_inc, REV_NAMES)
+        ni_s  = _q_series(q_inc, NI_NAMES)
+        fcf_s = _q_series(q_cf, FCF_NAMES)
+        if fcf_s is None:
+            cfo_s   = _q_series(q_cf, CFO_NAMES)
+            capex_s = _q_series(q_cf, CAPEX_NAMES)
+            if cfo_s is not None and capex_s is not None:
+                try:
+                    _al = cfo_s.align(capex_s, join="inner")
+                    fcf_s = _al[0] + _al[1]
+                except Exception:
+                    pass
+
+        def _compute_q_pattern(series):
+            """
+            Average per fiscal-quarter share of annual total over all complete
+            fiscal years in the series. Requires at least 4 quarters (1 FY).
+            Groups by fiscal year using fy_q_map so non-calendar fiscal years
+            (Apple, Microsoft, Walmart, etc.) are handled correctly.
+            """
+            if series is None or len(series) < 4:
+                return None, None, 0
+            rows = []
+            for ts, val in series.items():
+                try:
+                    if hasattr(ts, "to_pydatetime"):
+                        dt = ts.to_pydatetime()
+                    elif isinstance(ts, str):
+                        dt = _dt.datetime.strptime(str(ts)[:10], "%Y-%m-%d")
+                    else:
+                        dt = ts
+                    v = float(val)
+                    if v != v:          # NaN
+                        continue
+                    fq = fy_q_map.get(dt.month)
+                    if fq is None:      # quarter-end month not in fy map → skip
+                        continue
+                    # Fiscal year: the year in which this FY's Q4 falls
+                    fy = dt.year if dt.month <= fy_end_month else dt.year + 1
+                    rows.append((fy, fq, v))
+                except Exception:
+                    continue
+            if not rows:
+                return None, None, 0
+            by_fy = defaultdict(dict)
+            for fy, fq, v in rows:
+                by_fy[fy][fq] = v
+            q_shares = {1: [], 2: [], 3: [], 4: []}
+            years_used = 0
+            for fy in sorted(by_fy.keys()):
+                qd = by_fy[fy]
+                if len(qd) < 4:
+                    continue            # incomplete fiscal year — skip
+                annual = sum(qd.values())
+                if annual == 0:
+                    continue
+                years_used += 1
+                for fq in [1, 2, 3, 4]:
+                    q_shares[fq].append(qd[fq] / annual * 100)
+            if years_used < 1:
+                return None, None, 0
+            avg_pct = [
+                sum(q_shares[fq]) / len(q_shares[fq]) if q_shares[fq] else 25.0
+                for fq in [1, 2, 3, 4]
+            ]
+            idx = [p / 25.0 for p in avg_pct]
+            return avg_pct, idx, years_used
+
+        out["q_rev_pct"], out["q_rev_idx"], out["q_years_rev"] = _compute_q_pattern(rev_s)
+        out["q_eps_pct"], out["q_eps_idx"], out["q_years_eps"] = _compute_q_pattern(ni_s)
+        out["q_fcf_pct"], out["q_fcf_idx"], out["q_years_fcf"] = _compute_q_pattern(fcf_s)
+
+        # ── Monthly price seasonality ────────────────────────────────────────
+        hist = tk.history(period="5y")
+        if hist is not None and not hist.empty and "Close" in hist.columns:
+            try:
+                monthly_returns = defaultdict(list)
+                prices = hist["Close"]
+                # "ME" is the correct alias in pandas >= 2.2; fall back to "M"
+                monthly = None
+                for freq in ("ME", "M"):
+                    try:
+                        monthly = prices.resample(freq).last()
+                        break
+                    except Exception:
+                        continue
+                if monthly is not None:
+                    for i in range(1, len(monthly)):
+                        prev = float(monthly.iloc[i - 1])
+                        curr = float(monthly.iloc[i])
+                        if prev > 0:
+                            ret   = (curr - prev) / prev * 100
+                            month = monthly.index[i].month
+                            monthly_returns[month].append(ret)
+                    if any(monthly_returns[m] for m in range(1, 13)):
+                        avg_ret, wr, n_ret = {}, {}, {}
+                        for m in range(1, 13):
+                            vals = monthly_returns.get(m, [])
+                            if vals:
+                                avg_ret[m] = sum(vals) / len(vals)
+                                wr[m]      = sum(1 for v in vals if v > 0) / len(vals) * 100
+                                n_ret[m]   = len(vals)
+                            else:
+                                avg_ret[m] = 0.0
+                                wr[m]      = 50.0
+                                n_ret[m]   = 0
+                        out["monthly_avg"]  = avg_ret
+                        out["monthly_wr"]   = wr
+                        out["monthly_n"]    = n_ret
+                        out["price_years"]  = max(n_ret.values(), default=0) // 12 + 1
+                        sorted_m = sorted(range(1, 13), key=lambda m: avg_ret.get(m, 0))
+                        out["worst_months"] = sorted_m[:3]
+                        out["best_months"]  = sorted_m[-3:][::-1]
+            except Exception:
+                pass
+
+    except Exception as e:
+        out["error"] = str(e)
+
+    return out
+
+
+# ─────────────────────────────────────────────────────────────────
 #  WACC CALCULATOR
 # ─────────────────────────────────────────────────────────────────
 
@@ -1787,7 +2212,7 @@ def _build_growth_html(d, gr, reliability=None):
         fh,fc=gflag("Reverse DCF")
         html+=(
             '<div class="gc'+fc+'" style="--gca:#e87c3e;">'
-            '<div class="gc-head"><span class="gc-name">Reverse DCF</span><span class="gc-badge">Growth Implied</span></div>'
+            '<div class="gc-head"><span class="gc-name">Reverse DCF</span>'+_vm_help_btn("Reverse DCF")+'<span class="gc-badge">Growth Implied</span></div>'
             +fh+
             '<div class="gc-sub">What FCF growth rate is baked into today&#39;s price? '
             'Compare to your own conviction. Implied &lt; Street → market is cautious; Implied &gt; Street → priced for perfection.</div>'
@@ -1810,7 +2235,7 @@ def _build_growth_html(d, gr, reliability=None):
         fh,fc=gflag("Fwd PEG")
         html+=(
             '<div class="gc'+fc+'" style="--gca:#f0a500;">'
-            '<div class="gc-head"><span class="gc-name">Forward PEG</span><span class="gc-badge">Earnings Growth</span></div>'
+            '<div class="gc-head"><span class="gc-name">Forward PEG</span>'+_vm_help_btn("Fwd PEG")+'<span class="gc-badge">Earnings Growth</span></div>'
             +fh+
             '<div class="gc-sub">NTM EPS × (growth% × PEG). Lynch rule: P/E = EPS growth rate is fair value (PEG 1.0). '
             'Quality moats can justify 1.5–2.0×.</div>'
@@ -1838,7 +2263,7 @@ def _build_growth_html(d, gr, reliability=None):
         fh,fc=gflag("EV/NTM Rev")
         html+=(
             '<div class="gc'+fc+'" style="--gca:#00c896;">'
-            '<div class="gc-head"><span class="gc-name">EV / NTM Revenue</span><span class="gc-badge">Revenue Multiple</span></div>'
+            '<div class="gc-head"><span class="gc-name">EV / NTM Revenue</span>'+_vm_help_btn("EV/NTM Rev")+'<span class="gc-badge">Revenue Multiple</span></div>'
             +fh+
             '<div class="gc-sub">Forward revenue × margin-tiered &amp; market-anchored EV/Rev. '
             'Blends fundamental tier ranges with the stock&#39;s current market multiple for grounded estimates.</div>'
@@ -1872,7 +2297,7 @@ def _build_growth_html(d, gr, reliability=None):
         fh,fc=gflag("TAM Scenario")
         html+=(
             '<div class="gc'+fc+'" style="--gca:#bf6ff0;">'
-            '<div class="gc-head"><span class="gc-name">TAM Scenario</span><span class="gc-badge">Market Share Model</span></div>'
+            '<div class="gc-head"><span class="gc-name">TAM Scenario</span>'+_vm_help_btn("TAM Scenario")+'<span class="gc-badge">Market Share Model</span></div>'
             +fh+
             '<div class="gc-sub">Year-5 revenue from market-share capture → terminal earnings at 25× P/E, discounted back. '
             'Bear/base/bull market-share scenarios are anchored to the company\'s implied year-5 trajectory (from current growth rate), '
@@ -1903,7 +2328,7 @@ def _build_growth_html(d, gr, reliability=None):
         fh,fc=gflag("Rule of 40")
         html+=(
             '<div class="gc'+fc+'" style="--gca:'+sc+';">'
-            '<div class="gc-head"><span class="gc-name">Rule of 40</span><span class="gc-badge">Quality + Revenue</span></div>'
+            '<div class="gc-head"><span class="gc-name">Rule of 40</span>'+_vm_help_btn("Rule of 40")+'<span class="gc-badge">Quality + Revenue</span></div>'
             +fh+
             '<div class="gc-sub">Rev growth% + FCF margin% — the SaaS quality benchmark. '
             'Score determines which peer cohort EV/Revenue range applies.</div>'
@@ -1993,8 +2418,7 @@ def _build_growth_html(d, gr, reliability=None):
             )
         html+=(
             '<div class="gc'+fc+'" style="--gca:#38bdf8;">'
-            '<div class="gc-head"><span class="gc-name">ERG</span>'
-            '<span class="gc-badge">Dual-Approach Growth</span></div>'
+            '<div class="gc-head"><span class="gc-name">ERG</span>'+_vm_help_btn("ERG")+'<span class="gc-badge">Dual-Approach Growth</span></div>'
             +fh+
             '<div class="gc-sub">'
             '<strong>Blended fair value: 60% Earnings Build + 40% EV/Rev-to-Growth.</strong> '
@@ -3662,10 +4086,11 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
             "<td class='score-col' style='color:#888;'>{score:.0f}/100</td>"
         ).format(score=appl_score)
 
+        help_btn = _vm_help_btn(method)
         rows_html += (
             "<tr{row_style}>"
             "<td class='rank-col'>#{rank}</td>"
-            "<td><span style='color:{col};font-weight:700;'>{method}</span>{top8_badge}</td>"
+            "<td><span style='color:{col};font-weight:700;'>{method}</span>{help_btn}{top8_badge}</td>"
             "<td><span class='cat-badge {cat_css}'>{cat}</span></td>"
             "<td style='font-family:DM Mono,monospace;'>{fv_str}</td>"
             "<td style='font-family:DM Mono,monospace;color:{upside_col};'>{upside_str}</td>"
@@ -3675,7 +4100,7 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
             "</tr>"
         ).format(
             row_style=row_style, rank=rank, col=col, method=method,
-            top8_badge=top8_badge, cat_css=cat_css, cat=cat,
+            help_btn=help_btn, top8_badge=top8_badge, cat_css=cat_css, cat=cat,
             fv_str=fv_str, upside_col=upside_col, upside_str=upside_str,
             mos_str=mos_str, bt_cell=bt_cell, score_cell=score_cell,
         )
@@ -3694,14 +4119,16 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
             cat_css = CAT_CSS.get(cat, "cat-classic")
             col = method_colors.get(method, "#aaa")
             reason = r.get("skip_reason", "Insufficient data or conditions not met")
+            na_help_btn = _vm_help_btn(method)
             rows_html += (
                 "<tr class='na-row'>"
                 "<td class='rank-col'>—</td>"
-                "<td><span style='color:{col};'>{method}</span></td>"
+                "<td><span style='color:{col};'>{method}</span>{help_btn}</td>"
                 "<td><span class='cat-badge {cat_css}'>{cat}</span></td>"
                 "<td colspan='{c}' style='color:var(--muted);'>{reason}</td>"
                 "</tr>"
-            ).format(col=col, method=method, cat_css=cat_css, cat=cat,
+            ).format(col=col, method=method, help_btn=na_help_btn,
+                     cat_css=cat_css, cat=cat,
                      reason=reason, c=str(int(na_colspan) - 3))
 
     bt_header = "<th style='text-align:center;'>Backtest Accuracy</th>" if has_bt else ""
@@ -3731,7 +4158,328 @@ def _build_all_methods_table(top_8: list, remainder: list, applicability_scores:
     ).format(note=rank_note, bt_header=bt_header)
 
 
-def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict = None, reliability: dict = None, bt: dict = None, applicability_scores: dict = None, top_8: list = None, remainder: list = None) -> str:
+# ─────────────────────────────────────────────────────────────────
+#  SEASONALITY & CYCLE HTML BUILDER
+# ─────────────────────────────────────────────────────────────────
+
+def _build_seasonality_html(d: dict, seas: dict) -> str:
+    """Render the Seasonality & Cycle tab HTML."""
+    if seas is None:
+        seas = {}
+    ticker       = d.get("ticker", "")
+    company_name = d.get("company_name", ticker)
+    sector       = d.get("sector", "")
+    cycle_class  = seas.get("cycle_class", "Unknown")
+    cycle_desc   = seas.get("cycle_desc", "")
+    cycle_color   = _CYCLE_COLORS.get(cycle_class, "#aaaaaa")
+    current_q     = seas.get("current_q")
+    current_m     = seas.get("current_month")
+    q_end_months  = seas.get("q_end_months") or [3, 6, 9, 12]  # [Q1_end, Q2_end, Q3_end, Q4_end]
+    err           = seas.get("error")
+
+    # ── Cycle classification card ──────────────────────────────────────────
+    cycle_html = (
+        '<div style="background:var(--surface);border:1px solid var(--border);'
+        'border-left:4px solid {cc};border-radius:8px;padding:20px 24px;margin-bottom:24px;">'
+        '<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;'
+        'letter-spacing:.1em;margin-bottom:6px;">Economic Cycle Profile ' + _vm_help_btn("cycle_profile") + '</div>'
+        '<div style="font-size:22px;font-weight:700;color:{cc};margin-bottom:6px;">{cls}</div>'
+        '<div style="font-size:13px;color:var(--text);line-height:1.6;">{desc}</div>'
+        '<div style="font-size:11px;color:var(--muted);margin-top:8px;">Sector: {sector}</div>'
+        '</div>'
+    ).format(cc=cycle_color, cls=cycle_class, desc=cycle_desc, sector=sector or "—")
+
+    # ── Quarterly distribution table builder ──────────────────────────────
+    def _q_table(label, pct_list, idx_list, years, highlight_q):
+        if pct_list is None:
+            return (
+                '<p style="color:var(--muted);font-size:13px;margin:0 0 6px;">'
+                'Quarterly {lbl} data unavailable (insufficient history in yfinance).</p>'
+            ).format(lbl=label)
+        rows = ""
+        for i in range(4):
+            q        = i + 1
+            pct      = pct_list[i]
+            idx      = idx_list[i]
+            end_mon  = q_end_months[i] if len(q_end_months) > i else 0
+            mon_abbr = _MONTH_ABBR[end_mon - 1] if 1 <= end_mon <= 12 else ""
+            q_label  = "Q{} ({})".format(q, mon_abbr) if mon_abbr else "Q{}".format(q)
+            is_hi    = (highlight_q and q == highlight_q)
+            if idx >= 1.10:
+                idx_clr, idx_label = "#00c896", "STRONG"
+            elif idx >= 1.03:
+                idx_clr, idx_label = "#f0a500", "ABOVE AVG"
+            elif idx <= 0.90:
+                idx_clr, idx_label = "#e05c5c", "WEAK"
+            elif idx <= 0.97:
+                idx_clr, idx_label = "#f0a500", "BELOW AVG"
+            else:
+                idx_clr, idx_label = "#aaaaaa", "AVERAGE"
+            bar_pct  = min(100, pct / 40 * 100)
+            hi_style = "background:rgba(255,255,255,0.04);" if is_hi else ""
+            rows += (
+                "<tr style='border-bottom:1px solid var(--border);{hi}'>"
+                "<td style='padding:10px 12px;font-weight:{fw};color:{qc};font-size:13px;"
+                "white-space:nowrap;'>{curr}{qlbl}</td>"
+                "<td style='padding:10px 12px;font-size:13px;'>"
+                  "<div style='display:flex;align-items:center;gap:8px;'>"
+                  "<div style='background:var(--border);border-radius:4px;width:80px;height:8px;flex-shrink:0;'>"
+                  "<div style='background:{ic};width:{bp:.0f}%;height:100%;border-radius:4px;'></div></div>"
+                  "<span style='color:var(--text);font-family:monospace;'>{pct:.1f}%</span>"
+                "</div></td>"
+                "<td style='padding:10px 12px;'>"
+                  "<span style='font-size:11px;font-weight:600;color:{ic};background:rgba(0,0,0,.3);"
+                  "padding:2px 6px;border-radius:4px;'>{idx_lbl}</span> "
+                  "<span style='color:var(--muted);font-family:monospace;font-size:11px;'>x{idx_v:.2f}</span>"
+                "</td>"
+                "</tr>"
+            ).format(
+                hi=hi_style,
+                fw="700" if is_hi else "400",
+                qc=cycle_color if is_hi else "var(--text)",
+                curr="&rsaquo; " if is_hi else "",
+                qlbl=q_label, ic=idx_clr, bp=bar_pct, pct=pct,
+                idx_lbl=idx_label, idx_v=idx,
+            )
+        yr_note = "{yr}Y avg".format(yr=years) if years > 1 else "1Y (limited history)"
+        return (
+            "<div style='font-size:11px;color:var(--muted);margin-bottom:6px;'>"
+            "{lbl} &middot; {yr_note} (&rsaquo; = current quarter)</div>"
+            "<div style='overflow:auto;'>"
+            "<table style='width:100%;border-collapse:collapse;min-width:320px;'>"
+            "<thead><tr style='border-bottom:2px solid var(--border);'>"
+            "<th style='padding:8px 12px;text-align:left;font-size:11px;color:var(--muted);'>QTR</th>"
+            "<th style='padding:8px 12px;text-align:left;font-size:11px;color:var(--muted);'>% of Annual</th>"
+            "<th style='padding:8px 12px;text-align:left;font-size:11px;color:var(--muted);'>Seasonal Index</th>"
+            "</tr></thead>"
+            "<tbody>{rows}</tbody>"
+            "</table></div>"
+        ).format(lbl=label, yr_note=yr_note, rows=rows)
+
+    q_rev_html = _q_table("Revenue",       seas.get("q_rev_pct"), seas.get("q_rev_idx"), seas.get("q_years_rev", 0), current_q)
+    q_eps_html = _q_table("Net Income",    seas.get("q_eps_pct"), seas.get("q_eps_idx"), seas.get("q_years_eps", 0), current_q)
+    q_fcf_html = _q_table("Free Cash Flow",seas.get("q_fcf_pct"), seas.get("q_fcf_idx"), seas.get("q_years_fcf", 0), current_q)
+
+    q_section_html = (
+        '<div style="margin-bottom:32px;">'
+        '<div class="section-label">Quarterly Financial Seasonality ' + _vm_help_btn("quarterly_seasonality") + '</div>'
+        '<p style="color:var(--muted);font-size:13px;margin-bottom:20px;line-height:1.6;">'
+        'Average distribution of revenue, net income, and free cash flow across calendar quarters. '
+        'Values near 25% indicate an even, non-seasonal business. Values above 30% signal a dominant '
+        'quarter; below 20% indicates a structurally weak quarter. '
+        'Seasonal Index = quarter share &divide; 25% (1.0 = flat).'
+        '</p>'
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:20px;">'
+        '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px;">{rev}</div>'
+        '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px;">{eps}</div>'
+        '<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 20px;">{fcf}</div>'
+        '</div>'
+        '</div>'
+    ).format(rev=q_rev_html, eps=q_eps_html, fcf=q_fcf_html)
+
+    # ── Monthly price seasonality heatmap ─────────────────────────────────
+    monthly_avg  = seas.get("monthly_avg")
+    monthly_wr   = seas.get("monthly_wr")
+    monthly_n    = seas.get("monthly_n")
+    best_months  = seas.get("best_months", [])
+    worst_months = seas.get("worst_months", [])
+    price_years  = seas.get("price_years", 0)
+
+    if monthly_avg:
+        max_abs = max(abs(monthly_avg.get(m, 0)) for m in range(1, 13))
+        max_abs = max(max_abs, 0.1)
+        cells = ""
+        for m in range(1, 13):
+            avg  = monthly_avg.get(m, 0)
+            wr   = monthly_wr.get(m, 50) if monthly_wr else 50
+            n    = monthly_n.get(m, 0)   if monthly_n  else 0
+            is_cm = (m == current_m)
+            sign  = "+" if avg >= 0 else ""
+            if avg >= 0:
+                intensity = min(0.80, avg / max_abs * 0.80)
+                bg      = "rgba(0,200,150,{:.2f})".format(intensity)
+                txt_clr = "#00c896" if avg > 0.3 else "var(--text)"
+            else:
+                intensity = min(0.80, abs(avg) / max_abs * 0.80)
+                bg      = "rgba(224,92,92,{:.2f})".format(intensity)
+                txt_clr = "#e05c5c"
+            border_style = "border:2px solid {};".format(cycle_color) if is_cm else "border:1px solid transparent;"
+            cells += (
+                "<div style='background:{bg};border-radius:6px;padding:10px 8px;text-align:center;"
+                "min-width:66px;{bdr}'>"
+                "<div style='font-size:10px;font-weight:700;color:var(--muted);margin-bottom:4px;'>{mname}</div>"
+                "<div style='font-size:15px;font-weight:700;color:{tc};font-family:monospace;'>{sign}{avg:.1f}%</div>"
+                "<div style='font-size:10px;color:var(--muted);margin-top:3px;'>WR {wr:.0f}%</div>"
+                "</div>"
+            ).format(bg=bg, bdr=border_style, mname=_MONTH_ABBR[m-1],
+                     tc=txt_clr, sign=sign, avg=avg, wr=wr, n=n)
+
+        cm_note = ""
+        if current_m and monthly_avg:
+            cm_avg = monthly_avg.get(current_m, 0)
+            cm_wr  = (monthly_wr or {}).get(current_m, 50)
+            cm_str = "{}{:.1f}%".format("+" if cm_avg >= 0 else "", cm_avg)
+            cm_note = (
+                '<div style="background:var(--surface2);border:1px solid {cc};border-radius:6px;'
+                'padding:10px 16px;margin-top:16px;font-size:12px;color:var(--text);">'
+                '<strong style="color:{cc};">{mname} (current month)</strong> — '
+                'historical avg: <strong>{cm_str}</strong> &nbsp;&middot;&nbsp; Win rate: <strong>{wr:.0f}%</strong>'
+                '</div>'
+            ).format(cc=cycle_color, mname=_MONTH_ABBR[current_m-1], cm_str=cm_str, wr=cm_wr)
+
+        best_str  = " &middot; ".join(_MONTH_ABBR[m-1] for m in best_months)  if best_months  else "—"
+        worst_str = " &middot; ".join(_MONTH_ABBR[m-1] for m in worst_months) if worst_months else "—"
+
+        monthly_section_html = (
+            '<div style="margin-bottom:32px;">'
+            '<div class="section-label">Monthly Price Seasonality &mdash; {yr}Y History ' + _vm_help_btn("monthly_seasonality") + '</div>'
+            '<p style="color:var(--muted);font-size:13px;margin-bottom:16px;line-height:1.6;">'
+            'Average monthly price return and win rate over {yr} years. '
+            'Highlighted border = current month. WR = % of years with a positive return in that month.'
+            '</p>'
+            '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">{cells}</div>'
+            '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;">'
+            '<div style="background:rgba(0,200,150,0.10);border:1px solid rgba(0,200,150,0.3);'
+            'border-radius:6px;padding:8px 14px;font-size:12px;">'
+            '<span style="color:var(--muted);">Strongest months:</span>'
+            '<strong style="color:#00c896;margin-left:6px;">{best}</strong></div>'
+            '<div style="background:rgba(224,92,92,0.10);border:1px solid rgba(224,92,92,0.3);'
+            'border-radius:6px;padding:8px 14px;font-size:12px;">'
+            '<span style="color:var(--muted);">Weakest months:</span>'
+            '<strong style="color:#e05c5c;margin-left:6px;">{worst}</strong></div>'
+            '</div>'
+            '{cm_note}'
+            '</div>'
+        ).format(yr=price_years, cells=cells, best=best_str, worst=worst_str, cm_note=cm_note)
+    else:
+        monthly_section_html = (
+            '<div style="margin-bottom:32px;">'
+            '<div class="section-label">Monthly Price Seasonality ' + _vm_help_btn("monthly_seasonality") + '</div>'
+            '<p style="color:var(--muted);font-size:13px;">Price history unavailable.</p>'
+            '</div>'
+        )
+
+    # ── Combined signal card ───────────────────────────────────────────────
+    signal_bullets = []
+    rev_idx = seas.get("q_rev_idx")
+    eps_idx = seas.get("q_eps_idx")
+    fcf_idx = seas.get("q_fcf_idx")
+
+    # Build a human-readable label for the current quarter (e.g. "Q1 (Jan-Mar)")
+    def _q_label(fq):
+        if not fq or len(q_end_months) < 4:
+            return "Q{}".format(fq)
+        end_m = q_end_months[fq - 1]
+        start_m = ((end_m - 4) % 12) + 1
+        return "Q{} ({}-{})".format(fq, _MONTH_ABBR[start_m - 1], _MONTH_ABBR[end_m - 1])
+
+    cq_label = _q_label(current_q) if current_q else "Current quarter"
+
+    if current_q and rev_idx:
+        ri = rev_idx[current_q - 1]
+        if ri >= 1.10:
+            signal_bullets.append(
+                "{ql} is historically the <span style='color:#00c896;font-weight:600;'>strongest revenue quarter</span>"
+                " (seasonal index x{v:.2f}).".format(ql=cq_label, v=ri))
+        elif ri <= 0.90:
+            signal_bullets.append(
+                "{ql} is historically a <span style='color:#e05c5c;font-weight:600;'>weak revenue quarter</span>"
+                " (seasonal index x{v:.2f}) — reported revenue typically runs below annual run-rate.".format(ql=cq_label, v=ri))
+        else:
+            signal_bullets.append(
+                "{ql} revenue is near-average seasonally (index x{v:.2f}).".format(ql=cq_label, v=ri))
+
+    if current_q and eps_idx:
+        ei = eps_idx[current_q - 1]
+        if ei >= 1.10:
+            signal_bullets.append(
+                "Net income runs above average in {ql} (x{v:.2f}), supporting positive earnings beats in this period.".format(ql=cq_label, v=ei))
+        elif ei <= 0.90:
+            signal_bullets.append(
+                "Net income is seasonally compressed in {ql} (x{v:.2f}) — apply lower EPS expectations vs. other quarters.".format(ql=cq_label, v=ei))
+
+    if current_q and fcf_idx:
+        fi = fcf_idx[current_q - 1]
+        if fi >= 1.10:
+            signal_bullets.append(
+                "FCF generation peaks in {ql} (x{v:.2f}) — historically the strongest free-cash quarter.".format(ql=cq_label, v=fi))
+        elif fi <= 0.90:
+            signal_bullets.append(
+                "FCF is historically light in {ql} (x{v:.2f}) — working capital or capex seasonality likely a factor.".format(ql=cq_label, v=fi))
+
+    if current_m and monthly_avg:
+        cm_avg = monthly_avg.get(current_m, 0)
+        cm_wr  = (monthly_wr or {}).get(current_m, 50)
+        if cm_avg >= 1.0:
+            signal_bullets.append(
+                "{mname} historically averages <span style='color:#00c896;font-weight:600;'>+{avg:.1f}%</span>"
+                " with a {wr:.0f}% win rate — a seasonally favourable month.".format(
+                mname=_MONTH_ABBR[current_m-1], avg=cm_avg, wr=cm_wr))
+        elif cm_avg <= -1.0:
+            signal_bullets.append(
+                "{mname} historically averages <span style='color:#e05c5c;font-weight:600;'>{avg:.1f}%</span>"
+                " with a {wr:.0f}% win rate — a seasonally challenging month.".format(
+                mname=_MONTH_ABBR[current_m-1], avg=cm_avg, wr=cm_wr))
+
+    if cycle_class == "Cyclical":
+        signal_bullets.append("As a <strong>Cyclical</strong> stock, performance is amplified by macro conditions — monitor PMI, yield curve, and credit spreads when positioning.")
+    elif cycle_class == "Defensive":
+        signal_bullets.append("As a <strong>Defensive</strong> stock, earnings hold up through downturns; may underperform in early-cycle bull markets when cyclicals outpace.")
+    elif cycle_class == "Secular Growth":
+        signal_bullets.append("As a <strong>Secular Growth</strong> stock, long-term structural tailwinds dominate; near-term cyclical headwinds are typically transitory.")
+
+    if signal_bullets:
+        sig_items = "".join(
+            "<li style='padding:8px 0 8px 18px;border-bottom:1px solid var(--border);"
+            "font-size:13px;color:var(--text);line-height:1.55;list-style:none;position:relative;'>"
+            "<span style='position:absolute;left:0;color:{cc};font-weight:700;'>&rsaquo;</span>{b}</li>".format(
+                cc=cycle_color, b=b)
+            for b in signal_bullets)
+        signal_card_html = (
+            '<div style="background:var(--surface);border:1px solid var(--border);'
+            'border-left:4px solid {cc};border-radius:8px;padding:20px 24px;margin-bottom:28px;">'
+            '<div style="font-size:10px;font-weight:700;color:{cc};text-transform:uppercase;'
+            'letter-spacing:.08em;margin-bottom:14px;">Seasonality &amp; Cycle Signal</div>'
+            '<ul style="padding:0;margin:0;">{items}</ul>'
+            '</div>'
+        ).format(cc=cycle_color, items=sig_items)
+    else:
+        signal_card_html = ""
+
+    err_note = (
+        '<div style="color:#f0a500;font-size:12px;margin-bottom:16px;">'
+        'Data note: {e}</div>'.format(e=err)
+    ) if err else ""
+
+    disclaimer = (
+        '<p style="color:var(--muted);font-size:11px;margin-top:24px;line-height:1.6;">'
+        'Seasonality analysis is statistical — past patterns are not guarantees of future performance. '
+        'Seasonal indices use calendar-quarter groupings of yfinance quarterly filings. '
+        'Monthly price data uses adjusted closes over up to 5 years. '
+        'Cross-reference with the macro dashboard for current cycle phase context.'
+        '</p>'
+    )
+
+    return (
+        '<div class="section-label">Seasonality &amp; Economic Cycle &mdash; {cn}</div>\n'
+        '{err_note}'
+        '{cycle}'
+        '{signal}'
+        '{q_section}'
+        '{monthly}'
+        '{disc}'
+    ).format(
+        cn=company_name,
+        err_note=err_note,
+        cycle=cycle_html,
+        signal=signal_card_html,
+        q_section=q_section_html,
+        monthly=monthly_section_html,
+        disc=disclaimer,
+    )
+
+
+def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict = None, reliability: dict = None, bt: dict = None, applicability_scores: dict = None, top_8: list = None, remainder: list = None, seas: dict = None) -> str:
     gr = gr or {}
     reliability = reliability or {}
     price        = d["price"]
@@ -3925,6 +4673,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
             <div class="method-header">
                 <span class="method-icon">{icon}</span>
                 <span class="method-name">{method}</span>
+                {help_btn}
                 {badge}
                 {flag_badge}
             </div>
@@ -3942,6 +4691,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
         </div>
         """.format(
             col=col, icon=icon, method=r["method"], badge=badge,
+            help_btn=_vm_help_btn(r["method"]),
             fv=mo(fv), color_cls=color_cls, label=label,
             mos=mo(mos), sub_rows=sub_rows,
             flag_html=flag_html,
@@ -4499,6 +5249,16 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
     line-height: 1.8;
   }}
 
+  /* ── INFO BUTTON & POPUP ── */
+  .vm-help-btn{{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;border:1px solid rgba(79,142,247,.4);background:rgba(79,142,247,.08);color:var(--accent);font-size:11px;cursor:pointer;vertical-align:middle;margin-left:5px;padding:0;line-height:1;flex-shrink:0;transition:background .15s,border-color .15s;}}
+  .vm-help-btn:hover{{background:rgba(79,142,247,.22);border-color:var(--accent);}}
+  #vm-help-pop{{display:none;position:fixed;z-index:9999;background:#1a1d2e;border:1px solid rgba(79,142,247,.35);border-radius:10px;padding:16px 18px 14px;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.55);pointer-events:auto;}}
+  #vm-help-pop.visible{{display:block;}}
+  #vm-help-pop-title{{font-size:13px;font-weight:700;color:#e2e8f0;margin-bottom:8px;padding-right:24px;line-height:1.4;}}
+  #vm-help-pop-body{{font-size:12px;color:#94a3b8;line-height:1.65;}}
+  #vm-help-pop-close{{position:absolute;top:10px;right:12px;background:none;border:none;color:#94a3b8;font-size:16px;cursor:pointer;padding:0;line-height:1;}}
+  #vm-help-pop-close:hover{{color:#e2e8f0;}}
+
   /* ══ TABS ═══════════════════════════════════════════════════════ */
   .tab-bar{{display:flex;border-bottom:2px solid var(--border);background:var(--bg);position:sticky;top:0;z-index:20;}}
   .tab-btn{{background:none;border:none;border-bottom:3px solid transparent;margin-bottom:-2px;padding:16px 32px;color:var(--muted);font-family:'DM Mono',monospace;font-size:11px;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:color .15s,border-color .15s;}}
@@ -4578,6 +5338,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
   <button class="tab-btn" onclick="switchTab('all',this)">All Methods</button>
   <button class="tab-btn" onclick="switchTab('growth',this)">Growth Deep-Dive</button>
   {backtest_tab_btn}
+  <button class="tab-btn" onclick="switchTab('seasonality',this)">Seasonality &amp; Cycle</button>
   <button class="tab-btn" onclick="switchTab('glossary',this)">Glossary</button>
 </div>
 <div id="tab-top8" class="tab-panel active">
@@ -4633,7 +5394,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
   <!-- TOP 8 METHOD CARDS -->
   <section>
-    <div class="section-label">Top 8 Most Applicable Methods</div>
+    <div class="section-label">Top 8 Most Applicable Methods {ib_top8}</div>
     <div class="cards-grid">
       {method_cards}
     </div>
@@ -4641,7 +5402,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
   <!-- CONVERGENCE VISUALISER -->
   <section>
-    <div class="section-label">Convergence Spectrum</div>
+    <div class="section-label">Convergence Spectrum {ib_conv_spectrum}</div>
     <div class="bar-wrapper">
       {conv_bars}
     </div>
@@ -4649,7 +5410,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
   <!-- RANGE SUMMARY -->
   <section>
-    <div class="section-label">Valuation Summary</div>
+    <div class="section-label">Valuation Summary {ib_val_summary}</div>
     <div class="range-summary">
       <div class="range-item">
         <span class="range-label">Bear Case</span>
@@ -4686,13 +5447,13 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
   <!-- DIVERGENCE ANALYSIS -->
   <section>
-    <div class="section-label">Divergence Analysis</div>
+    <div class="section-label">Divergence Analysis {ib_divergence}</div>
     {divergence_html}
   </section>
 
   <!-- FUNDAMENTALS -->
   <section>
-    <div class="section-label">Company Fundamentals</div>
+    <div class="section-label">Company Fundamentals {ib_fundamentals}</div>
     <div class="fundamentals">
       <div class="fund-table">
         <div class="fund-table-title">Income &amp; Cash Flow</div>
@@ -4722,7 +5483,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
   <!-- BENCHMARKS -->
   <section>
-    <div class="section-label">Live Industry Benchmarks — {sector_label} ({peer_count} peers)</div>
+    <div class="section-label">Live Industry Benchmarks — {sector_label} ({peer_count} peers) {ib_benchmarks}</div>
     <div class="range-summary">
       <div class="range-item">
         <span class="range-label">{sector_label} P/E</span>
@@ -4745,7 +5506,7 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 
 <div id="tab-all" class="tab-panel">
 <div class="container" style="max-width:1100px;margin:0 auto;padding:40px 24px;">
-  <div class="section-label">All Valuation Methods — Ranked by Applicability</div>
+  <div class="section-label">All Valuation Methods — Ranked by Applicability {ib_all_methods}</div>
   <p style="color:var(--muted);font-size:13px;margin-bottom:24px;">
     Models ranked by applicability score (0–100) combining academic precision, data quality, and company fit.
     Top 8 are displayed in the "Top 8" tab. All models with a fair value are shown here.
@@ -4761,6 +5522,8 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
 </div><!-- /tab-growth -->
 
 {backtest_tab_panel}
+
+{seasonality_tab_panel}
 
 <div id="tab-glossary" class="tab-panel">
   <div class="container" style="padding-top:48px;">
@@ -4952,7 +5715,11 @@ function btToggleLine(gid) {{
     card.setAttribute('data-visible', 'true');
   }}
 }}
+
+{help_js}
 </script>
+
+{help_popup_html}
 
 <div class="footer">
   Generated {ts} · Data source: TradingView Screener · For educational purposes only.<br>
@@ -5037,6 +5804,52 @@ function btToggleLine(gid) {{
             '<div class="section-label">Backtesting</div>'
             '<p style="color:var(--muted);font-size:14px;">Run with <code>--backtest DAYS</code> to enable this tab.</p>'
             '</div></div>'
+        ),
+        seasonality_tab_panel=(
+            '<div id="tab-seasonality" class="tab-panel">'
+            '<div class="container" style="padding-top:48px;">'
+            + _build_seasonality_html(d, seas) +
+            '</div></div><!-- /tab-seasonality -->'
+        ),
+        ib_top8=_vm_help_btn("top8"),
+        ib_conv_spectrum=_vm_help_btn("conv_spectrum"),
+        ib_val_summary=_vm_help_btn("val_summary"),
+        ib_divergence=_vm_help_btn("divergence"),
+        ib_fundamentals=_vm_help_btn("fundamentals"),
+        ib_benchmarks=_vm_help_btn("benchmarks"),
+        ib_all_methods=_vm_help_btn("all_methods"),
+        help_js=(
+            "var _VM_HELP=" + json.dumps(_VM_HELP_DATA) + ";\n"
+            "function showVmHelp(key,evt){\n"
+            "  evt.stopPropagation();\n"
+            "  var pop=document.getElementById('vm-help-pop');\n"
+            "  var h=_VM_HELP[key]; if(!h) return;\n"
+            "  document.getElementById('vm-help-pop-title').textContent=h.title;\n"
+            "  document.getElementById('vm-help-pop-body').innerHTML=h.body;\n"
+            "  pop.classList.add('visible');\n"
+            "  var rect=evt.target.getBoundingClientRect();\n"
+            "  var pw=360, left=rect.right+8;\n"
+            "  if(left+pw>window.innerWidth-16) left=rect.left-pw-8;\n"
+            "  if(left<8) left=8;\n"
+            "  var top=rect.top+window.scrollY;\n"
+            "  if(top+240>window.scrollY+window.innerHeight) top=window.scrollY+window.innerHeight-250;\n"
+            "  pop.style.top=top+'px'; pop.style.left=left+'px';\n"
+            "}\n"
+            "function closeVmHelp(){\n"
+            "  document.getElementById('vm-help-pop').classList.remove('visible');\n"
+            "}\n"
+            "document.addEventListener('click',function(e){\n"
+            "  var pop=document.getElementById('vm-help-pop');\n"
+            "  if(pop&&!pop.contains(e.target)&&!e.target.classList.contains('vm-help-btn')) closeVmHelp();\n"
+            "});\n"
+            "document.addEventListener('keydown',function(e){if(e.key==='Escape') closeVmHelp();});\n"
+        ),
+        help_popup_html=(
+            '<div id="vm-help-pop" role="tooltip">'
+            '<button id="vm-help-pop-close" onclick="closeVmHelp()" aria-label="Close">&times;</button>'
+            '<div id="vm-help-pop-title"></div>'
+            '<div id="vm-help-pop-body"></div>'
+            '</div>'
         ),
     )
 
@@ -5354,10 +6167,22 @@ def main():
             print("  Worst method: " + bt["worst_method"])
             print("  {}-day return: {}%".format(backtest_days, bt["price_change_pct"]))
 
+    print("\n[Seasonality] Computing quarterly & monthly seasonal patterns...")
+    seas = fetch_seasonality(ticker, sector=d.get("sector"))
+    if seas.get("error"):
+        print("  Warning: " + seas["error"])
+    else:
+        _cq = seas.get("current_q", "?")
+        _ri = seas.get("q_rev_idx")
+        _ri_val = "{:.2f}x".format(_ri[_cq - 1]) if (_ri and _cq and _cq <= 4) else "N/A"
+        print("  Cycle class: {}  |  Q{} revenue index: {}".format(
+            seas.get("cycle_class", "?"), _cq, _ri_val))
+
     print("\nGenerating HTML report...")
     html = generate_html(d, results, conv, benchmarks, gr, reliability, bt,
                          applicability_scores=applicability_scores,
-                         top_8=top_8, remainder=remainder + skipped_methods)
+                         top_8=top_8, remainder=remainder + skipped_methods,
+                         seas=seas)
 
     outdir = "valuationData"
     os.makedirs(outdir, exist_ok=True)
