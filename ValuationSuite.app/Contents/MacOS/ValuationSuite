@@ -1,5 +1,28 @@
 #!/usr/bin/env bash
-source "$HOME/anaconda3/etc/profile.d/conda.sh" 2>/dev/null || true
-conda activate py311 2>/dev/null || true
-cd "/Users/pzuzarte/GitHub/valuationScripts"
-python "/Users/pzuzarte/GitHub/valuationScripts/app.py"
+# ── ValuationSuite.app launcher ──────────────────────────────────────────────
+# Location-independent: computes project root from this script's own path.
+# Move the .app anywhere and it will still find the project correctly,
+# as long as it stays inside the project directory (ValuationSuite.app is
+# always in the same folder as app.py).
+
+# Resolve this script's directory → that's MacOS/ inside the .app bundle
+MACOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Project root is 3 levels up:  MacOS/ → Contents/ → ValuationSuite.app/ → project/
+PROJECT_ROOT="$(cd "$MACOS_DIR/../../.." && pwd)"
+
+# Sanity check
+if [[ ! -f "$PROJECT_ROOT/app.py" ]]; then
+    osascript -e "display alert \"ValuationSuite\" message \"Could not find app.py in:\n$PROJECT_ROOT\n\nDid you move the .app outside the project folder?\" as critical" 2>/dev/null || true
+    exit 1
+fi
+
+# Activate conda env if available
+CONDA_SH="$HOME/anaconda3/etc/profile.d/conda.sh"
+if [[ -f "$CONDA_SH" ]]; then
+    source "$CONDA_SH" 2>/dev/null || true
+    conda activate py311 2>/dev/null || true
+fi
+
+cd "$PROJECT_ROOT"
+exec python "$PROJECT_ROOT/app.py"

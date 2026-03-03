@@ -3,13 +3,16 @@
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleExecutable</key>     <string>ValuationSuite</string>
-  <key>CFBundleIdentifier</key>     <string>com.valuationsuite.app</string>
-  <key>CFBundleName</key>           <string>Valuation Suite</string>
-  <key>CFBundleDisplayName</key>    <string>Valuation Suite</string>
-  <key>CFBundleVersion</key>        <string>2.0</string>
-  <key>CFBundlePackageType</key>    <string>APPL</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>LSMinimumSystemVersion</key> <string>10.13</string>
+    <key>CFBundleExecutable</key>         <string>ValuationSuite</string>
+    <key>CFBundleIdentifier</key>         <string>com.valuationsuite.app</string>
+    <key>CFBundleName</key>               <string>Valuation Suite</string>
+    <key>CFBundleDisplayName</key>        <string>Valuation Suite</string>
+    <key>CFBundleVersion</key>            <string>2.1</string>
+    <key>CFBundleShortVersionString</key> <string>2.1</string>
+    <key>CFBundlePackageType</key>        <string>APPL</string>
+    <key>CFBundleSignature</key>          <string>????</string>
+    <key>NSHighResolutionCapable</key>    <true/>
+    <key>LSMinimumSystemVersion</key>     <string>10.13</string>
+    <key>LSUIElement</key>                <false/>
 </dict>
 </plist>

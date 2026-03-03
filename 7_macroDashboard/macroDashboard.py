@@ -2122,13 +2122,12 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
 
     # Size table
     h += f'<div class="card-title">By Market Capitalisation {help_btn("cap-size")}</div>'
-    size_sorted = sorted(CAP_SIZE, key=lambda x: cap_size.get(x[0], {}).get("1M") or -999, reverse=True)
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Index</th><th>Tier</th>'
           '<th class="num">Price</th>'
-          '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
+          '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
-    for ticker, name, tier in size_sorted:
+    for ticker, name, tier in CAP_SIZE:
         d     = cap_size.get(ticker, {})
         price = d.get("price", 0)
         tc    = cap_tier_colors.get(tier, "#6b7194")
@@ -2146,13 +2145,12 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
         "small-growth": "#f0a500", "small-value": "#e07b39",
     }
     h += f'<div class="card-title" style="margin-top:20px">Growth vs Value — Across Cap Sizes {help_btn("cap-style")}</div>'
-    style_sorted = sorted(CAP_STYLE, key=lambda x: cap_size.get(x[0], {}).get("1M") or -999, reverse=True)
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Style</th><th>Bias</th>'
           '<th class="num">Price</th>'
-          '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
+          '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
-    for ticker, name, style in style_sorted:
+    for ticker, name, style in CAP_STYLE:
         d          = cap_size.get(ticker, {})
         price      = d.get("price", 0)
         sc         = style_colors.get(style, "#6b7194")
@@ -3304,9 +3302,14 @@ if(oasCtx){{
             "spanGaps": True,
         })
 
+    # Current prices for end-of-line labels
+    comm_prices = {t: round(commodities.get(t, {}).get("price") or 0, 2)
+                   for t, _, _ in COMMODITIES}
+
     js += f"""
 var cnCtx = document.getElementById('chart-comm-norm');
 if(cnCtx){{
+  var commPrices = {json.dumps(comm_prices)};
   new Chart(cnCtx,{{
     type:'line',
     data:{{
@@ -3315,9 +3318,35 @@ if(cnCtx){{
     }},
     options:{{
       responsive:true,maintainAspectRatio:false,
+      layout:{{padding:{{right:58}}}},
       plugins:{{legend:{{labels:{{color:'#6b7194',boxWidth:10,font:{{size:10}}}}}},tooltip:{{mode:'index',intersect:false,callbacks:{{label:ctx=>ctx.dataset.label+': '+ctx.parsed.y?.toFixed(1)}}}}}},
       scales:{{x:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',maxTicksLimit:8}}}},y:{{grid:{{color:'#252a3a'}},ticks:{{color:'#6b7194',callback:v=>v.toFixed(0)}}}}}}
-    }}
+    }},
+    plugins:[{{
+      id:'commPriceLabels',
+      afterDraw(chart){{
+        const ctx=chart.ctx;
+        chart.data.datasets.forEach((ds,i)=>{{
+          const meta=chart.getDatasetMeta(i);
+          if(!meta.visible)return;
+          let li=-1;
+          for(let j=ds.data.length-1;j>=0;j--){{if(ds.data[j]!=null){{li=j;break;}}}}
+          if(li<0)return;
+          const pt=meta.data[li];
+          if(!pt)return;
+          const ticker=ds.label.split(' ')[0];
+          const price=commPrices[ticker];
+          if(!price)return;
+          ctx.save();
+          ctx.font='bold 10px DM Mono,monospace';
+          ctx.fillStyle=ds.borderColor;
+          ctx.textAlign='left';
+          ctx.textBaseline='middle';
+          ctx.fillText('$'+price.toFixed(2),pt.x+6,pt.y);
+          ctx.restore();
+        }});
+      }}
+    }}]
   }});
 }}
 """

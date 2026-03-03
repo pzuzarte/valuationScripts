@@ -683,19 +683,20 @@ def fetch_market_sentiment(ticker: str) -> dict:
                         insiders = insiders[insiders.index >= cutoff]
                 except Exception: pass
 
-                type_col    = next((c for c in ["Transaction","Insider Trading","Text"] if c in insiders.columns), None)
-                shares_col  = next((c for c in ["Shares","Value","Shares Traded"] if c in insiders.columns), None)
+                type_col    = next((c for c in ["Transaction","Insider Trading","Text","transactionText","Action","Type"] if c in insiders.columns), None)
+                shares_col  = next((c for c in ["Shares","Shares Traded"] if c in insiders.columns), None)
                 name_col_i  = next((c for c in ["Insider","Name"] if c in insiders.columns), None)
                 role_col    = next((c for c in ["Relationship","Position","Title"] if c in insiders.columns), None)
                 val_col     = next((c for c in ["Value","Transaction Value"] if c in insiders.columns), None)
+                date_col    = next((c for c in ["Start Date","Date","Reported","startDate"] if c in insiders.columns), None)
 
                 buys  = 0
                 sells = 0
                 txns  = []
-                for _, row in insiders.head(20).iterrows():
-                    tx_type = str(row.get(type_col, "")).lower() if type_col else ""
+                for idx, row in insiders.head(20).iterrows():
+                    tx_type = str(row.get(type_col, "")).strip().lower() if type_col else ""
                     is_buy  = any(x in tx_type for x in ["purchase","buy","acquisition","exercis"])
-                    is_sell = any(x in tx_type for x in ["sale","sell","disposed"])
+                    is_sell = any(x in tx_type for x in ["sale","sell","dispos"])
                     if is_buy:  buys  += 1
                     if is_sell: sells += 1
                     if name_col_i:
@@ -707,12 +708,32 @@ def fetch_market_sentiment(ticker: str) -> dict:
                         try:
                             vl = int(float(str(vl).replace(",","").replace("$","") or 0)) if vl else None
                         except Exception: vl = None
+                        # Extract transaction date
+                        tx_date = ""
+                        try:
+                            raw_dt = row.get(date_col) if date_col else None
+                            if raw_dt is not None and str(raw_dt) not in ("", "NaT", "nan"):
+                                tx_date = str(raw_dt)[:10]
+                            elif hasattr(idx, "strftime"):
+                                tx_date = idx.strftime("%Y-%m-%d")
+                        except Exception: pass
+                        # Human-readable type label
+                        if is_buy:
+                            tx_label = "BUY"
+                        elif is_sell:
+                            tx_label = "SELL"
+                        elif tx_type:
+                            tx_label = tx_type.title()[:18]
+                        else:
+                            tx_label = "OTHER"
                         txns.append({
                             "name":     str(row.get(name_col_i, "")),
                             "role":     str(row.get(role_col, "")) if role_col else "",
-                            "type":     "BUY" if is_buy else ("SELL" if is_sell else tx_type[:20]),
+                            "type":     tx_label,
+                            "is_buy":   is_buy,
                             "shares":   sh,
                             "value":    vl,
+                            "date":     tx_date,
                         })
                 out["insider_buy_count"]    = buys
                 out["insider_sell_count"]   = sells
@@ -2440,6 +2461,516 @@ function switchTab(id, btn) {
 """
 
 
+def _build_risk_tab_html(stocks_data: dict, metrics: dict) -> str:
+    """
+    Portfolio Risk tab:
+      • Portfolio VaR — historical simulation (95%/99%, 1-day & 10-day)
+      • Correlation matrix — SVG heatmap of pairwise Pearson correlations
+      • Per-stock stats — annualised vol, Sharpe (Rf = 4.3%), max drawdown
+    All maths are pure Python — no external dependencies beyond stdlib.
+    """
+    RF_ANNUAL = 0.043
+    MIN_OBS   = 30   # minimum common bar count to include a ticker
+
+    # ── 1. Build daily-return series per ticker ────────────────────────────
+    tickers_all = [t for t in stocks_data if stocks_data[t].get("bars")]
+
+    rets_map = {}   # {ticker: {date_str: daily_return}}
+    for ticker in tickers_all:
+        bars = stocks_data[ticker]["bars"]
+        d = {}
+        for i in range(1, len(bars)):
+            p0 = bars[i - 1]["close"]
+            p1 = bars[i]["close"]
+            if p0 and p0 > 0:
+                d[bars[i]["date"]] = (p1 - p0) / p0
+        if len(d) >= MIN_OBS:
+            rets_map[ticker] = d
+
+    tickers = sorted(rets_map.keys())
+
+    if len(tickers) < 2:
+        return (
+            '<div id="tab-risk" class="tab-panel">'
+            '<div class="container" style="padding-top:48px;">'
+            '<div class="section-label">Portfolio Risk</div>'
+            '<p style="color:var(--muted);font-size:14px;">'
+            'Insufficient price history to compute risk metrics. '
+            'At least 2 holdings with 30+ days of data are required.'
+            '</p></div></div>'
+        )
+
+    # ── 2. Align to common date intersection ──────────────────────────────
+    date_sets    = [set(rets_map[t].keys()) for t in tickers]
+    common_dates = sorted(set.intersection(*date_sets))
+
+    if len(common_dates) < MIN_OBS:
+        # Fall back to union with zero-fill for missing dates
+        common_dates = sorted(set.union(*date_sets))
+
+    n_obs = len(common_dates)
+
+    # Return matrix: {ticker: [float, ...]} aligned to common_dates
+    ret_mat = {t: [rets_map[t].get(d, 0.0) for d in common_dates] for t in tickers}
+
+    # ── 3. Portfolio weights (equity value, CASH excluded) ─────────────────
+    eq_vals   = {t: stocks_data[t]["value"] for t in tickers}
+    total_eq  = sum(eq_vals.values())
+    weights   = (
+        {t: eq_vals[t] / total_eq for t in tickers}
+        if total_eq > 0 else
+        {t: 1.0 / len(tickers) for t in tickers}
+    )
+
+    # ── 4. Portfolio daily returns ─────────────────────────────────────────
+    port_rets = [
+        sum(weights[t] * ret_mat[t][i] for t in tickers)
+        for i in range(n_obs)
+    ]
+
+    # ── 5. VaR — historical simulation ────────────────────────────────────
+    srt = sorted(port_rets)
+
+    def _var(confidence):
+        """Return 1-day VaR as a positive loss fraction."""
+        idx = max(0, int(n_obs * (1 - confidence)) - 1)
+        return -srt[idx]
+
+    var_95_1d  = _var(0.95)
+    var_99_1d  = _var(0.99)
+    var_95_10d = var_95_1d  * (10 ** 0.5)
+    var_99_10d = var_99_1d  * (10 ** 0.5)
+
+    # ── 6. Per-stock & portfolio stats ────────────────────────────────────
+    def _risk_stats(rets):
+        n = len(rets)
+        if n < 2:
+            return None
+        avg = sum(rets) / n
+        var = sum((r - avg) ** 2 for r in rets) / (n - 1)
+        std = var ** 0.5
+        ann_vol = std * (252 ** 0.5)
+        ann_ret = avg * 252
+        sharpe  = (ann_ret - RF_ANNUAL) / ann_vol if ann_vol > 0 else 0.0
+        cum, peak, mdd = 1.0, 1.0, 0.0
+        for r in rets:
+            cum  *= (1 + r)
+            peak  = max(peak, cum)
+            mdd   = max(mdd, (peak - cum) / peak)
+        return {"ann_vol": ann_vol, "ann_ret": ann_ret, "sharpe": sharpe, "max_dd": mdd}
+
+    per_stock  = {t: _risk_stats(ret_mat[t]) for t in tickers}
+    port_stats = _risk_stats(port_rets)
+
+    # ── 7. Pearson correlation matrix ──────────────────────────────────────
+    def _pearson(xs, ys):
+        n = len(xs)
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        xd = [x - mx for x in xs]
+        yd = [y - my for y in ys]
+        num = sum(a * b for a, b in zip(xd, yd))
+        den = (sum(a * a for a in xd) * sum(b * b for b in yd)) ** 0.5
+        return round(num / den, 3) if den > 0 else 1.0
+
+    corr = {
+        t1: {t2: _pearson(ret_mat[t1], ret_mat[t2]) for t2 in tickers}
+        for t1 in tickers
+    }
+
+    # ── 8. Build VaR banner ────────────────────────────────────────────────
+    def _var_box(label, pct_loss):
+        dollar = total_eq * pct_loss
+        return (
+            "<div style='background:var(--surface);border-radius:10px;padding:20px 24px;text-align:center;'>"
+            "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+            "color:var(--muted);margin-bottom:8px;'>{lbl}</div>"
+            "<div style='font-size:24px;font-family:DM Mono,monospace;"
+            "color:var(--down);font-weight:700;'>{pct:.2f}%</div>"
+            "<div style='font-size:11px;color:var(--muted);margin-top:4px;'>"
+            "${dlr:,.0f} on ${eq:,.0f} equity</div>"
+            "</div>"
+        ).format(lbl=label, pct=pct_loss * 100, dlr=dollar, eq=total_eq)
+
+    var_section = (
+        "<section>"
+        "<div class='section-label'>Portfolio Value at Risk — Historical Simulation</div>"
+        "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px;'>"
+        + _var_box("95% VaR — 1 Day",   var_95_1d)
+        + _var_box("99% VaR — 1 Day",   var_99_1d)
+        + _var_box("95% VaR — 10 Day",  var_95_10d)
+        + _var_box("99% VaR — 10 Day",  var_99_10d)
+        + "</div>"
+        + "<p style='font-size:11px;color:var(--muted);margin:4px 0 0 0;'>"
+        + "Based on {:,} common trading days. "
+          "95% VaR: worst loss exceeded on 1 in 20 days. "
+          "10-day VaR = 1-day × √10 (Basel square-root-of-time scaling).".format(n_obs)
+        + "</p></section>"
+    )
+
+    # ── 9. SVG correlation heatmap ────────────────────────────────────────
+    n    = len(tickers)
+    CELL = 54
+    LM   = 85    # left margin for row labels
+    TM   = 110   # top margin for column labels
+    SVG_W = LM + n * CELL
+    SVG_H = TM + n * CELL
+
+    # Dark-background-friendly palette
+    _NEUT = (42, 46, 66)    # neutral (≈ 0 correlation)
+    _POS  = (185, 32, 32)   # strong positive = red
+    _NEG  = (32, 88, 200)   # strong negative = blue
+
+    def _corr_color(r, is_diag):
+        if is_diag:
+            return "rgb(58,63,88)", "#aaa"
+        t  = min(1.0, abs(r))
+        c1 = _NEUT
+        c2 = _POS if r >= 0 else _NEG
+        rc = int(c1[0] + t * (c2[0] - c1[0]))
+        gc = int(c1[1] + t * (c2[1] - c1[1]))
+        bc = int(c1[2] + t * (c2[2] - c1[2]))
+        bright = 0.299 * rc + 0.587 * gc + 0.114 * bc
+        fg = "#fff" if bright < 110 else "#bbb"
+        return "rgb({},{},{})".format(rc, gc, bc), fg
+
+    svg = [
+        "<svg xmlns='http://www.w3.org/2000/svg' width='{}' height='{}' "
+        "style='display:block;' overflow='visible'>".format(SVG_W, SVG_H)
+    ]
+
+    # Column labels (rotated +45° — text hangs above-left of anchor, clear of the grid)
+    for j, t in enumerate(tickers):
+        cx = LM + j * CELL + CELL // 2
+        cy = TM - 8
+        svg.append(
+            "<text x='{cx}' y='{cy}' text-anchor='start' "
+            "transform='rotate(-45,{cx},{cy})' "
+            "font-family='DM Mono,monospace' font-size='11' fill='#888'>{t}</text>"
+            .format(cx=cx, cy=cy, t=t)
+        )
+
+    # Row labels
+    for i, t in enumerate(tickers):
+        ry = TM + i * CELL + CELL // 2 + 4
+        svg.append(
+            "<text x='{rx}' y='{ry}' text-anchor='end' "
+            "font-family='DM Mono,monospace' font-size='11' fill='#888'>{t}</text>"
+            .format(rx=LM - 6, ry=ry, t=t)
+        )
+
+    # Cells
+    for i, t1 in enumerate(tickers):
+        for j, t2 in enumerate(tickers):
+            r_val   = corr[t1][t2]
+            is_diag = (i == j)
+            bg, fg  = _corr_color(r_val, is_diag)
+            x = LM + j * CELL
+            y = TM + i * CELL
+            svg.append(
+                "<rect x='{x}' y='{y}' width='{c}' height='{c}' fill='{bg}' rx='2'/>".format(
+                    x=x, y=y, c=CELL - 1, bg=bg)
+            )
+            txt = "diag" if is_diag else "{:.2f}".format(r_val)
+            if is_diag:
+                txt = t1[:4]
+            svg.append(
+                "<text x='{cx}' y='{cy}' text-anchor='middle' dominant-baseline='middle' "
+                "font-family='DM Mono,monospace' font-size='10' fill='{fg}'>{txt}</text>"
+                .format(cx=x + CELL // 2, cy=y + CELL // 2, fg=fg, txt=txt)
+            )
+
+    svg.append("</svg>")
+    svg_html = "".join(svg)
+
+    legend_html = (
+        "<div style='display:flex;flex-wrap:wrap;gap:16px;align-items:center;"
+        "margin-top:8px;font-size:11px;'>"
+        "<span style='background:rgb(32,88,200);color:#fff;padding:2px 10px;"
+        "border-radius:3px;'>−1.0 Negative / Hedge</span>"
+        "<span style='background:rgb(42,46,66);color:#aaa;padding:2px 10px;"
+        "border-radius:3px;'>0.0 Uncorrelated</span>"
+        "<span style='background:rgb(185,32,32);color:#fff;padding:2px 10px;"
+        "border-radius:3px;'>+1.0 Positive / Moves Together</span>"
+        "<span style='color:var(--muted);'>Lower off-diagonal values = better diversification</span>"
+        "</div>"
+    )
+
+    corr_section = (
+        "<section style='margin-top:28px;'>"
+        "<div class='section-label'>Correlation Matrix — Daily Returns</div>"
+        "<div style='overflow-x:auto;'>" + svg_html + "</div>"
+        + legend_html
+        + "</section>"
+    )
+
+    # ── 10. Per-stock stats table ─────────────────────────────────────────
+    th_s = (
+        "padding:10px 14px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+        "color:var(--muted);border-bottom:2px solid var(--border);text-align:right;"
+    )
+    th_l = th_s.replace("text-align:right;", "text-align:left;")
+
+    sorted_tickers = sorted(
+        tickers,
+        key=lambda t: -(per_stock[t]["sharpe"] if per_stock[t] else -99)
+    )
+    rows = ""
+    for ticker in sorted_tickers:
+        s    = per_stock[ticker]
+        if not s:
+            continue
+        fund = stocks_data[ticker].get("fund", {})
+        name = (fund.get("name") or ticker)[:24]
+        w    = weights[ticker] * 100
+        sh   = s["sharpe"]
+        dd   = s["max_dd"]
+        sh_c = "var(--up)" if sh > 1 else "var(--warn)" if sh > 0 else "var(--down)"
+        dd_c = "var(--up)" if dd < 0.10 else "var(--warn)" if dd < 0.25 else "var(--down)"
+        rows += (
+            "<tr>"
+            "<td style='padding:10px 14px;font-weight:600;'>{tkr}</td>"
+            "<td style='padding:10px 14px;font-size:11px;color:var(--muted);'>{nm}</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;'>{vol:.1f}%</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "color:{shc};'>{sh:.2f}x</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "color:{ddc};'>{dd:.1f}%</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;'>{w:.1f}%</td>"
+            "</tr>"
+        ).format(tkr=ticker, nm=name, vol=s["ann_vol"] * 100,
+                 shc=sh_c, sh=sh, ddc=dd_c, dd=dd * 100, w=w)
+
+    if port_stats:
+        ps  = port_stats
+        psh = ps["sharpe"]
+        pdd = ps["max_dd"]
+        rows += (
+            "<tr style='border-top:2px solid var(--border);'>"
+            "<td style='padding:10px 14px;font-weight:700;color:var(--accent);'>PORTFOLIO</td>"
+            "<td style='padding:10px 14px;font-size:11px;color:var(--muted);'>Weighted aggregate</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "font-weight:700;'>{vol:.1f}%</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "font-weight:700;color:{shc};'>{sh:.2f}x</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "font-weight:700;color:{ddc};'>{dd:.1f}%</td>"
+            "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+            "font-weight:700;'>100.0%</td>"
+            "</tr>"
+        ).format(
+            vol=ps["ann_vol"] * 100,
+            shc="var(--up)" if psh > 1 else "var(--warn)" if psh > 0 else "var(--down)",
+            sh=psh,
+            ddc="var(--up)" if pdd < 0.10 else "var(--warn)" if pdd < 0.25 else "var(--down)",
+            dd=pdd * 100,
+        )
+
+    stats_section = (
+        "<section style='margin-top:28px;'>"
+        "<div class='section-label'>Per-Position Risk Statistics</div>"
+        "<div style='overflow-x:auto;'>"
+        "<table style='width:100%;border-collapse:collapse;'>"
+        "<thead><tr>"
+        "<th style='" + th_l + "'>Ticker</th>"
+        "<th style='" + th_l + "'>Company</th>"
+        "<th style='" + th_s + "'>Ann. Volatility</th>"
+        "<th style='" + th_s + "'>Sharpe Ratio</th>"
+        "<th style='" + th_s + "'>Max Drawdown</th>"
+        "<th style='" + th_s + "'>Weight</th>"
+        "</tr></thead>"
+        "<tbody>" + rows + "</tbody>"
+        "</table></div>"
+        "<p style='font-size:11px;color:var(--muted);margin:8px 0 0 0;'>"
+        "Sharpe Ratio uses Rf = 4.3% annual. Ann. Vol = daily std dev × √252. "
+        "Max Drawdown measured over {:,} trading days. "
+        "Sorted by Sharpe descending.".format(n_obs)
+        + "</p></section>"
+    )
+
+    return (
+        '<div id="tab-risk" class="tab-panel">'
+        '<div class="container" style="padding-top:48px;">'
+        + var_section
+        + corr_section
+        + stats_section
+        + "</div></div>"
+    )
+
+
+def _build_earnings_tab_html(stocks_data: dict) -> str:
+    """
+    Build the Earnings Calendar tab.
+    Sorts all holdings by days until next earnings, soonest first.
+    Stocks with no earnings date go to the bottom.
+    """
+    today = datetime.date.today()
+
+    rows = []
+    for ticker, sd in stocks_data.items():
+        an   = sd.get("analyst", {})
+        fund = sd.get("fund",   {})
+        sig  = sd.get("signal", {})
+        ed_str = an.get("earnings_date")
+        days_to = None
+        if ed_str:
+            try:
+                ed_date = datetime.date.fromisoformat(ed_str)
+                days_to = (ed_date - today).days
+            except Exception:
+                ed_str = None
+
+        fwd_eps = fund.get("fwd_eps")
+        ttm_eps = fund.get("eps")
+        signal  = sig.get("signal", "HOLD")
+        name    = fund.get("company_name", ticker)
+        price   = fund.get("price", 0) or 0
+
+        rows.append({
+            "ticker":   ticker,
+            "name":     name,
+            "price":    price,
+            "ed_str":   ed_str,
+            "days_to":  days_to,
+            "fwd_eps":  fwd_eps,
+            "ttm_eps":  ttm_eps,
+            "signal":   signal,
+        })
+
+    # Sort: known dates by days_to asc, then unknowns
+    rows.sort(key=lambda r: (r["days_to"] is None, r["days_to"] if r["days_to"] is not None else 9999))
+
+    # Summary counts
+    within_7  = sum(1 for r in rows if r["days_to"] is not None and 0 <= r["days_to"] <= 7)
+    within_30 = sum(1 for r in rows if r["days_to"] is not None and 0 <= r["days_to"] <= 30)
+    no_date   = sum(1 for r in rows if r["days_to"] is None)
+
+    # ── Summary banner ────────────────────────────────────────────────────────
+    banner_items = ""
+    if within_7:
+        banner_items += (
+            "<div style='background:rgba(224,92,92,.12);border:1px solid rgba(224,92,92,.35);"
+            "border-radius:8px;padding:12px 20px;text-align:center;'>"
+            "<div style='font-size:28px;font-weight:700;color:#e05c5c;'>{}</div>"
+            "<div style='font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px;'>Reporting within 7 days</div>"
+            "</div>"
+        ).format(within_7)
+    banner_items += (
+        "<div style='background:var(--surface);border:1px solid var(--border);"
+        "border-radius:8px;padding:12px 20px;text-align:center;'>"
+        "<div style='font-size:28px;font-weight:700;color:var(--accent);'>{}</div>"
+        "<div style='font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px;'>Reporting within 30 days</div>"
+        "</div>"
+        "<div style='background:var(--surface);border:1px solid var(--border);"
+        "border-radius:8px;padding:12px 20px;text-align:center;'>"
+        "<div style='font-size:28px;font-weight:700;color:var(--text);'>{}</div>"
+        "<div style='font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin-top:2px;'>Holdings tracked</div>"
+        "</div>"
+    ).format(within_30, len(rows))
+
+    banner = (
+        "<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));"
+        "gap:12px;margin-bottom:28px;'>" + banner_items + "</div>"
+    )
+
+    # ── Table rows ────────────────────────────────────────────────────────────
+    def _sig_badge(sig):
+        if "BUY"  in sig: bg, clr = "rgba(0,200,150,.15)",  "#00c896"
+        elif "SELL" in sig: bg, clr = "rgba(224,92,92,.15)", "#e05c5c"
+        else:               bg, clr = "rgba(255,215,0,.12)",  "#ffd700"
+        return (
+            "<span style='background:{bg};color:{clr};font-size:9px;font-weight:700;"
+            "letter-spacing:1px;padding:2px 7px;border-radius:4px;"
+            "font-family:DM Mono,monospace;text-transform:uppercase;'>{s}</span>"
+        ).format(bg=bg, clr=clr, s=sig or "HOLD")
+
+    def _days_badge(days):
+        if days is None:
+            return "<span style='color:var(--muted);font-size:12px;'>Unknown</span>"
+        if days < 0:
+            return "<span style='color:var(--muted);font-size:12px;'>Past</span>"
+        if days <= 7:
+            bg, clr = "rgba(224,92,92,.15)", "#e05c5c"
+        elif days <= 21:
+            bg, clr = "rgba(240,165,0,.12)", "#f0a500"
+        else:
+            bg, clr = "rgba(79,142,247,.08)", "var(--accent)"
+        return (
+            "<span style='background:{bg};color:{clr};font-size:11px;font-weight:700;"
+            "font-family:DM Mono,monospace;padding:3px 8px;border-radius:4px;'>{d}d</span>"
+        ).format(bg=bg, clr=clr, d=days)
+
+    table_rows = ""
+    for r in rows:
+        days   = r["days_to"]
+        fwd    = "${:.2f}".format(r["fwd_eps"]) if r["fwd_eps"] else "N/A"
+        ttm    = "${:.2f}".format(r["ttm_eps"]) if r["ttm_eps"] else "N/A"
+        ed_disp = r["ed_str"] if r["ed_str"] else "—"
+        row_bg = ""
+        if days is not None and 0 <= days <= 7:
+            row_bg = " style='background:rgba(224,92,92,.04);'"
+        elif days is not None and 0 <= days <= 21:
+            row_bg = " style='background:rgba(240,165,0,.03);'"
+
+        table_rows += (
+            "<tr{rb}>"
+            "<td style='font-weight:700;color:var(--accent);font-family:DM Mono,monospace;padding:10px 12px;'>{tk}</td>"
+            "<td style='padding:10px 12px;color:var(--text);'>{nm}</td>"
+            "<td style='padding:10px 12px;font-family:DM Mono,monospace;'>{ed}</td>"
+            "<td style='padding:10px 12px;text-align:center;'>{db}</td>"
+            "<td style='padding:10px 12px;font-family:DM Mono,monospace;text-align:right;'>{fwd}</td>"
+            "<td style='padding:10px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{ttm}</td>"
+            "<td style='padding:10px 12px;text-align:center;'>{sb}</td>"
+            "</tr>"
+        ).format(
+            rb=row_bg,
+            tk=r["ticker"],
+            nm=r["name"][:30] + ("…" if len(r["name"]) > 30 else ""),
+            ed=ed_disp,
+            db=_days_badge(days),
+            fwd=fwd,
+            ttm=ttm,
+            sb=_sig_badge(r["signal"]),
+        )
+
+    table = (
+        "<div style='overflow-x:auto;'>"
+        "<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+        "<thead><tr style='border-bottom:2px solid var(--border);'>"
+        "<th style='padding:10px 12px;text-align:left;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Ticker</th>"
+        "<th style='padding:10px 12px;text-align:left;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Company</th>"
+        "<th style='padding:10px 12px;text-align:left;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Earnings Date</th>"
+        "<th style='padding:10px 12px;text-align:center;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Days Until</th>"
+        "<th style='padding:10px 12px;text-align:right;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Fwd EPS Est.</th>"
+        "<th style='padding:10px 12px;text-align:right;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>TTM EPS</th>"
+        "<th style='padding:10px 12px;text-align:center;font-family:DM Mono,monospace;font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);'>Signal</th>"
+        "</tr></thead>"
+        "<tbody>" + table_rows + "</tbody>"
+        "</table></div>"
+    )
+
+    note = ""
+    if no_date:
+        note = (
+            "<p style='color:var(--muted);font-size:12px;margin-top:16px;'>"
+            "{} holding(s) have no earnings date available from yfinance. "
+            "Dates are typically available 30–60 days before the expected report.</p>"
+        ).format(no_date)
+
+    return (
+        "<div id='tab-earnings' class='tab-panel'>"
+        "<div class='container' style='padding-top:48px;'>"
+        "<div class='section-label'>Earnings Calendar</div>"
+        "<p style='color:var(--muted);font-size:13px;margin-bottom:20px;line-height:1.6;'>"
+        "Holdings sorted by next earnings date. Earnings within 7 days are flagged "
+        "<span style='color:#e05c5c;font-weight:600;'>red</span>, "
+        "within 21 days <span style='color:#f0a500;font-weight:600;'>amber</span>. "
+        "Fwd EPS is the analyst consensus estimate for next quarter.</p>"
+        + banner + table + note +
+        "</div></div>"
+    )
+
+
 def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -> str:
     """Master HTML builder. Assembles all tabs."""
 
@@ -3112,6 +3643,9 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
 </div>
 </div>""".format(content=fund_html)
 
+    # ── Earnings Calendar Tab ──────────────────────────────────────
+    earnings_tab = _build_earnings_tab_html(stocks_data)
+
     # ── Backtest Tab ───────────────────────────────────────────────
     bt_rows = ""
     for ticker in sorted(stocks_data.keys()):
@@ -3567,7 +4101,8 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
 </div>""".format(cards=forecast_cards or '<p style="color:var(--muted);">No forecast data available.</p>')
 
     # ── Sentiment Tab ───────────────────────────────────────────────
-    sentiment_cards = ""
+    sentiment_cards  = ""
+    all_insider_buys = []   # [{ticker, company, name, role, shares, value, date}]
     for ticker in sorted(stocks_data.keys()):
         sd    = stocks_data[ticker]
         sent  = sd.get("sentiment", {})
@@ -3605,17 +4140,23 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
 
         # Insider transactions table
         insider_rows = ""
-        for tx in (sent.get("insider_transactions") or [])[:6]:
-            tc = "var(--up)" if tx["type"] == "BUY" else "var(--down)" if tx["type"] == "SELL" else "var(--muted)"
-            sh = "{:,}".format(tx["shares"]) if tx.get("shares") else "—"
-            vl = mo(tx["value"]) if tx.get("value") else "—"
-            insider_rows += """<tr>
-              <td style="font-size:12px;padding:8px 0;">{nm}</td>
+        for tx in (sent.get("insider_transactions") or [])[:8]:
+            is_b = tx.get("is_buy") or tx.get("type") == "BUY"
+            is_s = tx.get("type") == "SELL"
+            tc   = "var(--up)" if is_b else "var(--down)" if is_s else "var(--muted)"
+            bg   = "background:rgba(0,200,150,0.07);" if is_b else ""
+            sh   = "{:,}".format(tx["shares"]) if tx.get("shares") else "—"
+            vl   = mo(tx["value"]) if tx.get("value") else "—"
+            dt   = tx.get("date", "")[:7] or "—"   # show YYYY-MM
+            tp   = tx.get("type") or "—"
+            insider_rows += """<tr style="{bg}">
+              <td style="font-size:12px;padding:6px 0;">{nm}</td>
               <td style="font-size:11px;color:var(--muted);">{role}</td>
-              <td style="font-family:DM Mono,monospace;font-size:12px;color:{tc};">{tp}</td>
-              <td style="font-family:DM Mono,monospace;font-size:12px;text-align:right;">{sh}</td>
-              <td style="font-family:DM Mono,monospace;font-size:12px;text-align:right;">{vl}</td>
-            </tr>""".format(nm=tx["name"][:20], role=tx["role"][:18], tc=tc, tp=tx["type"], sh=sh, vl=vl)
+              <td style="font-family:DM Mono,monospace;font-size:11px;color:{tc};font-weight:700;">{tp}</td>
+              <td style="font-family:DM Mono,monospace;font-size:11px;text-align:right;">{sh}</td>
+              <td style="font-family:DM Mono,monospace;font-size:11px;text-align:right;">{vl}</td>
+              <td style="font-family:DM Mono,monospace;font-size:10px;color:var(--muted);text-align:right;">{dt}</td>
+            </tr>""".format(nm=tx["name"][:22], role=tx["role"][:18], tc=tc, bg=bg, tp=tp, sh=sh, vl=vl, dt=dt)
 
         # Analyst target range visual
         t_mean   = an.get("target_price")
@@ -3727,11 +4268,80 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
                     <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);">Type</th>
                     <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);text-align:right;">Shares</th>
                     <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);text-align:right;">Value</th>
+                    <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);text-align:right;">Date</th>
                   </tr></thead>
                   <tbody>{ir}</tbody>
                 </table>""".format(ir=insider_rows) if insider_rows else ""),
             s_reasons="".join("<li>{}</li>".format(r) for r in sent.get("sentiment_reasons",[])) or "<li style='color:var(--muted);'>No significant institutional/insider signals detected.</li>",
         )
+
+        # Collect insider buys for portfolio-wide summary
+        for tx in (sent.get("insider_transactions") or []):
+            if tx.get("is_buy") or tx.get("type") == "BUY":
+                all_insider_buys.append({
+                    "ticker":  ticker,
+                    "company": fund.get("company_name", ticker),
+                    "name":    tx.get("name", ""),
+                    "role":    tx.get("role", ""),
+                    "shares":  tx.get("shares"),
+                    "value":   tx.get("value"),
+                    "date":    tx.get("date", ""),
+                })
+
+    # ── Build insider buying summary banner ─────────────────────────
+    insider_buy_banner = ""
+    if all_insider_buys:
+        # Sort by value descending (None → end)
+        all_insider_buys.sort(key=lambda x: x["value"] or 0, reverse=True)
+        n_tickers = len({b["ticker"] for b in all_insider_buys})
+        n_buys    = len(all_insider_buys)
+        buy_rows  = ""
+        for b in all_insider_buys[:20]:
+            sh  = "{:,}".format(b["shares"]) if b.get("shares") else "—"
+            vl  = mo(b["value"]) if b.get("value") else "—"
+            dt  = b.get("date", "")[:7] or "—"
+            buy_rows += (
+                "<tr>"
+                "<td style='font-family:DM Mono,monospace;font-size:13px;font-weight:700;"
+                "color:var(--up);padding:8px 12px 8px 0;'>{tkr}</td>"
+                "<td style='font-size:12px;color:var(--text);padding:8px 8px 8px 0;'>{nm}</td>"
+                "<td style='font-size:11px;color:var(--muted);padding:8px 8px 8px 0;'>{role}</td>"
+                "<td style='font-family:DM Mono,monospace;font-size:12px;text-align:right;"
+                "padding:8px 8px 8px 0;'>{sh}</td>"
+                "<td style='font-family:DM Mono,monospace;font-size:12px;text-align:right;"
+                "color:var(--up);font-weight:600;padding:8px 0;'>{vl}</td>"
+                "<td style='font-family:DM Mono,monospace;font-size:11px;color:var(--muted);"
+                "text-align:right;padding:8px 0;'>{dt}</td>"
+                "</tr>"
+            ).format(tkr=b["ticker"], nm=b["name"][:26], role=b["role"][:20],
+                     sh=sh, vl=vl, dt=dt)
+        insider_buy_banner = """
+  <div style="background:rgba(0,200,150,0.07);border:1px solid rgba(0,200,150,0.3);
+              border-radius:10px;padding:20px 24px;margin-bottom:28px;">
+    <div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;
+                color:var(--up);margin-bottom:14px;font-weight:700;">
+      Insider Buying — {nb} purchase{ps} across {nt} holding{hs} (last 6 months)
+    </div>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead><tr>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:left;padding:4px 8px 4px 0;">Insider</th>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:left;padding:4px 8px 4px 0;">Role</th>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:right;padding:4px 8px 4px 0;">Shares</th>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:right;padding:4px 8px 4px 0;">Value</th>
+        <th style="font-size:9px;font-family:DM Mono,monospace;color:var(--muted);
+                   text-align:right;padding:4px 0;">Date</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>""".format(nb=n_buys, ps="s" if n_buys != 1 else "",
+                   nt=n_tickers, hs="s" if n_tickers != 1 else "",
+                   rows=buy_rows)
 
     sentiment_tab = """
 <div id="tab-sentiment" class="tab-panel">
@@ -3742,11 +4352,18 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
     Institutional ownership from SEC 13F filings (via yfinance). Insider transactions from SEC Form 4 (last 6 months).
     Analyst price target range from consensus data.
     <strong>Interpretation:</strong> Net institutional buying = more institutions increased/opened than decreased/closed positions in the most recent 13F filing period.
-    Insider sales are normal and often planned; <em>insider buying</em> (with own money) is the stronger signal.
+    Insider sales are normal and often planned; <em>insider buying</em> (with own money, on the open market) is the stronger signal.
   </div>
+  {insider_buy_banner}
   {cards}
 </div>
-</div>""".format(cards=sentiment_cards or '<p style="color:var(--muted);">No sentiment data available.</p>')
+</div>""".format(
+        insider_buy_banner=insider_buy_banner,
+        cards=sentiment_cards or '<p style="color:var(--muted);">No sentiment data available.</p>'
+    )
+
+    # ── Risk Tab ───────────────────────────────────────────────────
+    risk_tab = _build_risk_tab_html(stocks_data, metrics)
 
     # ── Assemble full HTML ─────────────────────────────────────────
     html = """<!DOCTYPE html>
@@ -3767,8 +4384,10 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
   <button class="tab-btn" onclick="switchTab('sentiment',this)">Sentiment</button>
   <button class="tab-btn" onclick="switchTab('technical',this)">Technical</button>
   <button class="tab-btn" onclick="switchTab('fundamentals',this)">Fundamentals</button>
+  <button class="tab-btn" onclick="switchTab('earnings',this)">Earnings Calendar</button>
   <button class="tab-btn" onclick="switchTab('backtest',this)">Backtesting</button>
   <button class="tab-btn" onclick="switchTab('rebalance',this)">Rebalance</button>
+  <button class="tab-btn" onclick="switchTab('risk',this)">Risk</button>
 </div>
 
 {overview}
@@ -3777,8 +4396,10 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
 {sentiment}
 {technical}
 {fundamentals}
+{earnings}
 {backtest}
 {rebalance}
+{risk}
 
 <div class="footer">
   Portfolio Analysis Report · Generated {ts}<br>
@@ -3796,8 +4417,10 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
         sentiment=sentiment_tab,
         technical=tech_tab,
         fundamentals=fund_tab,
+        earnings=earnings_tab,
         backtest=bt_tab,
         rebalance=rebal_tab,
+        risk=risk_tab,
     )
     return html
 
@@ -3964,9 +4587,56 @@ def main():
         f.write(html)
 
     print("  Saved: " + outfile)
+
+    # Persist portfolio signals to ~/.valuation_suite/data.db (silent)
+    _save_portfolio_signals(args.portfolio, stocks_data)
+
     print("\nOpening report in browser...")
     webbrowser.open("file://" + os.path.abspath(outfile))
     print("\nDone.")
+
+
+def _save_portfolio_signals(portfolio_file: str, stocks_data: dict):
+    """
+    Save per-ticker signals from this portfolio run to ~/.valuation_suite/data.db.
+    Silent try/except — never crashes the parent script.
+    """
+    try:
+        import sqlite3 as _sq
+        _db_dir  = os.path.join(os.path.expanduser("~"), ".valuation_suite")
+        _db_path = os.path.join(_db_dir, "data.db")
+        os.makedirs(_db_dir, exist_ok=True)
+        _c = _sq.connect(_db_path)
+        _c.execute(
+            """CREATE TABLE IF NOT EXISTS portfolio_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_date  TEXT NOT NULL,
+                portfolio_file TEXT,
+                ticker         TEXT NOT NULL,
+                signal         TEXT,
+                fair_value     REAL,
+                upside_pct     REAL
+            )"""
+        )
+        today  = datetime.datetime.now().strftime("%Y-%m-%d")
+        pf_base = os.path.basename(portfolio_file) if portfolio_file else ""
+        for ticker, sd in stocks_data.items():
+            sig   = sd.get("signal", {})
+            fund  = sd.get("fund", {})
+            price = fund.get("price") or 0
+            fv    = sig.get("best_fv")
+            upside = ((fv - price) / price * 100) if (fv and price > 0) else None
+            _c.execute(
+                """INSERT INTO portfolio_signals
+                   (snapshot_date, portfolio_file, ticker, signal, fair_value, upside_pct)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (today, pf_base, ticker, sig.get("signal"), fv, upside),
+            )
+        _c.commit()
+        _c.close()
+        print("  Portfolio signals saved to DB ({} positions).".format(len(stocks_data)))
+    except Exception:
+        pass   # never block the main report
 
 
 if __name__ == "__main__":
