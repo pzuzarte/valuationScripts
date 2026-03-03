@@ -124,6 +124,23 @@ SCRIPTS = {
                  required=False, default="90"),
         ],
     },
+    "Watchlist Tracker": {
+        "path": os.path.join(ROOT, "8_watchlist", "watchlistTracker.py"),
+        "desc": "Watchlist & valuation history — tracks fair value snapshots and portfolio signals over time.",
+        "icon": "📋",
+        "params": [
+            dict(id="add",     label="Add ticker",    type="entry", flag="--add",
+                 required=False, default=""),
+            dict(id="target",  label="Target price",  type="entry", flag="--target",
+                 required=False, default=""),
+            dict(id="notes",   label="Notes",         type="entry", flag="--notes",
+                 required=False, default=""),
+            dict(id="remove",  label="Remove ticker", type="entry", flag="--remove",
+                 required=False, default=""),
+            dict(id="history", label="History for",   type="entry", flag="--history",
+                 required=False, default=""),
+        ],
+    },
 }
 
 # Sidebar group layout — defines sections and order shown in the UI
@@ -132,6 +149,7 @@ SIDEBAR_GROUPS = [
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener"]},
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
+    {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker"]},
 ]
 
 # ── Active runs ───────────────────────────────────────────────────────────────

@@ -1454,6 +1454,16 @@ _VM_HELP_DATA = {
         "title": "All Valuation Methods",
         "body": "All 20+ valuation methods ranked by applicability score (or backtest accuracy when --backtest is used). Methods with insufficient data are listed separately as N/A. Click any method row for more detail on inputs and assumptions."
     },
+    "sensitivity": {
+        "title": "DCF Sensitivity Analysis",
+        "body": ("Shows how the DCF fair value changes across a grid of assumptions. "
+                 "<b>Table 1</b>: Varies FCF growth rate (rows) and WACC (columns) — the two most impactful levers. "
+                 "<b>Table 2</b>: Varies the terminal growth rate (Gordon Growth Model) and WACC, "
+                 "with FCF growth fixed at the base estimate. "
+                 "The ★ cell is the base-case estimate. "
+                 "Green = fair value above current price; Red = below. "
+                 "Intensity reflects the margin of over/under-valuation.")
+    },
 }
 
 
@@ -1463,6 +1473,164 @@ def _vm_help_btn(key):
         "<button class='vm-help-btn' onclick='showVmHelp(\"{k}\",event)' "
         "aria-label='More info' title='Click for more info'>&#9432;</button>"
     ).format(k=key)
+
+
+def _build_sensitivity_html(d: dict) -> str:
+    """
+    Build a 2-D DCF sensitivity analysis section with two tables:
+      1. FCF Growth Rate (rows) x WACC (cols) — primary levers
+      2. Terminal Growth Rate (rows) x WACC (cols) — Gordon Growth sensitivity
+    Replicates run_dcf() 2-stage 10-year math inline for clean self-containment.
+    """
+    fcf    = d.get("fcf")
+    shares = d.get("shares")
+    price  = d.get("price") or 0
+    nd     = (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0)
+    g_base = d.get("est_growth") or 0.05
+
+    if not (fcf and fcf > 0 and shares and shares > 0 and price > 0):
+        return ""
+
+    wacc_base, _ = calculate_wacc(d)
+
+    # ── Inline 2-stage 10-yr DCF (mirrors run_dcf logic exactly) ─────────
+    def _dcf(g_start, wacc, tgr):
+        if wacc <= tgr:
+            return None
+        DECAY = 0.15
+        g1 = g_start
+        cf = fcf
+        pvs = []
+        for yr in range(1, 6):
+            g1 = max(g1 * (1 - DECAY), tgr * 2)
+            cf = cf * (1 + g1)
+            pvs.append(cf / (1 + wacc) ** yr)
+        exit_g = g1
+        for yr in range(6, 11):
+            t  = (yr - 5) / 5
+            g2 = exit_g * (1 - t) + tgr * t
+            cf = cf * (1 + g2)
+            pvs.append(cf / (1 + wacc) ** yr)
+        pv_term = (cf * (1 + tgr) / (wacc - tgr)) / (1 + wacc) ** 10
+        eq_val  = sum(pvs) + pv_term - nd
+        return round(eq_val / shares, 2) if eq_val > 0 else None
+
+    # ── Cell colour: neutral → green (value > price) or red (value < price) ─
+    _N, _G, _R = (40, 44, 62), (26, 100, 55), (100, 26, 40)   # neutral/green/red
+
+    def _cell(val, is_base):
+        disp = "—" if val is None else "${:.2f}".format(val)
+        if val is None:
+            bg = "background:#1a1e2e;"
+        else:
+            t    = max(0.0, min(1.0, abs((val - price) / price) / 0.60))
+            c1, c2 = (_N, _G) if val >= price else (_N, _R)
+            r, g_c, b = (int(c1[i] + t * (c2[i] - c1[i])) for i in range(3))
+            bg = "background:rgb({},{},{});".format(r, g_c, b)
+        border = "outline:2px solid #e0e0e0;outline-offset:-2px;" if is_base else ""
+        fw     = "font-weight:700;" if is_base else ""
+        style  = (
+            "padding:8px 14px;font-family:DM Mono,monospace;font-size:12px;"
+            "color:#fff;text-align:right;{}{}{}"
+        ).format(bg, border, fw)
+        return "<td style='{}'>{}</td>".format(style, disp)
+
+    # ── Axis definitions ───────────────────────────────────────────────────
+    wacc_cols   = [round(max(0.06, min(0.18, wacc_base + delta)), 4)
+                   for delta in [-0.03, -0.02, -0.01, 0.00, 0.01, 0.02, 0.03]]
+    growth_rows = [max(0.03, round(g_base * m, 4))
+                   for m in [0.50, 0.75, 1.00, 1.25, 1.50]]
+    tgr_rows    = [0.020, 0.025, 0.030, 0.035, 0.040]
+
+    # ── Column-header row ─────────────────────────────────────────────────
+    TH = (
+        "padding:8px 14px;font-family:DM Mono,monospace;font-size:10px;"
+        "letter-spacing:1px;text-align:center;border-bottom:2px solid var(--border);"
+    )
+
+    def _col_headers(corner_label):
+        cells = "<th style='{}color:var(--muted);text-align:left;white-space:nowrap;'>{}</th>".format(TH, corner_label)
+        for w in wacc_cols:
+            acc = "color:var(--accent);" if abs(w - wacc_base) < 0.0005 else "color:var(--muted);"
+            cells += "<th style='{}{}'>{:.1f}%</th>".format(TH, acc, w * 100)
+        return cells
+
+    def _row_label_cell(label, is_base):
+        s = "font-weight:700;color:var(--accent);" if is_base else "color:var(--text);"
+        return (
+            "<td style='padding:8px 14px;font-family:DM Mono,monospace;"
+            "font-size:11px;white-space:nowrap;{}'>{}</td>"
+        ).format(s, label)
+
+    # ── Primary table: FCF growth × WACC ──────────────────────────────────
+    base_g_snap = max(0.03, round(g_base, 4))
+    primary_rows = ""
+    for g in growth_rows:
+        is_row = abs(g - base_g_snap) < 0.0005
+        lbl    = "g = {:.1f}%{}".format(g * 100, " \u2605" if is_row else "")
+        cells  = _row_label_cell(lbl, is_row)
+        for w in wacc_cols:
+            cells += _cell(_dcf(g, w, TERMINAL_GROWTH_RATE), is_row and abs(w - wacc_base) < 0.0005)
+        primary_rows += "<tr>" + cells + "</tr>"
+
+    # ── Secondary table: terminal growth × WACC ───────────────────────────
+    tgr_tbody = ""
+    for tgr in tgr_rows:
+        is_row = abs(tgr - TERMINAL_GROWTH_RATE) < 0.0005
+        lbl    = "tgr = {:.1f}%{}".format(tgr * 100, " \u2605" if is_row else "")
+        cells  = _row_label_cell(lbl, is_row)
+        for w in wacc_cols:
+            cells += _cell(_dcf(g_base, w, tgr), is_row and abs(w - wacc_base) < 0.0005)
+        tgr_tbody += "<tr>" + cells + "</tr>"
+
+    def _table(corner, body):
+        return (
+            "<div style='overflow-x:auto;margin-bottom:24px;'>"
+            "<table style='width:100%;border-collapse:collapse;'>"
+            "<thead><tr>" + _col_headers(corner) + "</tr></thead>"
+            "<tbody>" + body + "</tbody>"
+            "</table></div>"
+        )
+
+    # ── Legend / metadata banner ───────────────────────────────────────────
+    base_fv  = _dcf(g_base, wacc_base, TERMINAL_GROWTH_RATE)
+    base_str = "${:.2f}".format(base_fv) if base_fv else "N/A"
+    mos_str  = "${:.2f}".format(base_fv * (1 - MARGIN_OF_SAFETY)) if base_fv else "N/A"
+
+    legend = (
+        "<div style='background:var(--surface2);border-radius:8px;padding:16px 20px;margin-bottom:16px;'>"
+        "<p style='font-size:12px;color:var(--muted);margin:0 0 4px 0;'>"
+        "Base case: FCF Growth = <b style='color:var(--text);'>{g:.1f}%</b>"
+        " &nbsp;&middot;&nbsp; WACC = <b style='color:var(--text);'>{w:.1f}%</b>"
+        " &nbsp;&middot;&nbsp; Terminal Growth = <b style='color:var(--text);'>{tgr:.1f}%</b>"
+        " &nbsp;&middot;&nbsp; Current Price = <b style='color:var(--text);'>${p:.2f}</b>"
+        "</p>"
+        "<p style='font-size:12px;color:var(--muted);margin:0;'>"
+        "Base DCF = <b style='color:var(--accent);'>{fv}</b>"
+        " &nbsp;&middot;&nbsp; 20% MoS Entry = <b style='color:var(--accent);'>{mos}</b>"
+        " &nbsp;&middot;&nbsp; <span style='color:#66bb6a;'>&#9646; Green</span> = above current price"
+        " &nbsp;&middot;&nbsp; <span style='color:#ef5350;'>&#9646; Red</span> = below current price"
+        " &nbsp;&middot;&nbsp; &#9733; = base assumption"
+        "</p></div>"
+    ).format(
+        g=g_base * 100, w=wacc_base * 100, tgr=TERMINAL_GROWTH_RATE * 100,
+        p=price, fv=base_str, mos=mos_str
+    )
+
+    subhead = "font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin:0 0 8px 0;"
+
+    return (
+        "<section style='margin-top:8px;'>"
+        "<div class='section-label'>DCF Sensitivity Analysis "
+        + _vm_help_btn("sensitivity") +
+        "</div>"
+        + legend
+        + "<div style='" + subhead + "'>FCF Growth Rate &times; WACC &nbsp;(Terminal Growth fixed at {:.1f}%)</div>".format(TERMINAL_GROWTH_RATE * 100)
+        + _table("FCF Growth \\ WACC", primary_rows)
+        + "<div style='" + subhead + "'>Terminal Growth Rate &times; WACC &nbsp;(FCF Growth fixed at {:.1f}%)</div>".format(g_base * 100)
+        + _table("Term. Growth \\ WACC", tgr_tbody)
+        + "</section>"
+    )
 
 
 def fetch_seasonality(ticker: str, sector: str = None) -> dict:
@@ -5408,6 +5576,9 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
     </div>
   </section>
 
+  <!-- DCF SENSITIVITY ANALYSIS -->
+  {sensitivity_html}
+
   <!-- RANGE SUMMARY -->
   <section>
     <div class="section-label">Valuation Summary {ib_val_summary}</div>
@@ -5756,6 +5927,7 @@ function btToggleLine(gid) {{
         spread_pct=conv["spread_pct"],
         method_cards=method_cards_html,
         conv_bars=conv_bars,
+        sensitivity_html=_build_sensitivity_html(d),
         mos_entry=mo(conv["mean"] * (1 - MARGIN_OF_SAFETY)),
         mktcap=B(d["market_cap"]),
         growth=pc(d["est_growth"]),
@@ -6192,9 +6364,60 @@ def main():
         f.write(html)
 
     print("  Saved: " + outfile)
+
+    # Persist snapshot to ~/.valuation_suite/data.db (silent — never crashes main)
+    _save_valuation_snapshot(
+        ticker      = ticker,
+        price       = d["price"],
+        fair_value  = conv["mean"],
+        upside_pct  = conv["upside"],
+        verdict     = conv["verdict"],
+        wacc        = auto_wacc,
+        growth_rate = d["est_growth"],
+        top_method  = top_8[0]["method"] if top_8 else "",
+    )
+
     print("\nOpening report in browser...")
     webbrowser.open("file://" + os.path.abspath(outfile))
     print("\nDone.")
+
+
+def _save_valuation_snapshot(ticker, price, fair_value, upside_pct, verdict,
+                              wacc, growth_rate, top_method):
+    """
+    Persist a valuation snapshot to ~/.valuation_suite/data.db.
+    Silent try/except — never crashes the parent script.
+    """
+    try:
+        import sqlite3 as _sq
+        _db_dir  = os.path.join(os.path.expanduser("~"), ".valuation_suite")
+        _db_path = os.path.join(_db_dir, "data.db")
+        os.makedirs(_db_dir, exist_ok=True)
+        _c = _sq.connect(_db_path)
+        _c.execute(
+            """CREATE TABLE IF NOT EXISTS valuation_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL, snapshot_date TEXT NOT NULL,
+                price REAL, fair_value REAL, upside_pct REAL,
+                verdict TEXT, wacc REAL, growth_rate REAL, top_method TEXT
+            )"""
+        )
+        _c.execute(
+            """INSERT INTO valuation_snapshots
+               (ticker, snapshot_date, price, fair_value, upside_pct,
+                verdict, wacc, growth_rate, top_method)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                ticker,
+                datetime.datetime.now().strftime("%Y-%m-%d"),
+                price, fair_value, upside_pct, verdict, wacc, growth_rate, top_method,
+            ),
+        )
+        _c.commit()
+        _c.close()
+        print("  Snapshot saved to DB.")
+    except Exception:
+        pass   # never block the main report
 
 
 if __name__ == "__main__":
