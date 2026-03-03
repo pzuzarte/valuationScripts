@@ -320,6 +320,75 @@ def api_upload():
     return jsonify({"path": dest})
 
 
+# ── Live quote cache (60-second TTL) ─────────────────────────────────────────
+_lq_cache: dict = {"ts": 0.0, "data": {}}
+
+
+@app.route("/api/live-quotes")
+def api_live_quotes():
+    """Return live 1-day % change for a comma-separated list of tickers.
+
+    Used by the macro dashboard HTML to populate the live '1D' column.
+    Results are cached for 60 seconds so rapid page reloads don't hammer yfinance.
+
+    Query params:
+        symbols  — comma-separated ticker list, e.g. SPY,QQQ,TLT,BTC-USD
+    Returns:
+        JSON object  {ticker: changesPercentage | null, ...}
+    """
+    import time
+
+    symbols_raw = request.args.get("symbols", "")
+    tickers = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    if not tickers:
+        resp = jsonify({})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+
+    now = time.time()
+    if now - _lq_cache["ts"] < 60:
+        data = {t: _lq_cache["data"].get(t) for t in tickers}
+        resp = jsonify(data)
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp
+
+    # Fetch fresh data via yfinance batch download
+    result: dict = {}
+    try:
+        import yfinance as yf
+        raw = yf.download(
+            tickers, period="5d", interval="1d",
+            auto_adjust=True, progress=False,
+        )
+        # raw['Close'] is a DataFrame (tickers as cols) for multi-ticker downloads;
+        # for a single ticker it may be a plain Series — normalise to DataFrame.
+        closes = raw.get("Close", raw)
+        if hasattr(closes, "to_frame"):          # single-ticker Series
+            closes = closes.to_frame(name=tickers[0])
+        for t in tickers:
+            try:
+                if t not in closes.columns:
+                    result[t] = None
+                    continue
+                col = closes[t].dropna()
+                if len(col) >= 2:
+                    prev, curr = float(col.iloc[-2]), float(col.iloc[-1])
+                    result[t] = round((curr - prev) / prev * 100, 2) if prev else None
+                else:
+                    result[t] = None
+            except Exception:
+                result[t] = None
+    except Exception:
+        pass
+
+    _lq_cache["ts"]   = time.time()
+    _lq_cache["data"] = result
+
+    resp = jsonify({t: result.get(t) for t in tickers})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 # ── Embedded HTML / CSS / JS ───────────────────────────────────────────────────
 
 HTML = r"""<!DOCTYPE html>
@@ -767,15 +836,67 @@ function exitApp() {
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _port_open(port: int) -> bool:
+    """Return True if something is already listening on *port*."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _our_server_alive(url: str) -> bool:
+    """Return True if *our* Flask server is responding at *url*."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url + "/api/scripts", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+def _kill_port(port: int) -> None:
+    """Kill whatever process is bound to *port* (macOS / Linux)."""
+    import subprocess, time
+    try:
+        res = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True,
+        )
+        for pid in res.stdout.strip().splitlines():
+            pid = pid.strip()
+            if pid.isdigit():
+                subprocess.run(["kill", "-9", pid], capture_output=True)
+        time.sleep(0.6)          # give the OS a moment to release the port
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    import time as _time
+
     parser = argparse.ArgumentParser(description="ValuationSuite web launcher")
     parser.add_argument("--port",       type=int,  default=5050, help="Port (default 5050)")
     parser.add_argument("--no-browser", action="store_true",     help="Don't auto-open browser")
     args = parser.parse_args()
 
-    url = f"http://127.0.0.1:{args.port}"
+    port = args.port
+    url  = f"http://127.0.0.1:{port}"
+
+    if _port_open(port):
+        if _our_server_alive(url):
+            # ── Server already running (browser was closed but Flask wasn't) ──
+            # Just reopen the browser — no need to restart anything.
+            print(f"\n  ValuationSuite already running → {url}")
+            print("  Reopening browser…\n")
+            webbrowser.open(url)
+            sys.exit(0)
+        else:
+            # ── Something else is on this port — clear it and start fresh ─────
+            print(f"\n  Port {port} in use by another process — clearing…")
+            _kill_port(port)
+
     if not args.no_browser:
         threading.Timer(0.8, webbrowser.open, args=[url]).start()
 
     print(f"\n  ValuationSuite  →  {url}\n  Ctrl-C to quit\n")
-    app.run(host="127.0.0.1", port=args.port, debug=False, threaded=True)
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

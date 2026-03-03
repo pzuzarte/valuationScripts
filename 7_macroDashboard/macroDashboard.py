@@ -654,6 +654,24 @@ def clr(v):
     return "#00c896" if v >= 0 else "#e05c5c"
 
 
+def _live1d_cell(ticker, v):
+    """TD element for the live 1D column.
+
+    Embeds the statically-fetched value (populated at script run-time) and
+    carries the ``live1d`` CSS class + ``data-ticker`` attribute so the
+    in-browser JavaScript can overwrite it with a fresher value when the
+    Flask server is running.
+    """
+    if v is None:
+        return (f'<td class="num live1d" data-ticker="{ticker}" '
+                f'style="color:#6b7194">—</td>')
+    alpha = min(0.28, abs(v) / 5 * 0.28)
+    bg    = f"rgba(0,200,150,{alpha:.3f})" if v >= 0 else f"rgba(224,92,92,{alpha:.3f})"
+    return (f'<td class="num live1d" data-ticker="{ticker}" '
+            f'style="color:{clr(v)};font-weight:600;background:{bg}">'
+            f'{fmt_pct(v)}</td>')
+
+
 # ── Interpretation helpers ──────────────────────────────────────────────────
 def _b(txt):
     return f'<span style="color:var(--up);font-weight:600">{txt}</span>'
@@ -1134,6 +1152,7 @@ def fetch_cross_asset() -> dict:
             ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else None
             return ticker, {
                 "price":  round(price, 4),
+                "1D":     _perf_from_hist(close, 1),
                 "1W":     _perf_from_hist(close, 5),
                 "1M":     _perf_from_hist(close, 21),
                 "3M":     _perf_from_hist(close, 63),
@@ -1167,6 +1186,7 @@ def fetch_sectors() -> dict:
             price = float(close.iloc[-1])
             return ticker, {
                 "price": round(price, 2),
+                "1D":    _perf_from_hist(close, 1),
                 "1W":    _perf_from_hist(close, 5),
                 "1M":    _perf_from_hist(close, 21),
                 "3M":    _perf_from_hist(close, 63),
@@ -1524,6 +1544,7 @@ def fetch_cap_size() -> dict:
             price = float(close.iloc[-1])
             return ticker, {
                 "price":  round(price, 2),
+                "1D":     _perf_from_hist(close, 1),
                 "1W":     _perf_from_hist(close, 5),
                 "1M":     _perf_from_hist(close, 21),
                 "3M":     _perf_from_hist(close, 63),
@@ -1556,6 +1577,7 @@ def fetch_global_indices() -> dict:
             price = float(close.iloc[-1])
             return ticker, {
                 "price":  round(price, 2),
+                "1D":     _perf_from_hist(close, 1),
                 "1W":     _perf_from_hist(close, 5),
                 "1M":     _perf_from_hist(close, 21),
                 "3M":     _perf_from_hist(close, 63),
@@ -1588,6 +1610,7 @@ def fetch_commodities() -> dict:
             price = float(close.iloc[-1])
             return ticker, {
                 "price":  round(price, 2),
+                "1D":     _perf_from_hist(close, 1),
                 "1W":     _perf_from_hist(close, 5),
                 "1M":     _perf_from_hist(close, 21),
                 "3M":     _perf_from_hist(close, 63),
@@ -1894,6 +1917,7 @@ def _tab_overview(regime: dict, cross: dict) -> str:
     h += f'<div class="card-title" style="margin-top:8px">Cross-Asset Performance {help_btn("cross-asset-perf")}</div>'
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>Asset</th><th>Name</th><th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
           '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th><th class="num">vs 200-day MA</th></tr></thead><tbody>')
     for ticker, name, asset_class in CROSS_ASSET:
@@ -1908,6 +1932,7 @@ def _tab_overview(regime: dict, cross: dict) -> str:
         vs200_str = fmt_pct(vs200)
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td class="num">{price_str}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_td(d.get("1W"))}{_td(d.get("1M"))}{_td(d.get("3M"))}'
               f'{_td(d.get("6M"))}{_td(d.get("YTD"))}'
               f'<td class="num" style="color:{vs200_c};font-weight:600">{vs200_str}</td></tr>')
@@ -2078,12 +2103,14 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
     )
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Sector</th><th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
           '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th><th class="num">YTD</th></tr></thead><tbody>')
     for ticker, name in sorted_sectors:
         d     = sectors.get(ticker, {})
         price = d.get("price", 0)
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td class="num">${price:.2f}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}'
               f'{_hcell(d.get("3M"))}{_hcell(d.get("YTD"))}</tr>')
     h += '</tbody></table></div>'
@@ -2125,6 +2152,7 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Index</th><th>Tier</th>'
           '<th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
           '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
     for ticker, name, tier in CAP_SIZE:
@@ -2134,6 +2162,7 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td><span class="pill" style="background:{tc}22;color:{tc}">{tier}</span></td>'
               f'<td class="num">${price:.2f}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}'
               f'{_hcell(d.get("3M"))}{_hcell(d.get("6M"))}{_hcell(d.get("YTD"))}</tr>')
     h += '</tbody></table></div>'
@@ -2148,6 +2177,7 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Style</th><th>Bias</th>'
           '<th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
           '<th class="num">1W</th><th class="num">1M</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
     for ticker, name, style in CAP_STYLE:
@@ -2158,6 +2188,7 @@ def _tab_sectors(sectors: dict, cap_size: dict) -> str:
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td><span class="pill" style="background:{sc}22;color:{sc}">{bias_lbl}</span></td>'
               f'<td class="num">${price:.2f}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}'
               f'{_hcell(d.get("3M"))}{_hcell(d.get("6M"))}{_hcell(d.get("YTD"))}</tr>')
     h += '</tbody></table></div>'
@@ -2358,6 +2389,7 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Market</th><th>Region</th>'
           '<th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
           '<th class="num">1W</th><th class="num">1M ↓</th><th class="num">3M</th>'
           '<th class="num">6M</th><th class="num">YTD</th></tr></thead><tbody>')
     for ticker, name, region in global_sorted:
@@ -2368,6 +2400,7 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td><span class="pill" style="background:{rc}22;color:{rc}">{region}</span></td>'
               f'<td class="num">{price_str}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_td(d.get("1W"))}{_td(d.get("1M"))}{_td(d.get("3M"))}'
               f'{_td(d.get("6M"))}{_td(d.get("YTD"))}</tr>')
     h += '</tbody></table></div></div>'
@@ -2417,7 +2450,9 @@ def _tab_commodities(commodities: dict) -> str:
     }
     h += '<div class="tbl-wrap"><table>'
     h += ('<thead><tr><th>ETF</th><th>Commodity</th><th>Category</th>'
-          '<th class="num">Price</th><th class="num">1W</th><th class="num">1M</th>'
+          '<th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
+          '<th class="num">1W</th><th class="num">1M</th>'
           '<th class="num">3M</th><th class="num">6M</th>'
           '<th class="num">1Y</th><th class="num">YTD</th></tr></thead><tbody>')
     for ticker, name, cat in COMMODITIES:
@@ -2427,6 +2462,7 @@ def _tab_commodities(commodities: dict) -> str:
         h += (f'<tr><td class="sym">{ticker}</td><td>{name}</td>'
               f'<td><span class="pill" style="background:{c_col}22;color:{c_col}">{cat}</span></td>'
               f'<td class="num">{"$"+f"{price:.2f}" if price else "—"}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}{_hcell(d.get("3M"))}'
               f'{_hcell(d.get("6M"))}{_hcell(d.get("1Y"))}{_hcell(d.get("YTD"))}</tr>')
     h += '</tbody></table></div>'
@@ -3596,6 +3632,95 @@ document.addEventListener('keydown', function(e) {
           '<div id="help-pop-title"></div>'
           '<div id="help-pop-body"></div>'
           '</div>')
+    # ── Live 1D quote refresher ───────────────────────────────────────────────
+    h += """
+<script>
+(function(){
+  /* Collect the unique set of tickers that need live 1D data */
+  var cells   = document.querySelectorAll('.live1d[data-ticker]');
+  var tickers = Array.from(new Set(Array.from(cells).map(function(c){return c.dataset.ticker;}).filter(Boolean)));
+  if(!tickers.length) return;
+
+  var PORTS        = [5050, 5051];
+  var workingPort  = null;
+  var statusEl     = null;
+
+  /* Inject a small status badge into the page once DOM is ready */
+  function ensureStatus(){
+    if(statusEl) return;
+    statusEl = document.createElement('div');
+    statusEl.id = 'live1d-status';
+    statusEl.style.cssText = [
+      'position:fixed','bottom:14px','right:18px','z-index:9999',
+      'font-family:DM Mono,monospace','font-size:10px','letter-spacing:1px',
+      'background:rgba(20,24,40,0.92)','border:1px solid rgba(0,200,150,0.35)',
+      'border-radius:6px','padding:5px 12px','color:#6b7194',
+      'pointer-events:none','transition:opacity .4s'
+    ].join(';');
+    document.body.appendChild(statusEl);
+  }
+
+  function setStatus(msg, color){
+    ensureStatus();
+    statusEl.style.color  = color || '#6b7194';
+    statusEl.textContent  = msg;
+    statusEl.style.opacity = '1';
+  }
+
+  /* Color + background matching the existing heatmap cell style */
+  function styleCell(cell, chg){
+    if(chg == null){ cell.textContent='—'; cell.style.color=''; cell.style.background=''; cell.style.fontWeight=''; return; }
+    var pos    = chg >= 0;
+    var alpha  = Math.min(0.28, Math.abs(chg) / 5 * 0.28);
+    cell.textContent  = (pos ? '+' : '') + chg.toFixed(2) + '%';
+    cell.style.color  = pos ? '#00c896' : '#e05c5c';
+    cell.style.background = pos ? 'rgba(0,200,150,'+alpha+')' : 'rgba(224,92,92,'+alpha+')';
+    cell.style.fontWeight = '600';
+  }
+
+  function applyData(data){
+    tickers.forEach(function(t){
+      var chg = (data[t] !== undefined) ? data[t] : null;
+      document.querySelectorAll('.live1d[data-ticker="'+t+'"]').forEach(function(cell){ styleCell(cell, chg); });
+    });
+    var now = new Date();
+    var hm  = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0');
+    setStatus('● LIVE · ' + hm, '#00c896');
+  }
+
+  async function tryFetch(port){
+    var url  = 'http://localhost:' + port + '/api/live-quotes?symbols=' + tickers.join(',');
+    var ctrl = new AbortController();
+    var tid  = setTimeout(function(){ ctrl.abort(); }, 5000);
+    try {
+      var resp = await fetch(url, {signal: ctrl.signal});
+      clearTimeout(tid);
+      if(!resp.ok) throw new Error('status ' + resp.status);
+      return await resp.json();
+    } catch(e) { clearTimeout(tid); throw e; }
+  }
+
+  async function refresh(){
+    setStatus('↻ updating…', '#6b7194');
+    var ports = workingPort ? [workingPort].concat(PORTS.filter(function(p){ return p!==workingPort; })) : PORTS;
+    for(var i=0; i<ports.length; i++){
+      try {
+        var data = await tryFetch(ports[i]);
+        workingPort = ports[i];
+        applyData(data);
+        return;
+      } catch(e) { /* try next port */ }
+    }
+    /* All ports failed — Flask probably not running */
+    setStatus('○ offline', '#6b7194');
+  }
+
+  /* Initial fetch + 60-second auto-refresh */
+  refresh();
+  setInterval(refresh, 60000);
+})();
+</script>
+"""
     h += '</body></html>'
     return h
 

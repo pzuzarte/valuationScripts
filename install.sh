@@ -135,39 +135,36 @@ PLIST
 
 ok "Info.plist written"
 
-# ── Location-independent launcher
-# The trick: BASH_SOURCE[0] is the absolute path of this script inside the bundle.
-# Going 3 levels up from MacOS/ always lands at the project root,
-# regardless of where the .app bundle lives on disk.
-cat > "$MACOS_DIR/ValuationSuite" <<'LAUNCHER'
+# ── Launcher: bake absolute PROJECT_ROOT path in at install time ──────────────
+# Using an unquoted heredoc (LAUNCHER, not 'LAUNCHER') so that ${PROJECT_ROOT}
+# expands NOW, writing the real path into the script.
+# Result: the .app can be copied to the Desktop, Dock, or anywhere else and
+# it will always know where the project lives.
+# If you ever MOVE the project folder itself, just re-run install.sh.
+cat > "$MACOS_DIR/ValuationSuite" <<LAUNCHER
 #!/usr/bin/env bash
 # ── ValuationSuite.app launcher ──────────────────────────────────────────────
-# Location-independent: computes project root from this script's own path.
-# Move the .app anywhere and it will still find the project correctly,
-# as long as it stays inside the project directory (ValuationSuite.app is
-# always in the same folder as app.py).
+# Project path baked in by install.sh on $(date "+%Y-%m-%d").
+# Copy this .app anywhere — it will always launch the correct project.
+# If you move the project folder, re-run install.sh to update this path.
 
-# Resolve this script's directory → that's MacOS/ inside the .app bundle
-MACOS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT}"
 
-# Project root is 3 levels up:  MacOS/ → Contents/ → ValuationSuite.app/ → project/
-PROJECT_ROOT="$(cd "$MACOS_DIR/../../.." && pwd)"
-
-# Sanity check
-if [[ ! -f "$PROJECT_ROOT/app.py" ]]; then
-    osascript -e "display alert \"ValuationSuite\" message \"Could not find app.py in:\n$PROJECT_ROOT\n\nDid you move the .app outside the project folder?\" as critical" 2>/dev/null || true
+# Sanity check — helpful error if the project folder was moved
+if [[ ! -f "\$PROJECT_ROOT/app.py" ]]; then
+    osascript -e "display alert \"ValuationSuite — Project Not Found\" message \"Expected the project at:\n\n\$PROJECT_ROOT\n\nIf you moved the project folder, re-run install.sh to rebuild this app.\" as critical" 2>/dev/null || true
     exit 1
 fi
 
 # Activate conda env if available
-CONDA_SH="$HOME/anaconda3/etc/profile.d/conda.sh"
-if [[ -f "$CONDA_SH" ]]; then
-    source "$CONDA_SH" 2>/dev/null || true
+CONDA_SH="\$HOME/anaconda3/etc/profile.d/conda.sh"
+if [[ -f "\$CONDA_SH" ]]; then
+    source "\$CONDA_SH" 2>/dev/null || true
     conda activate py311 2>/dev/null || true
 fi
 
-cd "$PROJECT_ROOT"
-exec python "$PROJECT_ROOT/app.py"
+cd "\$PROJECT_ROOT"
+exec python "\$PROJECT_ROOT/app.py"
 LAUNCHER
 
 chmod +x "$MACOS_DIR/ValuationSuite"
@@ -230,10 +227,11 @@ echo ""
 echo -e "${GRN}${BLD}✓ Installation complete!${RST}"
 echo ""
 echo -e "  ${BLD}How to launch:${RST}"
-echo -e "  ${CYN}①${RST}  Double-click  ${BLD}ValuationSuite.app${RST}  (move it anywhere — it's self-contained)"
+echo -e "  ${CYN}①${RST}  Double-click  ${BLD}ValuationSuite.app${RST}  — copy it to Desktop, Dock, or anywhere"
 echo -e "  ${CYN}②${RST}  Terminal:     ${BLD}valuation-suite${RST}"
 echo -e "  ${CYN}③${RST}  Terminal:     ${BLD}python ${PROJECT_ROOT}/app.py${RST}"
 echo ""
-echo -e "  ${BLD}If you move the project:${RST} re-run ${CYN}install.sh${RST} to update the CLI command."
-echo -e "  ${BLD}The .app bundle never needs updating${RST} — it always finds the project automatically."
+echo -e "  ${BLD}Project path baked into the app:${RST} ${CYN}${PROJECT_ROOT}${RST}"
+echo -e "  ${BLD}Moving the .app:${RST}     fine — copy it anywhere, it always finds the project."
+echo -e "  ${BLD}Moving the project:${RST}  re-run ${CYN}bash install.sh${RST} to update the baked-in path."
 echo ""
