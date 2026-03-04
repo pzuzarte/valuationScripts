@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# ── ValuationSuite.app launcher ──────────────────────────────────────────────
+# Project path baked in by install.sh on 2026-03-03.
+# Copy this .app anywhere — it will always launch the correct project.
+# If you move the project folder, re-run install.sh to update this path.
+
+PROJECT_ROOT="/Users/pzuzarte/GitHub/valuationScripts"
+
+# Sanity check — helpful error if the project folder was moved
+if [[ ! -f "$PROJECT_ROOT/app.py" ]]; then
+    osascript -e "display alert \"ValuationSuite — Project Not Found\" message \"Expected the project at:\n\n$PROJECT_ROOT\n\nIf you moved the project folder, re-run install.sh to rebuild this app.\" as critical" 2>/dev/null || true
+    exit 1
+fi
+
+# Activate conda env if available
+CONDA_SH="$HOME/anaconda3/etc/profile.d/conda.sh"
+if [[ -f "$CONDA_SH" ]]; then
+    source "$CONDA_SH" 2>/dev/null || true
+    conda activate py311 2>/dev/null || true
+fi
+
+cd "$PROJECT_ROOT"
+exec python "$PROJECT_ROOT/app.py"

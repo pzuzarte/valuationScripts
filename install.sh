@@ -129,11 +129,43 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key>    <true/>
     <key>LSMinimumSystemVersion</key>     <string>10.13</string>
     <key>LSUIElement</key>                <false/>
+    <key>CFBundleIconFile</key>           <string>AppIcon</string>
 </dict>
 </plist>
 PLIST
 
 ok "Info.plist written"
+
+# ── App Icon ──────────────────────────────────────────────────────────────────
+ICNS_SRC="$PROJECT_ROOT/AppIcon.icns"
+ICONSET_DIR="$PROJECT_ROOT/AppIcon.iconset"
+
+# Regenerate from create_icon.py if Pillow is available (silent on failure)
+if "$PYTHON_CMD" -c "from PIL import Image" 2>/dev/null; then
+    info "Generating app icon…"
+    mkdir -p "$ICONSET_DIR"
+    "$PYTHON_CMD" "$PROJECT_ROOT/create_icon.py" 2>/dev/null || true
+
+    # Resize to all required iconset sizes
+    BASE_PNG="$ICONSET_DIR/icon_1024x1024.png"
+    if [[ -f "$BASE_PNG" ]]; then
+        for SZ in 16 32 128 256 512; do
+            sips -z $SZ $SZ           "$BASE_PNG" --out "$ICONSET_DIR/icon_${SZ}x${SZ}.png"       >/dev/null 2>&1 || true
+            sips -z $((SZ*2)) $((SZ*2)) "$BASE_PNG" --out "$ICONSET_DIR/icon_${SZ}x${SZ}@2x.png" >/dev/null 2>&1 || true
+        done
+        iconutil -c icns "$ICONSET_DIR" -o "$ICNS_SRC" 2>/dev/null || true
+    fi
+fi
+
+# Copy icon into the app bundle
+if [[ -f "$ICNS_SRC" ]]; then
+    cp "$ICNS_SRC" "$RES_DIR/AppIcon.icns"
+    # Touch the app so Finder refreshes its icon cache
+    touch "$APP_DIR"
+    ok "App icon applied (AppIcon.icns)"
+else
+    warn "AppIcon.icns not found — app will use default icon (run: python create_icon.py)"
+fi
 
 # ── Launcher: bake absolute PROJECT_ROOT path in at install time ──────────────
 # Using an unquoted heredoc (LAUNCHER, not 'LAUNCHER') so that ${PROJECT_ROOT}
