@@ -56,11 +56,15 @@ SCRIPTS = {
         "desc": "Screen indices for high-growth stocks using a 4-pillar quality + momentum model.",
         "icon": "📈",
         "params": [
-            dict(id="index", label="Index",      type="option", flag="--index",
-                 required=True,  default="NDX",  values=["SPX", "NDX", "RUT", "TSX"]),
-            dict(id="top",   label="Top N",      type="entry",  flag="--top",
-                 required=False, default="50"),
-            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
+            dict(id="index",    label="Index",        type="option", flag="--index",
+                 required=True,  default="SPX",  values=["SPX", "NDX", "RUT", "TSX", "SPXRUT"]),
+            dict(id="top",      label="Top N",        type="entry",  flag="--top",
+                 required=False, default=""),
+            dict(id="backtest", label="Full Backtest", type="check",  flag="--backtest",
+                 required=False, default=False),
+            dict(id="backtest_days", label="Backtest days", type="entry", flag="--backtest-days",
+                 required=False, default=""),
+            dict(id="csv",      label="Export CSV",   type="check",  flag="--csv",
                  required=False, default=True),
         ],
     },
@@ -72,7 +76,7 @@ SCRIPTS = {
             dict(id="ticker",   label="Ticker",        type="entry",  positional=True,
                  required=True,  default="NVDA"),
             dict(id="backtest", label="Backtest days", type="entry",  flag="--backtest",
-                 required=False, default="90"),
+                 required=False, default="500"),
             dict(id="wacc",     label="WACC override", type="entry",  flag="--wacc",
                  required=False, default=""),
         ],
@@ -121,7 +125,7 @@ SCRIPTS = {
                  required=True,
                  default=os.path.join(ROOT, "4_portfolioAnalyzer", "FilPortfolio.csv")),
             dict(id="backtest", label="Backtest days", type="entry", flag="--backtest",
-                 required=False, default="90"),
+                 required=False, default="500"),
         ],
     },
     "Watchlist Tracker": {
@@ -141,6 +145,24 @@ SCRIPTS = {
                  required=False, default=""),
         ],
     },
+    "Research Scanner": {
+        "path": os.path.join(ROOT, "9_researchScanner", "researchScanner.py"),
+        "desc": "Emerging technology research — FDA pipeline, Phase 2/3 clinical trials, arXiv papers, IPO S-1 filings & USPTO patents.",
+        "icon": "🔭",
+        "params": [
+            dict(id="days", label="Lookback (days)", type="entry", flag="--days",
+                 required=False, default="60"),
+        ],
+    },
+    "Topic Explorer": {
+        "path": os.path.join(ROOT, "9_researchScanner", "topicExplorer.py"),
+        "desc": "Interactive topic explorer — select from 25 research themes across AI, biotech, semiconductors, health tech, energy & more. Scans arXiv, NIH grants & clinical trials.",
+        "icon": "🧭",
+        "params": [
+            dict(id="days", label="Lookback (days)", type="entry", flag="--days",
+                 required=False, default="30"),
+        ],
+    },
 }
 
 # Sidebar group layout — defines sections and order shown in the UI
@@ -150,6 +172,7 @@ SIDEBAR_GROUPS = [
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
     {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker"]},
+    {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer"]},
 ]
 
 # ── Active runs ───────────────────────────────────────────────────────────────
@@ -385,6 +408,87 @@ def api_live_quotes():
     _lq_cache["data"] = result
 
     resp = jsonify({t: result.get(t) for t in tickers})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+# ── Topic Explorer page (served from Flask so AJAX same-origin works) ─────────
+
+@app.route("/topic-explorer")
+def topic_explorer_page():
+    """Serve the Topic Explorer interactive HTML from Flask.
+
+    Serving it via Flask (http://127.0.0.1:5050/topic-explorer) instead of as
+    a file:// URL means all AJAX calls to /api/research-topics are same-origin
+    and are never blocked by the browser's CORS policy.
+    """
+    scanner_dir = os.path.join(ROOT, "9_researchScanner")
+    if scanner_dir not in sys.path:
+        sys.path.insert(0, scanner_dir)
+    try:
+        from topicExplorer import build_html  # noqa: PLC0415
+    except Exception as exc:
+        return f"<pre>Error loading topicExplorer: {exc}</pre>", 500
+
+    from flask import make_response  # noqa: PLC0415 (already imported at top level)
+    resp = make_response(build_html())
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+
+
+# ── Research Topics API ───────────────────────────────────────────────────────
+
+@app.route("/api/research-topics", methods=["POST", "OPTIONS"])
+def api_research_topics():
+    """AJAX endpoint used by the Topic Explorer HTML interface.
+
+    Accepts JSON body:
+        {
+            "topics":  ["ai_ml", "genomics", ...],
+            "days":    30,
+            "sources": ["arxiv", "nih", "trials"]
+        }
+
+    Returns JSON:
+        {
+            "arxiv":  [...],
+            "nih":    [...],
+            "trials": [...]
+        }
+    """
+    # CORS preflight
+    if request.method == "OPTIONS":
+        resp = Response()
+        resp.headers["Access-Control-Allow-Origin"]  = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    # Lazy import so topicExplorer.py is only loaded when this endpoint is hit
+    scanner_dir = os.path.join(ROOT, "9_researchScanner")
+    if scanner_dir not in sys.path:
+        sys.path.insert(0, scanner_dir)
+
+    try:
+        from topicExplorer import fetch_topics  # noqa: PLC0415
+    except Exception as exc:
+        resp = jsonify({"error": f"Could not import topicExplorer: {exc}"})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
+
+    data    = request.get_json(force=True) or {}
+    topics  = data.get("topics", [])
+    days    = int(data.get("days", 30))
+    sources = data.get("sources", ["arxiv", "nih", "trials"])
+
+    try:
+        results = fetch_topics(topics, days=days, sources=sources)
+    except Exception as exc:
+        resp = jsonify({"error": str(exc)})
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        return resp, 500
+
+    resp = jsonify(results)
     resp.headers["Access-Control-Allow-Origin"] = "*"
     return resp
 

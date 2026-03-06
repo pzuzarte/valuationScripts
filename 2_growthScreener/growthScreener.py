@@ -55,6 +55,7 @@ EXAMPLES
 """
 
 import sys, math, datetime, webbrowser, os, csv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
@@ -63,6 +64,32 @@ except ImportError:
     print("ERROR: tradingview-screener not installed.")
     print("Run:  pip install tradingview-screener")
     sys.exit(1)
+
+try:
+    import yfinance as yf
+    _YF_AVAIL = True
+except ImportError:
+    _YF_AVAIL = False
+
+# ── Optional: import point-in-time backtest engine from valuationMaster ───────
+# Used when --backtest flag is passed. Falls back to consensus ranking otherwise.
+try:
+    import urllib.request as _urllib_req
+    _VM_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "3_valuationTool")
+    if _VM_DIR not in sys.path:
+        sys.path.insert(0, _VM_DIR)
+    from valuationMaster import (
+        fetch_historical_prices       as _bt_fetch_prices,
+        fetch_historical_fundamentals as _bt_fetch_annual,
+        fetch_historical_fundamentals_ttm as _bt_fetch_quarterly,
+        _pick_snapshot_for_date       as _bt_pick_snap,
+        _rebuild_d_from_snapshot      as _bt_rebuild_d,
+        _run_methods_for_snapshot     as _bt_run_methods,
+    )
+    _BT_ENGINE_AVAIL = True
+except Exception:
+    _BT_ENGINE_AVAIL = False
 
 from valuation_models import (
     MARGIN_OF_SAFETY,
@@ -78,6 +105,12 @@ from valuation_models import (
     derive_sentiment,
     derive_accumulation,
     run_scurve_tam,
+    growth_adjusted_multiples,
+    run_forward_peg,
+    run_ev_ntm_revenue,
+    run_pie,
+    run_fcf_yield,
+    run_graham_number,
 )
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
@@ -272,14 +305,30 @@ TSX = [
 ]
 
 INDEX_CONFIG = {
-    "SPX": {"name": "S&P 500",      "tickers": SP500},
-    "NDX": {"name": "Nasdaq 100",   "tickers": NASDAQ100},
-    "RUT": {"name": "Russell 2000", "tickers": None},     # uses exchange fallback
-    "TSX": {"name": "TSX",          "tickers": TSX},
+    "SPX":    {"name": "S&P 500",                    "tickers": SP500},
+    "NDX":    {"name": "Nasdaq 100",                 "tickers": NASDAQ100},
+    "RUT":    {"name": "Russell 2000",               "tickers": None},
+    "TSX":    {"name": "TSX",                        "tickers": TSX},
+    "SPXRUT": {"name": "S&P 500 + Russell 2000",     "tickers": None},
 }
 
 
 def fetch_stocks(index_code, limit=None):
+    # ── Combined index: fetch both sub-indices and merge ─────────────────────
+    if index_code.upper() == "SPXRUT":
+        import pandas as pd
+        print("  Fetching S&P 500 + Russell 2000 (two queries)...")
+        spx_df = fetch_stocks("SPX", None)
+        rut_df = fetch_stocks("RUT", None)
+        combined = pd.concat([spx_df, rut_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["name"], keep="first")
+        combined = combined.sort_values("market_cap_basic", ascending=False).reset_index(drop=True)
+        combined["index_label"] = "S&P 500 + Russell 2000"
+        if limit:
+            combined = combined.head(limit).reset_index(drop=True)
+        print(f"  S&P 500 + Russell 2000: {len(combined)} stocks")
+        return combined
+
     cfg  = INDEX_CONFIG.get(index_code.upper(), INDEX_CONFIG["SPX"])
     name = cfg["name"]
     print(f"  Querying TradingView for {name}...")
@@ -851,6 +900,8 @@ def score_stock(d):
         rev_qoq=d.get("rev_qoq"), eps_qoq=d.get("eps_qoq"),
         # Meta
         market_cap=d["market_cap"], beta=d["beta"],
+        shares=d["shares"], fcf=d.get("fcf"),
+        net_debt_v=d.get("net_debt_v"), ebitda=d.get("ebitda"),
         tier=tier_name, growth_score=growth_score, flags=flags,
         score_quality=round(_q,1), score_growth=round(_gm,1),
         score_tech=round(_t,1), score_val=round(_v,1),
@@ -861,6 +912,474 @@ def score_stock(d):
         accumulation=accumulation,
         below_ema13=d.get("below_ema13"), below_ema50=d.get("below_ema50"), below_ema200=d.get("below_ema200"),
     )
+
+
+# ── CONSENSUS TOP-3 HELPERS ───────────────────────────────────────────────────
+
+_GS_BM = {"pe": 22.0, "pfcf": 22.0, "ev_ebitda": 14.0}
+
+def _build_vm_dict(r, yf_data=None):
+    """
+    Map score_stock result dict → valuation_models-compatible dict.
+    yf_data (dict from _fetch_yf_data_gs) is preferred over TV values for
+    FCF, EBITDA, revenue, total_debt, cash, and gross_margin when present,
+    eliminating data-source divergence vs. valuationMaster.
+    """
+    yf = yf_data or {}
+
+    # ── Revenue: yfinance annual > TV ────────────────────────────────────────
+    rev = yf.get("revenue") or r.get("rev") or 0.0
+
+    # ── FCF: yfinance annual > TV ────────────────────────────────────────────
+    fcf = yf.get("fcf") or r.get("fcf")
+
+    # ── Debt / cash: yfinance splits them; TV only provides net_debt ─────────
+    yf_debt = yf.get("total_debt")
+    yf_cash = yf.get("cash")
+    if yf_debt is not None:
+        total_debt = max(0.0, yf_debt or 0.0)
+        cash       = max(0.0, yf_cash or 0.0)
+    else:
+        # Fall back to TV net_debt (cannot separate)
+        total_debt = max(0.0, r.get("net_debt_v") or 0.0)
+        cash       = 0.0
+    net_debt = max(0.0, total_debt - cash)
+
+    # ── EBITDA: yfinance > TV > derive from revenue + margins ────────────────
+    op_margin = (r.get("op_margin") or 0.0) / 100.0
+    ebitda = (yf.get("ebitda")
+              or r.get("ebitda")
+              or (rev * op_margin + rev * 0.05 if rev and op_margin else None))
+
+    # ── Gross margin: yfinance (fraction→% already converted) > TV ───────────
+    gross_margin = yf.get("gross_margin") or r.get("gross_margin")
+
+    rev_growth = (r.get("rev_growth") or 0.0) / 100.0
+    est_growth = max(0.02, min(0.80, rev_growth))
+    mktcap     = r.get("market_cap") or 0.0
+
+    shares = r["shares"]
+    # Derived per-share / margin fields needed by _rebuild_d_from_snapshot (PIT backtest)
+    fcf_per_share = (fcf / shares) if (fcf and shares and shares > 0) else None
+    fcf_margin    = (fcf / rev)    if (fcf and rev  and rev   > 0) else None
+
+    return {
+        "price":         r["price"],
+        "shares":        shares,
+        "market_cap":    mktcap,
+        "revenue":       rev if rev else None,
+        "fcf":           fcf,
+        "fcf_per_share": fcf_per_share,
+        "fcf_margin":    fcf_margin,
+        "eps":           r.get("eps_ttm"),
+        "fwd_eps":       yf.get("fwd_eps") or r.get("eps_fwd"),
+        "fwd_rev":       yf.get("fwd_rev") or r.get("fwd_rev"),
+        "ebitda":        ebitda,
+        "ebitda_method": ("yfinance/EDGAR" if yf.get("ebitda") else
+                          "TV screener"    if r.get("ebitda") else
+                          "op_margin proxy"),
+        "net_income":    r.get("net_income"),
+        "total_debt":    total_debt,
+        "cash":          cash,
+        "beta":          r.get("beta", 1.0),
+        "op_margin":     r.get("op_margin"),
+        "gross_margin":  gross_margin,
+        "est_growth":    est_growth,
+        "ev_approx":     mktcap + net_debt,
+        "ticker":        r.get("ticker", ""),
+        "wacc_raw":      {"beta_yf": None, "interest_expense": None,
+                          "income_tax_expense": None, "pretax_income": None,
+                          "total_debt_yf": None},
+        "wacc_override": None,
+        "ext":           {},   # empty — skips RIM/ROIC/DDM/NCAV in _run_methods_for_snapshot
+    }
+
+
+def _fetch_yf_data_gs(ticker):
+    """
+    Fetch key fundamentals from yfinance (no price history — not needed for
+    consensus ranking).  Returns dict with keys: fcf, ebitda, revenue,
+    total_debt, cash, gross_margin.  All values are None when unavailable.
+    """
+    out = {"fcf": None, "ebitda": None,
+           "revenue": None, "fwd_rev": None, "total_debt": None, "cash": None,
+           "gross_margin": None, "fwd_eps": None}
+    try:
+        tk = yf.Ticker(ticker)
+
+        # ── Gross margin + forward EPS from info (single HTTP call) ──────────
+        try:
+            info = tk.info or {}
+            gm = info.get("grossMargins")
+            if gm is not None:
+                out["gross_margin"] = round(gm * 100, 2)  # fraction → percent
+            fwd_eps = info.get("forwardEps")
+            if fwd_eps is not None and fwd_eps > 0:
+                out["fwd_eps"] = float(fwd_eps)
+        except Exception:
+            pass
+
+        # ── Analyst NTM revenue estimate ──────────────────────────────────────
+        # Gives EV/NTM Rev the same analyst-consensus forward revenue that
+        # valuationMaster uses — critical for cyclical-recovery stocks (MU etc.)
+        try:
+            rev_est = tk.revenue_estimate
+            if rev_est is not None and not rev_est.empty:
+                for row_label in ["+1y", "0y"]:
+                    if row_label in rev_est.index:
+                        avg = rev_est.loc[row_label, "avg"]
+                        if avg is not None and float(avg) > 0:
+                            out["fwd_rev"] = float(avg)
+                            break
+        except Exception:
+            pass
+
+        # ── FCF from annual cashflow statement ────────────────────────────────
+        try:
+            cf = tk.cashflow
+            if cf is not None and not cf.empty:
+                for name in ["Free Cash Flow", "FreeCashFlow"]:
+                    if name in cf.index:
+                        v = cf.loc[name].dropna()
+                        if len(v):
+                            out["fcf"] = float(v.iloc[0])
+                        break
+                if out["fcf"] is None:
+                    # Derive: Operating CF + CapEx (CapEx stored as negative)
+                    ocf = capex = None
+                    for n in ["Operating Cash Flow",
+                              "Cash Flow From Continuing Operating Activities"]:
+                        if n in cf.index:
+                            v = cf.loc[n].dropna()
+                            ocf = float(v.iloc[0]) if len(v) else None
+                            break
+                    for n in ["Capital Expenditure",
+                              "Purchase Of Property Plant And Equipment"]:
+                        if n in cf.index:
+                            v = cf.loc[n].dropna()
+                            capex = float(v.iloc[0]) if len(v) else None
+                            break
+                    if ocf is not None and capex is not None:
+                        out["fcf"] = ocf + capex   # capex is negative → FCF
+        except Exception:
+            pass
+
+        # ── Revenue + EBITDA from annual income statement ─────────────────────
+        try:
+            inc = tk.income_stmt
+            if inc is not None and not inc.empty:
+                for n in ["Total Revenue", "Revenue", "Net Revenue"]:
+                    if n in inc.index:
+                        v = inc.loc[n].dropna()
+                        out["revenue"] = float(v.iloc[0]) if len(v) else None
+                        break
+                for n in ["EBITDA", "Normalized EBITDA"]:
+                    if n in inc.index:
+                        v = inc.loc[n].dropna()
+                        out["ebitda"] = float(v.iloc[0]) if len(v) else None
+                        break
+        except Exception:
+            pass
+
+        # ── Debt + cash from balance sheet ────────────────────────────────────
+        try:
+            bs = tk.balance_sheet
+            if bs is not None and not bs.empty:
+                for n in ["Total Debt",
+                          "Long Term Debt And Capital Lease Obligation",
+                          "Long Term Debt"]:
+                    if n in bs.index:
+                        v = bs.loc[n].dropna()
+                        out["total_debt"] = float(v.iloc[0]) if len(v) else None
+                        break
+                for n in ["Cash And Cash Equivalents",
+                          "Cash Cash Equivalents And Short Term Investments"]:
+                    if n in bs.index:
+                        v = bs.loc[n].dropna()
+                        out["cash"] = float(v.iloc[0]) if len(v) else None
+                        break
+        except Exception:
+            pass
+
+    except Exception:
+        pass
+
+    return out
+
+
+def _run_gs_valuations(vm):
+    """Run all computable valuation methods. Returns {method: fair_value}."""
+    fvs = {}
+
+    def _s(name, r):
+        v = r.get("fair_value") if isinstance(r, dict) else r
+        if v and v > 0:
+            fvs[name] = v
+
+    # ── DCF (simplified 2-stage, 5yr) ──────────────────────────────────────
+    try:
+        fcf    = vm.get("fcf")
+        rev    = vm.get("revenue")
+        shares = vm.get("shares")
+        nd     = (vm.get("total_debt") or 0) - (vm.get("cash") or 0)
+        g      = vm.get("est_growth") or 0.08
+        beta   = vm.get("beta") or 1.0
+        _RF, _ERP = 0.043, 0.055
+        wacc   = max(0.07, min(0.18, _RF + beta * _ERP))
+        cf     = fcf if (fcf and fcf > 0) else (rev * 0.10 if rev else None)
+        if cf and cf > 0 and shares and shares > 0:
+            pvs = [cf * (1 + g) ** yr / (1 + wacc) ** yr for yr in range(1, 6)]
+            tv  = cf * (1 + g) ** 5 * 1.025 / (wacc - 0.025)
+            ev  = sum(pvs) + tv / (1 + wacc) ** 5 - nd
+            if ev > 0:
+                _s("DCF", round(ev / shares * (1 - MARGIN_OF_SAFETY), 2))
+    except Exception: pass
+
+    # ── P/FCF ───────────────────────────────────────────────────────────────
+    try:
+        fcf    = vm.get("fcf")
+        shares = vm.get("shares")
+        g      = vm.get("est_growth") or 0.05
+        if fcf and fcf > 0 and shares and shares > 0:
+            fcf_ps = fcf / shares
+            mults  = growth_adjusted_multiples(g)
+            _s("P/FCF", round((fcf_ps * mults["target_pfcf"] +
+                               fcf_ps * _GS_BM["pfcf"] +
+                               fcf_ps * mults["conserv_pfcf"]) / 3, 2))
+    except Exception: pass
+
+    # ── EV/EBITDA ────────────────────────────────────────────────────────────
+    try:
+        ebitda = vm.get("ebitda")
+        shares = vm.get("shares")
+        nd     = (vm.get("total_debt") or 0) - (vm.get("cash") or 0)
+        g      = vm.get("est_growth") or 0.05
+        if ebitda and ebitda > 0 and shares and shares > 0:
+            mults = growth_adjusted_multiples(g)
+            def _ip(m): return (ebitda * m - nd) / shares
+            _s("EV/EBITDA", round((_ip(mults["target_eveb"]) +
+                                   _ip(_GS_BM["ev_ebitda"]) +
+                                   _ip(mults["conserv_eveb"])) / 3, 2))
+    except Exception: pass
+
+    # ── NTM P/E ─────────────────────────────────────────────────────────────
+    try:
+        fwd_eps = vm.get("fwd_eps")
+        eps     = vm.get("eps")
+        g       = vm.get("est_growth") or 0.05
+        ep      = fwd_eps if (fwd_eps and fwd_eps > 0) else eps
+        if ep and ep > 0:
+            mults = growth_adjusted_multiples(g)
+            _s("NTM P/E", round((ep * mults["target_pe"] +
+                                 ep * _GS_BM["pe"] +
+                                 ep * mults["conserv_pe"]) / 3, 2))
+    except Exception: pass
+
+    try: _s("Fwd PEG",    run_forward_peg(vm))
+    except Exception: pass
+    try: _s("EV/NTM Rev", run_ev_ntm_revenue(vm))
+    except Exception: pass
+    try:
+        r = run_pie(vm)
+        if r and r.get("fair_value") and r["fair_value"] > 0:
+            fvs["PIE"] = r["fair_value"]
+    except Exception: pass
+    try:
+        r = run_fcf_yield(vm)
+        if r and r.get("fair_value") and r["fair_value"] > 0:
+            fvs["FCF Yield"] = r["fair_value"]
+    except Exception: pass
+    try: _s("Graham",     run_graham_number(vm))
+    except Exception: pass
+
+    return fvs
+
+
+def _consensus_top3_gs(fvs):
+    """
+    Consensus-based method selection: pick the 3 methods whose fair values
+    are closest to the ensemble median.  Methods that agree with the majority
+    are more likely to be accurate than methods that happen to sit near the
+    current price (which is what static MAPE rewards).
+
+    This aligns with valuationMaster's backtest winner pattern: EV/NTM Rev,
+    RIM, Rule of 40 all cluster near the median; outlier methods (Fwd PEG,
+    S-Curve TAM) are excluded unless the ensemble is pulled that way.
+
+    Returns (mean_fv, [method_names]).
+    """
+    if not fvs:
+        return None, []
+    vals = sorted(fvs.values())
+    median_fv = vals[len(vals) // 2]
+    ranked = sorted(fvs.items(), key=lambda x: abs(x[1] - median_fv))[:3]
+    if not ranked:
+        return None, []
+    top3_fvs = [v for _, v in ranked]
+    return sum(top3_fvs) / len(top3_fvs), [m for m, _ in ranked]
+
+
+def _run_pit_backtest_gs(ticker, vm_dict, days=500):
+    """
+    Point-in-time backtest for a single ticker using the exact same engine as
+    valuationMaster:
+      1. Stooq price history (days trading days)
+      2. yfinance quarterly TTM fundamentals
+      3. SEC EDGAR annual XBRL fundamentals
+      4. For each trading day: pick the right snapshot (75-day filing lag),
+         rebuild d-dict, run all 20 valuation methods
+      5. Rank methods by MAPE (same formula as valuationMaster)
+      6. Return top-3 methods + their CURRENT fair values
+
+    Returns (mean_current_fv, [method_names]) or (None, []) on failure.
+    Requires _BT_ENGINE_AVAIL = True (valuationMaster importable).
+    """
+    # ── 1. Price history ─────────────────────────────────────────────────────
+    # Primary: Stooq (same source as valuationMaster backtest)
+    # Fallback: yfinance — used when Stooq hits its daily request cap
+    prices = []
+    try:
+        prices = _bt_fetch_prices(ticker, days)
+    except Exception as e:
+        print(f"  [PIT:{ticker}] Stooq error: {e}")
+
+    if len(prices) < 10 and _YF_AVAIL:
+        try:
+            import math
+            cal_days = math.ceil(days * 1.6) + 60
+            hist = yf.Ticker(ticker).history(period=f"{cal_days}d")
+            if hist is not None and not hist.empty:
+                yf_prices = []
+                for ts, row in hist.iterrows():
+                    try:
+                        cl = float(row["Close"])
+                        dt = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+                        if cl > 0 and dt:
+                            yf_prices.append({"date": dt, "close": cl})
+                    except (ValueError, TypeError):
+                        continue
+                yf_prices.sort(key=lambda x: x["date"])
+                yf_prices = yf_prices[-days:]
+                if len(yf_prices) >= 10:
+                    prices = yf_prices
+                    print(f"  [yfinance] {len(prices)} price pts for '{ticker}' (Stooq rate-limited)")
+        except Exception as e:
+            print(f"  [PIT:{ticker}] yfinance price fallback error: {e}")
+
+    if len(prices) < 10:
+        print(f"  [PIT:{ticker}] insufficient price data ({len(prices)} points) — skipping")
+        return None, []
+
+    # ── 2. Fundamentals ──────────────────────────────────────────────────────
+    try:
+        q_snaps = _bt_fetch_quarterly(ticker)
+    except Exception as e:
+        print(f"  [PIT:{ticker}] yfinance quarterly error: {e}")
+        q_snaps = []
+    try:
+        a_snaps = _bt_fetch_annual(ticker)
+    except Exception as e:
+        print(f"  [PIT:{ticker}] EDGAR annual error: {e}")
+        a_snaps = []
+
+    if not q_snaps and not a_snaps:
+        print(f"  [PIT:{ticker}] no fundamental snapshots available — skipping")
+        return None, []
+
+    # Merge: quarterly preferred on same date (more accurate TTM)
+    snap_dict = {}
+    for s in a_snaps:
+        snap_dict[s["date"]] = s
+    for s in q_snaps:
+        snap_dict[s["date"]] = s
+    snapshots = sorted(snap_dict.values(), key=lambda x: x["date"])
+
+    bm = {"pe": 22.0, "pfcf": 22.0, "ev_ebitda": 14.0}
+
+    # ── 3. Build time series ─────────────────────────────────────────────────
+    fv_cache    = {}
+    time_series = []
+    for day in prices:
+        snap = _bt_pick_snap(snapshots, day["date"])
+        if snap is None:
+            continue
+        sd = snap["date"]
+        if sd not in fv_cache:
+            try:
+                d_h = _bt_rebuild_d(vm_dict, snap, day["close"], bm)
+                fv_cache[sd] = _bt_run_methods(d_h, bm)
+            except Exception as e:
+                print(f"  [PIT:{ticker}] snapshot {sd} error: {e}")
+                fv_cache[sd] = {}
+        time_series.append({"date": day["date"], "price": day["close"],
+                             "fv": fv_cache[sd]})
+
+    if not time_series:
+        print(f"  [PIT:{ticker}] no trading days overlapped with filed snapshots — skipping")
+        return None, []
+
+    print(f"  [PIT:{ticker}] {len(time_series)} days × {len(fv_cache)} snapshots "
+          f"(q={len(q_snaps)}, a={len(a_snaps)})")
+
+    # ── 4. MAPE per method ────────────────────────────────────────────────────
+    all_methods = set(m for row in time_series for m in row["fv"])
+    method_mapes = {}
+    for name in all_methods:
+        errors = [
+            abs(row["fv"][name] - row["price"]) / row["price"] * 100
+            for row in time_series
+            if row["fv"].get(name) and row["fv"][name] > 0
+        ]
+        if len(errors) >= 5:
+            method_mapes[name] = sum(errors) / len(errors)
+
+    if not method_mapes:
+        print(f"  [PIT:{ticker}] no methods produced enough valid days — skipping")
+        return None, []
+
+    # ── 5. Top-3 by lowest MAPE ───────────────────────────────────────────────
+    top3 = sorted(method_mapes.items(), key=lambda x: x[1])[:3]
+    top3_names = [m for m, _ in top3]
+
+    # ── 6. Current fair values for top-3 methods ──────────────────────────────
+    # Rebuild from the most recent snapshot so est_growth uses the FCF-margin
+    # proxy (max 15%) — the same calculation used for every historical day in
+    # the MAPE computation.  Without this, TV rev_growth (e.g. 120% for NVDA)
+    # feeds est_growth = 0.80 into Three-Stage DCF / S-Curve TAM and inflates
+    # the current FV to 3-5× the market price, distorting the column average.
+    # After rebuilding we restore fwd_eps / fwd_rev from vm_dict so that
+    # EV/NTM Rev and Fwd PEG still use today's analyst consensus estimates.
+    try:
+        latest_snap = snapshots[-1] if snapshots else None
+        if latest_snap:
+            d_current = _bt_rebuild_d(vm_dict, latest_snap, vm_dict["price"], bm)
+            # Restore analyst forward estimates that _rebuild_d zeros out
+            d_current["fwd_eps"] = vm_dict.get("fwd_eps")
+            d_current["fwd_rev"] = vm_dict.get("fwd_rev")
+        else:
+            # Fallback: manually cap est_growth with FCF-margin proxy
+            d_current = dict(vm_dict)
+            fcm = vm_dict.get("fcf_margin")
+            if fcm and fcm > 0.40:    d_current["est_growth"] = 0.15
+            elif fcm and fcm > 0.20:  d_current["est_growth"] = 0.12
+            elif fcm and fcm > 0.10:  d_current["est_growth"] = 0.09
+            else:                     d_current["est_growth"] = 0.06
+        current_fvs = _bt_run_methods(d_current, bm)
+    except Exception as e:
+        print(f"  [PIT:{ticker}] current FV computation error: {e}")
+        return None, []
+
+    top3_vals = [current_fvs[m] for m in top3_names
+                 if current_fvs.get(m) and current_fvs[m] > 0]
+    if not top3_vals:
+        print(f"  [PIT:{ticker}] top-3 methods produced no current FV — skipping")
+        return None, []
+
+    g_used = d_current.get("est_growth", "?")
+    indiv  = {m: round(current_fvs[m], 2) for m in top3_names if current_fvs.get(m)}
+    print(f"  [PIT:{ticker}] top-3: {top3_names} g={g_used:.2%} "
+          f"fvs={indiv} → ${sum(top3_vals)/len(top3_vals):,.2f}")
+    return sum(top3_vals) / len(top3_vals), top3_names[:len(top3_vals)]
 
 
 # ── FORMAT HELPERS ────────────────────────────────────────────────────────────
@@ -1320,8 +1839,9 @@ document.querySelectorAll('th').forEach((th, i) => {
     th.classList.toggle('sd', !asc);
     th.closest('thead').querySelectorAll('th').forEach(t => { if(t!==th){t.classList.remove('sa','sd');} });
     [...tb.querySelectorAll('tr:not(.hidden)')].sort((a, b) => {
-      const av = a.cells[i]?.textContent.trim().replace(/[$,%x+BTM↑↓—]/g,'') || '';
-      const bv = b.cells[i]?.textContent.trim().replace(/[$,%x+BTM↑↓—]/g,'') || '';
+      const ac = a.cells[i], bc = b.cells[i];
+      const av = (ac?.dataset.sort !== undefined ? ac.dataset.sort : (ac?.textContent.trim().replace(/[$,%x+BTM↑↓—]/g,'') || ''));
+      const bv = (bc?.dataset.sort !== undefined ? bc.dataset.sort : (bc?.textContent.trim().replace(/[$,%x+BTM↑↓—]/g,'') || ''));
       const an = parseFloat(av), bn = parseFloat(bv);
       return isNaN(an)||isNaN(bn) ? (asc?av.localeCompare(bv):bv.localeCompare(av)) : (asc?an-bn:bn-an);
     }).forEach(r => tb.appendChild(r));
@@ -1595,7 +2115,28 @@ def _analyst_target_cells(r):
     return tgt_cell + upside_cell
 
 
-def build_html(results, ts, total, index_name="S&P 500"):
+def _build_best3_cell(r):
+    """Render the Backtest Top-3 table cell."""
+    mean_fv = r.get("best3_mean")
+    upside  = r.get("best3_upside")
+    sort_val = f"{upside:.4f}" if upside is not None else "9999"
+    if not mean_fv:
+        return f'<td class="mono" data-sort="{sort_val}" style="color:#4a5568;text-align:center;">—</td>'
+    methods = r.get("best3_methods") or []
+    u_color = "#68d391" if (upside and upside >= 0) else "#fc8181"
+    u_str   = fpc(upside) if upside is not None else "—"
+    m_str   = " · ".join(methods)
+    return (
+        f'<td class="mono" data-sort="{sort_val}" style="font-size:11px;line-height:1.5;">'
+        f'<span style="color:#e2e8f0;">{fp(mean_fv)}</span><br>'
+        f'<span style="color:{u_color};font-size:10px;font-weight:600;">{u_str}</span><br>'
+        f'<span style="color:#718096;font-size:9px;">{m_str}</span>'
+        f'</td>'
+    )
+
+
+def build_html(results, ts, total, index_name="S&P 500",
+               best3_label="CONSENSUS TOP-3", best3_tooltip=""):
     tier_map = {t[0]: [] for t in TIERS}
     for r in results:
         if r["tier"] in tier_map:
@@ -1709,6 +2250,7 @@ def build_html(results, ts, total, index_name="S&P 500"):
                 f'<td class="t-bear">{fp(r["target_bear"])}</td>'
                 f'<td class="t-base">{fp(r["target_base"])}</td>'
                 f'<td class="t-bull">{fp(r["target_bull"])}</td>'
+                + _build_best3_cell(r) +
                 f'<td class="{up_cls}">{fpc(up)}</td>'
                 f'<td class="mono {peg_cls}">{fx(peg)}</td>'
                 f'<td class="mono c-yw">{fp(r["peg_eps_used"])}</td>'
@@ -1758,6 +2300,7 @@ def build_html(results, ts, total, index_name="S&P 500"):
             f'<thead><tr>'
             f'<th>Score</th><th>Ticker</th><th>Sector</th><th>Price</th>'
             f'<th>Bear Target</th><th>Base Target</th><th>Bull Target</th>'
+            f'<th title="{best3_tooltip}">{best3_label}</th>'
             f'<th>Upside</th><th>Fwd PEG</th>'
             f'<th>Fwd EPS</th><th>EPS Src</th>'
             f'<th title="Forward-blended growth rate used in PEG calculation">Fwd EPS Growth</th>'
@@ -2165,19 +2708,29 @@ def main():
 
     write_csv_flag = "--csv" in sys.argv
 
-    # --index SPX|NDX|RUT|TSX  (default: SPX)
+    # --index SPX|NDX|RUT|TSX|SPXRUT  (default: SPX)
     if "--index" in sys.argv:
         try: index_code = sys.argv[sys.argv.index("--index")+1].upper()
         except: index_code = "SPX"
     else:
         index_code = "SPX"
 
-    # --top N  overrides default limit for the chosen index
+    # --top N  overrides default limit for the chosen index (default: all)
     if "--top" in sys.argv:
         try: limit = int(sys.argv[sys.argv.index("--top")+1])
         except: limit = None
     else:
         limit = None
+
+    # --backtest  use point-in-time MAPE engine (same as valuationMaster)
+    # Without this flag the fast consensus ranking is used instead (~30s vs minutes)
+    use_pit_backtest = "--backtest" in sys.argv
+
+    # --backtest-days N  number of trading-day price bars to use (default: 500 ≈ 2 years)
+    backtest_days = 500
+    if "--backtest-days" in sys.argv:
+        try: backtest_days = int(sys.argv[sys.argv.index("--backtest-days") + 1])
+        except: backtest_days = 500
 
     index_name = INDEX_CONFIG.get(index_code, INDEX_CONFIG["SPX"])["name"]
     print("\n" + "="*60)
@@ -2223,10 +2776,102 @@ def main():
               f"PEG={fx(r['peg_current']):>6}  "
               f"Src={eps_src}{flags}")
 
+    # ── Top-3 column: PIT backtest or fast consensus ─────────────────────────
+    # Step 1 (both modes): fetch yfinance fundamentals to improve method accuracy
+    if _YF_AVAIL:
+        print("\n[2b/3] Fetching yfinance fundamentals for valuation inputs...")
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = {pool.submit(_fetch_yf_data_gs, r["ticker"]): r["ticker"]
+                       for r in results}
+            bars_map = {}
+            for fut in as_completed(futures):
+                tk = futures[fut]
+                try:    bars_map[tk] = fut.result()
+                except: bars_map[tk] = {"fcf": None, "ebitda": None, "fwd_rev": None,
+                                         "revenue": None, "total_debt": None,
+                                         "cash": None, "gross_margin": None,
+                                         "fwd_eps": None}
+        n_fetched = sum(1 for v in bars_map.values()
+                        if any(v.get(k) is not None
+                               for k in ("fcf", "revenue", "gross_margin")))
+        print(f"  Fundamentals: {n_fetched}/{len(results)} stocks fetched")
+    else:
+        bars_map = {}
+
+    if use_pit_backtest and _BT_ENGINE_AVAIL:
+        # ── Point-in-time MAPE backtest (same engine as valuationMaster) ─────
+        n = len(results)
+        est_min = round(n * 14 / 5 / 60, 1)   # ~14s/stock, 5 workers
+        print(f"\n[2c/3] Running point-in-time backtest on {n} stocks "
+              f"({backtest_days} days, est. ~{est_min} min with 5 workers)...")
+        print("  Uses Stooq prices + SEC EDGAR + yfinance quarterly TTM")
+        # 5 workers: EDGAR rate-limits at 10 req/s; 5 parallel is safe
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            def _pit_task(r):
+                yf_data = bars_map.get(r["ticker"], {})
+                vm = _build_vm_dict(r, yf_data)
+                return r["ticker"], _run_pit_backtest_gs(r["ticker"], vm, days=backtest_days)
+            pit_futures = {pool.submit(_pit_task, r): r["ticker"] for r in results}
+            pit_map = {}
+            done = 0
+            for fut in as_completed(pit_futures):
+                tk = pit_futures[fut]
+                done += 1
+                try:
+                    _, res = fut.result()
+                    pit_map[tk] = res
+                except Exception:
+                    pit_map[tk] = (None, [])
+                if done % 5 == 0 or done == len(results):
+                    print(f"  [{done}/{len(results)}] done...", end="\r")
+        print()  # newline after progress
+        for r in results:
+            mean_fv, methods = pit_map.get(r["ticker"], (None, []))
+            r["best3_mean"]    = mean_fv
+            r["best3_methods"] = methods
+            r["best3_upside"]  = ((mean_fv - r["price"]) / r["price"] * 100
+                                  if mean_fv and r["price"] else None)
+        best3_label = "BACKTEST TOP-3"
+        best3_tooltip = ("Top-3 valuation methods by point-in-time MAPE backtest — "
+                         "same engine as valuationMaster (Stooq prices, SEC EDGAR + "
+                         "yfinance quarterly fundamentals). Methods and fair values "
+                         "match what valuationMaster would show for these stocks.")
+
+    elif _YF_AVAIL:
+        # ── Fast consensus ranking (default, ~30s) ────────────────────────────
+        print("\n  Using consensus ranking (run with --backtest for full PIT engine)")
+        for r in results:
+            yf_data = bars_map.get(r["ticker"], {})
+            vm  = _build_vm_dict(r, yf_data)
+            fvs = _run_gs_valuations(vm)
+            if fvs:
+                mean_fv, methods = _consensus_top3_gs(fvs)
+                r["best3_mean"]    = mean_fv
+                r["best3_methods"] = methods
+                r["best3_upside"]  = ((mean_fv - r["price"]) / r["price"] * 100
+                                      if mean_fv and r["price"] else None)
+            else:
+                r["best3_mean"]    = None
+                r["best3_methods"] = []
+                r["best3_upside"]  = None
+        best3_label   = "CONSENSUS TOP-3"
+        best3_tooltip = ("Mean of the 3 valuation methods closest to the ensemble "
+                         "median. Run with --backtest for full point-in-time MAPE "
+                         "ranking (same engine as valuationMaster).")
+
+    else:
+        for r in results:
+            r["best3_mean"]    = None
+            r["best3_methods"] = []
+            r["best3_upside"]  = None
+        best3_label   = "CONSENSUS TOP-3"
+        best3_tooltip = "yfinance not available — column disabled."
+
     # ── Sentiment fetch ───────────────────────────────────────────────────────
     print("\n[3/3] Building report...")
     ts = datetime.datetime.now().strftime("%b %d, %Y  %H:%M")
-    html = build_html(results, ts, len(results), index_name)
+    html = build_html(results, ts, len(results), index_name,
+                      best3_label=best3_label, best3_tooltip=best3_tooltip)
 
     index_slug = index_code.lower()  # e.g. "spx", "ndx", "tsx"
     date_str   = datetime.datetime.now().strftime("%Y_%m_%d")

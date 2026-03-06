@@ -23,7 +23,7 @@ ARGUMENTS
                     for large-caps — which tends to be conservative vs analyst
                     consensus of 8–10%. Use this to align with external models.
 
-    --backtest DAYS Number of trading days for the historical backtest (default: 1000 ≈ 4 years).
+    --backtest DAYS Number of trading days for the historical backtest (default: 500 ≈ 2 years).
                     Ranks each valuation method by how closely its fair value tracked
                     the actual stock price over that window. Adds a 'Backtesting' tab
                     with a ranked table, chart, and verdict.
@@ -3068,18 +3068,161 @@ def fetch_historical_fundamentals(ticker: str, _unused=None) -> list:
     return snapshots
 
 
+def fetch_historical_fundamentals_ttm(ticker: str) -> list:
+    """
+    Fetch quarterly fundamentals from yfinance and compute TTM (trailing twelve
+    months) for each quarter-end date.  Returns list of snapshots sorted
+    oldest-first, each with the same keys as fetch_historical_fundamentals()
+    plus a 'filing_lag' key (45 days — 10-Q deadline for large accelerated filers).
+
+    Falls back to [] on any error; caller will use annual EDGAR data instead.
+    """
+    if not _YF_AVAILABLE:
+        return []
+    try:
+        ticker_clean = ticker.split(":")[-1] if ":" in ticker else ticker
+        tk = yf.Ticker(ticker_clean)
+
+        q_inc = tk.quarterly_income_stmt   # rows=metrics, cols=Timestamps newest-first
+        q_cf  = tk.quarterly_cash_flow
+        q_bs  = tk.quarterly_balance_sheet
+
+        if q_inc is None or q_inc.empty:
+            return []
+
+        # ── field name candidates (yfinance names vary by version) ──────────
+        REV_NAMES   = ["Total Revenue", "Revenue", "Net Revenue"]
+        NI_NAMES    = ["Net Income", "Net Income Common Stockholders"]
+        GP_NAMES    = ["Gross Profit"]
+        EBIT_NAMES  = ["Operating Income", "EBIT", "Operating Income Loss"]
+        FCF_NAMES   = ["Free Cash Flow"]
+        CFO_NAMES   = ["Operating Cash Flow", "Cash Flow From Operations",
+                       "Cash Flow From Continuing Operating Activities"]
+        CAPEX_NAMES = ["Capital Expenditure", "Purchase Of Plant And Equipment",
+                       "Capital Expenditures"]
+        DEBT_NAMES  = ["Total Debt", "Long Term Debt And Capital Lease Obligation",
+                       "Long Term Debt", "TotalDebt"]
+
+        def _get_series(df, candidates):
+            if df is None or df.empty:
+                return None
+            for name in candidates:
+                if name in df.index:
+                    return df.loc[name]
+            return None
+
+        rev_s   = _get_series(q_inc, REV_NAMES)
+        ni_s    = _get_series(q_inc, NI_NAMES)
+        gp_s    = _get_series(q_inc, GP_NAMES)
+        ebit_s  = _get_series(q_inc, EBIT_NAMES)
+        fcf_s   = _get_series(q_cf,  FCF_NAMES)
+        cfo_s   = _get_series(q_cf,  CFO_NAMES)
+        capex_s = _get_series(q_cf,  CAPEX_NAMES)
+        debt_s  = _get_series(q_bs,  DEBT_NAMES)
+
+        if rev_s is None:
+            return []
+
+        # Build FCF series: prefer pre-computed; fall back to CFO + capex
+        # capex in yfinance is a negative number (cash outflow), so FCF = CFO + capex
+        if fcf_s is None and cfo_s is not None and capex_s is not None:
+            try:
+                _al = cfo_s.align(capex_s, join="inner")
+                fcf_s = _al[0] + _al[1]
+            except Exception:
+                fcf_s = None
+
+        # Quarter-end dates sorted oldest-first
+        dates = sorted(rev_s.index)
+        if len(dates) < 4:
+            return []
+
+        def _val(series, ts):
+            """Safely get float from a Series at timestamp ts; None on NaN/missing."""
+            if series is None:
+                return None
+            try:
+                v = series.get(ts)
+                if v is None:
+                    return None
+                f = float(v)
+                return None if f != f else f   # NaN → None
+            except Exception:
+                return None
+
+        def _ttm4(series, window_dates):
+            """Sum 4 values; return None unless all 4 are present."""
+            if series is None:
+                return None
+            vals = [_val(series, d) for d in window_dates]
+            good = [v for v in vals if v is not None]
+            return sum(good) if len(good) == 4 else None
+
+        snapshots = []
+        for i in range(3, len(dates)):
+            window   = dates[i - 3: i + 1]   # 4 consecutive quarter-ends
+            dt_end   = dates[i]
+            date_str = (dt_end.strftime("%Y-%m-%d")
+                        if hasattr(dt_end, "strftime") else str(dt_end)[:10])
+
+            ttm_rev  = _ttm4(rev_s,  window)
+            ttm_ni   = _ttm4(ni_s,   window)
+            ttm_gp   = _ttm4(gp_s,   window)
+            ttm_ebit = _ttm4(ebit_s, window)
+            ttm_fcf  = _ttm4(fcf_s,  window)
+
+            # If no pre-computed FCF, approximate from CFO
+            if ttm_fcf is None:
+                ttm_cfo = _ttm4(cfo_s, window) if cfo_s is not None else None
+                if ttm_cfo is not None:
+                    ttm_fcf = ttm_cfo * 0.85
+
+            # Debt is point-in-time (most recent quarter in window)
+            debt = _val(debt_s, dt_end)
+
+            gross_margin = (ttm_gp   / ttm_rev * 100) if (ttm_gp   and ttm_rev and ttm_rev > 0) else None
+            op_margin    = (ttm_ebit / ttm_rev * 100) if (ttm_ebit and ttm_rev and ttm_rev > 0) else None
+
+            if ttm_rev is None and ttm_fcf is None:
+                continue   # skip if no useful data for this window
+
+            snapshots.append({
+                "date":         date_str,
+                "revenue":      ttm_rev,
+                "net_income":   ttm_ni,
+                "fcf":          ttm_fcf,
+                "total_debt":   debt,
+                "gross_margin": gross_margin,
+                "op_margin":    op_margin,
+                "filing_lag":   45,
+            })
+
+        snapshots.sort(key=lambda x: x["date"])
+        if not snapshots:
+            return []
+
+        print("  [yfinance] {} quarterly TTM snapshots ({} → {})".format(
+            len(snapshots), snapshots[0]["date"], snapshots[-1]["date"]))
+        return snapshots
+
+    except Exception as exc:
+        print("  [yfinance] Quarterly TTM fetch failed: {}".format(exc))
+        return []
+
+
 def _pick_snapshot_for_date(snapshots: list, target_date_str: str) -> dict:
     """
     Return the most recent snapshot whose filing date is <= target_date_str.
-    Assumes annual 10-K filings are available approximately 75 days after fiscal year end.
+    Uses each snapshot's 'filing_lag' key (default 75 days for annual 10-K,
+    45 days for quarterly 10-Q TTM snapshots).
     """
     target = target_date_str
     best = None
     for snap in snapshots:
-        # A 10-K annual report is typically filed 60-90 days after fiscal year end
         period_end = snap["date"]
+        lag = snap.get("filing_lag", 75)
         try:
-            avail_dt   = datetime.datetime.strptime(period_end, "%Y-%m-%d") + datetime.timedelta(days=75)
+            avail_dt   = datetime.datetime.strptime(period_end, "%Y-%m-%d") + datetime.timedelta(days=lag)
             avail_str  = avail_dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
@@ -3323,17 +3466,33 @@ def run_backtest(d: dict, results: list, gr: dict, days: int, erg_peer_data: dic
     end_date         = all_prices[-1]["date"]
     price_change_pct = (end_price - start_price) / start_price * 100
 
-    print("[Backtest] Fetching annual fundamental history from SEC EDGAR...")
-    snapshots = fetch_historical_fundamentals(ticker)
+    # Fetch both sources: quarterly TTM gives dense recent coverage (last 1-2 years),
+    # annual EDGAR fills in older history beyond yfinance's ~5-quarter window.
+    print("[Backtest] Fetching quarterly TTM fundamentals (yfinance)...")
+    quarterly_snaps = fetch_historical_fundamentals_ttm(ticker)
+    print("[Backtest] Fetching annual EDGAR fundamentals for older history...")
+    annual_snaps = fetch_historical_fundamentals(ticker)
 
-    if not snapshots:
+    if not quarterly_snaps and not annual_snaps:
         return {"error": (
-            "Could not retrieve historical fundamental data for '{}' from SEC EDGAR. "
+            "Could not retrieve historical fundamental data for '{}'. "
             "Only SEC-filing companies (US-listed stocks) are supported."
         ).format(ticker)}
 
-    print("  Found {} annual snapshots ({} → {}).".format(
-        len(snapshots), snapshots[0]["date"], snapshots[-1]["date"]))
+    # Merge: build a dict keyed by date so quarterly overwrites annual on overlap
+    # (quarterly TTM is more accurate for recent periods)
+    snap_dict = {}
+    for snap in annual_snaps:
+        snap_dict[snap["date"]] = snap
+    for snap in quarterly_snaps:
+        snap_dict[snap["date"]] = snap   # quarterly preferred on same date
+    snapshots = sorted(snap_dict.values(), key=lambda x: x["date"])
+
+    q_count = len(quarterly_snaps)
+    a_count = len(annual_snaps)
+    print("  Merged {} snapshots ({} quarterly TTM + {} annual EDGAR, {} → {}).".format(
+        len(snapshots), q_count, a_count,
+        snapshots[0]["date"], snapshots[-1]["date"]))
 
     benchmarks_hist = {"pe": 22.0, "pfcf": 22.0, "ev_ebitda": 14.0}
 
@@ -6052,9 +6211,9 @@ def main():
         )
     )
     parser.add_argument(
-        "--backtest", type=int, default=1000, metavar="DAYS",
+        "--backtest", type=int, default=500, metavar="DAYS",
         help=(
-            "Number of trading days to include in the historical backtest (default: 1000).\n"
+            "Number of trading days to include in the historical backtest (default: 500).\n"
             "Set to 0 to skip the backtest entirely.\n"
             "Example: python valuationMaster.py AAPL --backtest 252  (≈ 1 year)\n"
             "Example: python valuationMaster.py AAPL --backtest 0    (skip backtest)"

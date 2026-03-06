@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Watchlist Report &mdash; 2026-03-04</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0f1117; --surface: #16192b; --surface2: #1c2038;
+  --border:  #252a45; --text:    #e8eaf6; --muted:    #7b8299;
+  --accent:  #4f8ef7; --up:      #4aac6e; --down:     #e05252; --warn:    #f5a623;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: Syne, sans-serif; min-height: 100vh; }
+.header { background: linear-gradient(135deg, #0d1526, #1a1f3a); padding: 40px 48px; border-bottom: 1px solid var(--border); }
+.header h1 { font-family: "DM Serif Display", serif; font-size: 28px; }
+.header .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.container { max-width: 1440px; margin: 0 auto; padding: 32px 48px; }
+.section-label { font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+                  color: var(--muted); margin: 32px 0 14px;
+                  padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 8px; }
+.stat-card { background: var(--surface); border-radius: 10px; padding: 20px 24px; }
+.stat-card .lbl { font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.stat-card .val { font-size: 28px; font-family: "DM Mono", monospace; font-weight: 700; }
+.tbl-wrap { overflow-x: auto; background: var(--surface); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; }
+th { padding: 10px 16px; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+      color: var(--muted); border-bottom: 2px solid var(--border); text-align: left; white-space: nowrap; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.footer { text-align: center; padding: 32px; font-size: 11px; color: var(--muted);
+           border-top: 1px solid var(--border); margin-top: 40px; }
+code { background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-family: "DM Mono", monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Watchlist &amp; Valuation History</h1>
+  <div class="meta">Generated March 04, 2026  10:33 &nbsp;&middot;&nbsp; DB: ~/.valuation_suite/data.db</div>
+</div>
+
+<div class="container">
+
+  <div class="stat-grid">
+    <div class="stat-card">
+      <div class="lbl">Watched Tickers</div>
+      <div class="val" style="color:var(--accent);">6</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">BUY Signal Today</div>
+      <div class="val" style="color:var(--up);">5</div>
+    </div>
+    <div class="stat-card">
+      <div class="lbl">Report Date</div>
+      <div class="val" style="font-size:18px;color:var(--text);">2026-03-04</div>
+    </div>
+  </div>
+
+  <div class="section-label">Watchlist &mdash; All Tracked Holdings</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Company</th>
+          <th>Live Price</th>
+          <th>Fair Value</th>
+          <th>Upside</th>
+          <th>Target Price</th>
+          <th>20% MoS</th>
+          <th>Signal</th>
+          <th>FV Trend</th>
+          <th>Snapshot Age</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody><tr style='border-left:3px solid var(--up);'><td style='padding:11px 16px;font-weight:700;'>AAPL</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>Apple Inc.</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$264.24</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$134.99</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--down);'>-49.0%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$107.99</td><td style='padding:11px 16px;'><span style='background:var(--up);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>BUY</span></td><td style='padding:11px 16px;'><span style='color:#666;font-size:10px;font-family:monospace;'>no history</span></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr><tr style='border-left:3px solid var(--up);'><td style='padding:11px 16px;font-weight:700;'>AVGO</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>Broadcom Inc.</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$322.21</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$340.52</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--up);'>+6.8%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$272.42</td><td style='padding:11px 16px;'><span style='background:var(--up);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>BUY</span></td><td style='padding:11px 16px;'><svg width='80' height='22' style='display:inline-block;vertical-align:middle;'><polyline points='0,20 80,20' fill='none' stroke='#4aac6e' stroke-width='1.5'/></svg></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr><tr style='border-left:3px solid var(--up);'><td style='padding:11px 16px;font-weight:700;'>AXON</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>Axon Enterprise, Inc.</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$577.80</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$494.26</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--down);'>-13.6%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$395.41</td><td style='padding:11px 16px;'><span style='background:var(--up);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>BUY</span></td><td style='padding:11px 16px;'><span style='color:#666;font-size:10px;font-family:monospace;'>no history</span></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr><tr style='border-left:3px solid var(--up);'><td style='padding:11px 16px;font-weight:700;'>GOOG</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>Alphabet Inc.</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$304.95</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$161.97</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--down);'>-47.1%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$129.57</td><td style='padding:11px 16px;'><span style='background:var(--up);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>BUY</span></td><td style='padding:11px 16px;'><span style='color:#666;font-size:10px;font-family:monospace;'>no history</span></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr><tr style='border-left:3px solid var(--warn);'><td style='padding:11px 16px;font-weight:700;'>NTLA</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>Intellia Therapeutics, Inc.</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$13.97</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$4.46</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--down);'>-71.1%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$3.57</td><td style='padding:11px 16px;'><span style='background:var(--warn);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>HOLD /</span></td><td style='padding:11px 16px;'><span style='color:#666;font-size:10px;font-family:monospace;'>no history</span></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr><tr style='border-left:3px solid var(--up);'><td style='padding:11px 16px;font-weight:700;'>NVDA</td><td style='padding:11px 16px;font-size:12px;color:var(--muted);'>NVIDIA Corporation</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$183.19</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$259.22</td><td style='padding:11px 16px;font-family:DM Mono,monospace;color:var(--up);'>+42.1%</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>—</td><td style='padding:11px 16px;font-family:DM Mono,monospace;'>$207.38</td><td style='padding:11px 16px;'><span style='background:var(--up);color:#0f1117;padding:3px 10px;border-radius:4px;font-size:11px;font-weight:700;letter-spacing:1px;'>BUY</span></td><td style='padding:11px 16px;'><svg width='80' height='22' style='display:inline-block;vertical-align:middle;'><polyline points='0,20 40,20 80,20' fill='none' stroke='#4aac6e' stroke-width='1.5'/></svg></td><td style='padding:11px 16px;font-size:11px;color:var(--up);'>2 days ago</td><td style='padding:11px 16px;font-size:11px;color:var(--muted);'></td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="section-label">Valuation History &mdash; All Analysed Tickers</div>
+  <div style='overflow-x:auto;'><div style='background:var(--surface);border-radius:10px;padding:20px 24px;margin-bottom:12px;display:inline-block;min-width:260px;vertical-align:top;margin-right:12px;'><div style='display:flex;align-items:center;gap:12px;margin-bottom:10px;'><span style='font-size:16px;font-weight:700;'>NVDA</span><svg width='80' height='22' style='display:inline-block;vertical-align:middle;'><polyline points='0,20 40,20 80,20' fill='none' stroke='#4aac6e' stroke-width='1.5'/></svg><span style='font-size:11px;color:var(--muted);'>3 snapshots &nbsp; latest: $259.22</span></div><table style='border-collapse:collapse;'><thead><tr><th style='padding:3px 10px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Date</th><th style='padding:3px 10px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Fair Value</th></tr></thead><tbody><tr><td style='padding:3px 10px;font-size:11px;color:#888;'>2026-03-02</td><td style='padding:3px 10px;font-family:DM Mono,monospace;font-size:12px;'>$259.22</td></tr><tr><td style='padding:3px 10px;font-size:11px;color:#888;'>2026-03-02</td><td style='padding:3px 10px;font-family:DM Mono,monospace;font-size:12px;'>$259.22</td></tr><tr><td style='padding:3px 10px;font-size:11px;color:#888;'>2026-03-02</td><td style='padding:3px 10px;font-family:DM Mono,monospace;font-size:12px;'>$259.22</td></tr></tbody></table></div><div style='background:var(--surface);border-radius:10px;padding:20px 24px;margin-bottom:12px;display:inline-block;min-width:260px;vertical-align:top;margin-right:12px;'><div style='display:flex;align-items:center;gap:12px;margin-bottom:10px;'><span style='font-size:16px;font-weight:700;'>AVGO</span><svg width='80' height='22' style='display:inline-block;vertical-align:middle;'><polyline points='0,20 80,20' fill='none' stroke='#4aac6e' stroke-width='1.5'/></svg><span style='font-size:11px;color:var(--muted);'>2 snapshots &nbsp; latest: $340.52</span></div><table style='border-collapse:collapse;'><thead><tr><th style='padding:3px 10px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Date</th><th style='padding:3px 10px;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Fair Value</th></tr></thead><tbody><tr><td style='padding:3px 10px;font-size:11px;color:#888;'>2026-03-02</td><td style='padding:3px 10px;font-family:DM Mono,monospace;font-size:12px;'>$340.52</td></tr><tr><td style='padding:3px 10px;font-size:11px;color:#888;'>2026-03-02</td><td style='padding:3px 10px;font-family:DM Mono,monospace;font-size:12px;'>$340.52</td></tr></tbody></table></div></div>
+
+</div>
+
+<div class="footer">
+  Watchlist Tracker &middot; ValuationSuite &middot; March 04, 2026  10:33<br>
+  Live prices: yfinance &middot; History: SQLite at ~/.valuation_suite/data.db<br>
+  <span style="opacity:0.5;">Informational only. Not financial advice.</span>
+</div>
+
+</body>
+</html>

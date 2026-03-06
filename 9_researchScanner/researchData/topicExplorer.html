@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Research Topic Explorer</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:     #0e1117; --panel:  #161b22; --card:   #1c2128;
+    --border: #30363d; --accent: #4f8ef7; --green:  #00c896;
+    --muted:  #8b949e; --text:   #e6edf3; --red:    #f85149;
+    --orange: #f0a500; --radius: 8px;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+
+  /* ── Layout ── */
+  .shell { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 0 22px; height: 52px; display: flex; align-items: center; gap: 14px;
+    flex-shrink: 0; }
+  .topbar h1 { font-size: 16px; font-weight: 700; flex: 1; }
+  .body { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 260px; background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
+  }
+  .sidebar-top {
+    padding: 14px 16px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .sidebar-top h2 { font-size: 11px; font-weight: 700; color: var(--muted);
+    letter-spacing: .08em; text-transform: uppercase; margin-bottom: 10px; }
+  .controls { display: flex; flex-direction: column; gap: 8px; }
+  .ctrl-row { display: flex; align-items: center; gap: 8px; }
+  .ctrl-row label { font-size: 12px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+  .ctrl-row input[type=number], .ctrl-row select {
+    flex: 1; background: var(--card); border: 1px solid var(--border); color: var(--text);
+    font-size: 12px; padding: 5px 8px; border-radius: 5px; outline: none;
+  }
+  .sources-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .src-toggle {
+    font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 4px;
+    border: 1px solid var(--border); cursor: pointer; transition: all .15s;
+    background: var(--card); color: var(--muted);
+  }
+  .src-toggle.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .sidebar-topics { flex: 1; overflow-y: auto; padding: 10px 12px; }
+  .cat-group { margin-bottom: 16px; }
+  .cat-header {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: .07em;
+    text-transform: uppercase; margin-bottom: 6px; padding: 0 2px;
+  }
+  .select-all-btn {
+    font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 3px;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+    cursor: pointer;
+  }
+  .select-all-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .topic-item {
+    display: flex; align-items: center; gap: 7px; padding: 6px 8px;
+    border-radius: 5px; cursor: pointer; transition: background .12s;
+    font-size: 13px; color: var(--muted);
+  }
+  .topic-item:hover { background: var(--card); color: var(--text); }
+  .topic-item input { flex-shrink: 0; accent-color: var(--accent); cursor: pointer; }
+  .topic-item input:checked + .topic-icon + .topic-label { color: var(--text); }
+  .topic-icon { font-size: 14px; }
+
+  .sidebar-footer {
+    padding: 12px 16px; border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .btn-scan {
+    width: 100%; padding: 10px; background: var(--accent); color: #fff;
+    border: none; border-radius: 6px; font-size: 14px; font-weight: 700;
+    cursor: pointer; transition: opacity .15s;
+  }
+  .btn-scan:hover { opacity: .88; }
+  .btn-scan:disabled { opacity: .4; cursor: not-allowed; }
+  .selection-count {
+    font-size: 11px; color: var(--muted); text-align: center; margin-bottom: 8px;
+  }
+
+  /* ── Results ── */
+  .results { flex: 1; overflow-y: auto; padding: 20px 24px; }
+  .placeholder {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; color: var(--muted); gap: 12px; text-align: center;
+  }
+  .placeholder .big { font-size: 52px; }
+  .placeholder h2 { font-size: 18px; font-weight: 600; color: var(--text); }
+  .placeholder p { font-size: 13px; max-width: 400px; line-height: 1.6; }
+
+  /* Results layout */
+  .results-header {
+    display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px;
+    flex-shrink: 0;
+  }
+  .results-header h2 { font-size: 16px; font-weight: 700; }
+  .results-meta { font-size: 12px; color: var(--muted); }
+  .results-meta b { color: var(--text); }
+
+  .section-header {
+    font-size: 12px; font-weight: 700; color: var(--muted);
+    letter-spacing: .07em; text-transform: uppercase;
+    margin: 24px 0 10px; display: flex; align-items: center; gap: 8px;
+  }
+  .section-count {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 1px 8px; font-size: 11px; color: var(--muted);
+    font-weight: 600; text-transform: none; letter-spacing: 0;
+  }
+
+  /* Paper cards */
+  .cards-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 12px;
+  }
+  .paper-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 7px;
+  }
+  .paper-card:hover { border-color: #3d444d; }
+  .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: #ffffff12; border: 1px solid #ffffff1e;
+    border-radius: 4px; padding: 2px 8px; font-size: 11px;
+    white-space: nowrap; flex-shrink: 0;
+  }
+  .card-date { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .card-title {
+    font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.4;
+    text-decoration: none;
+  }
+  .card-title:hover { color: var(--accent); }
+  .card-summary { font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .card-author { font-size: 11px; color: #6b7194; }
+
+  /* Table rows */
+  .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .data-table th {
+    text-align: left; padding: 9px 12px; background: var(--panel);
+    color: var(--muted); font-size: 11px; font-weight: 700;
+    letter-spacing: .05em; text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  .data-table td {
+    padding: 9px 12px; border-bottom: 1px solid #1e2530; vertical-align: middle;
+  }
+  .data-table tr:nth-child(even) { background: #12171d; }
+  .data-table tr:hover { background: var(--card); }
+
+  /* Spinner */
+  .spinner {
+    width: 36px; height: 36px; border: 3px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Server error */
+  .server-warning {
+    background: #f0a50011; border: 1px solid #f0a50033;
+    border-radius: 8px; padding: 16px; margin-bottom: 20px;
+    font-size: 13px; color: var(--orange);
+  }
+
+  /* ext link */
+  a.ext { color: var(--accent); text-decoration: none; font-size: 12px; }
+  a.ext:hover { text-decoration: underline; }
+
+  /* Status dot */
+  .dot-green { color: #00c896; }
+  .dot-orange { color: #f0a500; }
+
+  /* Industry badge */
+  .ind-badge {
+    background: #4f8ef722; color: #4f8ef7; border: 1px solid #4f8ef744;
+    border-radius: 3px; padding: 1px 5px; font-size: 10px;
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Topbar -->
+  <div class="topbar">
+    <h1>🔭&nbsp; Research Topic Explorer</h1>
+    <span style="font-size:12px;color:var(--muted)">Generated March 04, 2026 14:31</span>
+  </div>
+
+  <div class="body">
+
+    <!-- Sidebar: topic selector -->
+    <div class="sidebar">
+      <div class="sidebar-top">
+        <h2>Settings</h2>
+        <div class="controls">
+          <div class="ctrl-row">
+            <label>Days back</label>
+            <input type="number" id="days-input" value="30" min="7" max="180" step="7">
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:6px">Sources</div>
+            <div class="sources-row">
+              <button class="src-toggle active" data-src="arxiv"  onclick="toggleSource(this)">arXiv</button>
+              <button class="src-toggle active" data-src="nih"    onclick="toggleSource(this)">NIH Grants</button>
+              <button class="src-toggle active" data-src="trials" onclick="toggleSource(this)">Trials</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-topics">
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    font-size:11px;font-weight:700;color:var(--muted);
+                    letter-spacing:.07em;text-transform:uppercase;margin-bottom:12px">
+          <span>Topics</span>
+          <div style="display:flex;gap:6px">
+            <button class="select-all-btn" onclick="selectAll(true)">All</button>
+            <button class="select-all-btn" onclick="selectAll(false)">None</button>
+          </div>
+        </div>
+        
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>🧠 Artificial Intelligence</span>
+            <button class="select-all-btn" onclick="toggleCategory('Artificial Intelligence')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="llm" data-cat="Artificial Intelligence">
+            <span class="topic-icon">🧠</span>
+            <span class="topic-label">Large Language Models</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="computer_vision" data-cat="Artificial Intelligence">
+            <span class="topic-icon">👁</span>
+            <span class="topic-label">Computer Vision</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="robotics" data-cat="Artificial Intelligence">
+            <span class="topic-icon">🤖</span>
+            <span class="topic-label">Robotics & Automation</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="ai_chips" data-cat="Artificial Intelligence">
+            <span class="topic-icon">⚡</span>
+            <span class="topic-label">AI Chips & Hardware</span>
+          </label>
+        </div>
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>🧬 Biotechnology</span>
+            <button class="select-all-btn" onclick="toggleCategory('Biotechnology')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="gene_editing" data-cat="Biotechnology">
+            <span class="topic-icon">✂️</span>
+            <span class="topic-label">Gene Editing (CRISPR)</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="mrna" data-cat="Biotechnology">
+            <span class="topic-icon">💉</span>
+            <span class="topic-label">mRNA Therapies</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="car_t" data-cat="Biotechnology">
+            <span class="topic-icon">🔬</span>
+            <span class="topic-label">CAR-T & Cell Therapies</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="synthetic_bio" data-cat="Biotechnology">
+            <span class="topic-icon">🧫</span>
+            <span class="topic-label">Synthetic Biology</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="protein_engineering" data-cat="Biotechnology">
+            <span class="topic-icon">🧬</span>
+            <span class="topic-label">Protein Engineering & AI</span>
+          </label>
+        </div>
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>🏥 Health Technology</span>
+            <button class="select-all-btn" onclick="toggleCategory('Health Technology')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="digital_health" data-cat="Health Technology">
+            <span class="topic-icon">⌚</span>
+            <span class="topic-label">Digital Health & Wearables</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="medical_devices" data-cat="Health Technology">
+            <span class="topic-icon">🏥</span>
+            <span class="topic-label">Medical Devices & Implants</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="ai_diagnostics" data-cat="Health Technology">
+            <span class="topic-icon">🩺</span>
+            <span class="topic-label">AI Diagnostics & Imaging</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="immuno_oncology" data-cat="Health Technology">
+            <span class="topic-icon">🎯</span>
+            <span class="topic-label">Immuno-Oncology</span>
+          </label>
+        </div>
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>💾 Semiconductors & Computing</span>
+            <button class="select-all-btn" onclick="toggleCategory('Semiconductors & Computing')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="semiconductors" data-cat="Semiconductors & Computing">
+            <span class="topic-icon">💾</span>
+            <span class="topic-label">Advanced Semiconductors</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="quantum" data-cat="Semiconductors & Computing">
+            <span class="topic-icon">⚛️</span>
+            <span class="topic-label">Quantum Computing</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="photonics" data-cat="Semiconductors & Computing">
+            <span class="topic-icon">💡</span>
+            <span class="topic-label">Photonics & Optical</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="edge_computing" data-cat="Semiconductors & Computing">
+            <span class="topic-icon">🌐</span>
+            <span class="topic-label">Edge Computing & IoT</span>
+          </label>
+        </div>
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>📡 Communications & Infrastructure</span>
+            <button class="select-all-btn" onclick="toggleCategory('Communications & Infrastructure')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="wireless" data-cat="Communications & Infrastructure">
+            <span class="topic-icon">📡</span>
+            <span class="topic-label">5G / 6G Wireless</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="cybersecurity" data-cat="Communications & Infrastructure">
+            <span class="topic-icon">🔐</span>
+            <span class="topic-label">Cybersecurity</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="space_tech" data-cat="Communications & Infrastructure">
+            <span class="topic-icon">🛸</span>
+            <span class="topic-label">Satellite & Space Tech</span>
+          </label>
+        </div>
+        <div class="cat-group">
+          <div class="cat-header">
+            <span>⚡ Energy & Cleantech</span>
+            <button class="select-all-btn" onclick="toggleCategory('Energy & Cleantech')">All</button>
+          </div>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="batteries" data-cat="Energy & Cleantech">
+            <span class="topic-icon">🔋</span>
+            <span class="topic-label">Battery & Energy Storage</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="nuclear_fusion" data-cat="Energy & Cleantech">
+            <span class="topic-icon">☀️</span>
+            <span class="topic-label">Nuclear Fusion</span>
+          </label>
+          <label class="topic-item">
+            <input type="checkbox" class="topic-cb" value="nanotechnology" data-cat="Energy & Cleantech">
+            <span class="topic-icon">🔩</span>
+            <span class="topic-label">Nanotechnology</span>
+          </label>
+        </div>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="selection-count" id="sel-count">0 topics selected</div>
+        <button class="btn-scan" id="btn-scan" onclick="runScan()" disabled>
+          ▶&nbsp; Scan Selected Topics
+        </button>
+      </div>
+    </div>
+
+    <!-- Results pane -->
+    <div class="results" id="results">
+      <div class="placeholder" id="placeholder">
+        <div class="big">🔭</div>
+        <h2>Select Topics to Scan</h2>
+        <p>Choose one or more research topics from the left panel,
+           then click <strong>Scan Selected Topics</strong> to fetch
+           live data from arXiv, NIH grants, and ClinicalTrials.gov.</p>
+        <p style="margin-top:8px;color:#6b7194;font-size:12px">
+          Requires the ValuationSuite server (app.py) to be running on port 5050 or 5051.
+        </p>
+      </div>
+    </div>
+
+  </div><!-- .body -->
+</div><!-- .shell -->
+
+<script>
+const TOPICS       = {
+  "llm": {
+    "label": "Large Language Models",
+    "category": "Artificial Intelligence",
+    "icon": "🧠",
+    "arxiv_cats": [
+      "cs.CL",
+      "cs.AI",
+      "cs.LG"
+    ],
+    "arxiv_kw": [
+      "large language model",
+      "LLM",
+      "GPT",
+      "transformer",
+      "foundation model"
+    ],
+    "nih_terms": [
+      "large language model",
+      "natural language processing clinical"
+    ],
+    "ct_query": "artificial intelligence language",
+    "color": "#4f8ef7"
+  },
+  "computer_vision": {
+    "label": "Computer Vision",
+    "category": "Artificial Intelligence",
+    "icon": "👁",
+    "arxiv_cats": [
+      "cs.CV",
+      "cs.AI"
+    ],
+    "arxiv_kw": [
+      "image recognition",
+      "object detection",
+      "vision transformer",
+      "diffusion model"
+    ],
+    "nih_terms": [
+      "computer vision medical imaging",
+      "deep learning image analysis"
+    ],
+    "ct_query": "computer vision imaging artificial intelligence",
+    "color": "#4f8ef7"
+  },
+  "robotics": {
+    "label": "Robotics & Automation",
+    "category": "Artificial Intelligence",
+    "icon": "🤖",
+    "arxiv_cats": [
+      "cs.RO",
+      "cs.AI",
+      "cs.SY"
+    ],
+    "arxiv_kw": [
+      "robot",
+      "autonomous system",
+      "reinforcement learning manipulation"
+    ],
+    "nih_terms": [
+      "surgical robotics",
+      "robotic assisted surgery"
+    ],
+    "ct_query": "robotic surgery automation",
+    "color": "#4f8ef7"
+  },
+  "ai_chips": {
+    "label": "AI Chips & Hardware",
+    "category": "Artificial Intelligence",
+    "icon": "⚡",
+    "arxiv_cats": [
+      "cs.AR",
+      "eess.SP",
+      "cs.ET"
+    ],
+    "arxiv_kw": [
+      "neural processing unit",
+      "NPU",
+      "accelerator",
+      "neuromorphic",
+      "in-memory computing"
+    ],
+    "nih_terms": [
+      "neuromorphic computing",
+      "brain inspired computing"
+    ],
+    "ct_query": "",
+    "color": "#4f8ef7"
+  },
+  "gene_editing": {
+    "label": "Gene Editing (CRISPR)",
+    "category": "Biotechnology",
+    "icon": "✂️",
+    "arxiv_cats": [
+      "q-bio.GN",
+      "q-bio.BM"
+    ],
+    "arxiv_kw": [
+      "CRISPR",
+      "gene editing",
+      "base editing",
+      "prime editing",
+      "Cas9"
+    ],
+    "nih_terms": [
+      "CRISPR gene editing",
+      "genome editing CRISPR"
+    ],
+    "ct_query": "CRISPR gene editing",
+    "color": "#f87171"
+  },
+  "mrna": {
+    "label": "mRNA Therapies",
+    "category": "Biotechnology",
+    "icon": "💉",
+    "arxiv_cats": [
+      "q-bio.BM",
+      "q-bio.MN"
+    ],
+    "arxiv_kw": [
+      "mRNA",
+      "messenger RNA",
+      "lipid nanoparticle",
+      "mRNA vaccine"
+    ],
+    "nih_terms": [
+      "mRNA therapy",
+      "messenger RNA vaccine therapeutic"
+    ],
+    "ct_query": "mRNA vaccine therapy",
+    "color": "#f87171"
+  },
+  "car_t": {
+    "label": "CAR-T & Cell Therapies",
+    "category": "Biotechnology",
+    "icon": "🔬",
+    "arxiv_cats": [
+      "q-bio.CB",
+      "q-bio.TO"
+    ],
+    "arxiv_kw": [
+      "CAR-T",
+      "chimeric antigen receptor",
+      "cell therapy",
+      "TCR therapy",
+      "NK cell"
+    ],
+    "nih_terms": [
+      "CAR-T cell therapy",
+      "chimeric antigen receptor cancer"
+    ],
+    "ct_query": "CAR-T cell therapy chimeric antigen",
+    "color": "#f87171"
+  },
+  "synthetic_bio": {
+    "label": "Synthetic Biology",
+    "category": "Biotechnology",
+    "icon": "🧫",
+    "arxiv_cats": [
+      "q-bio.SC",
+      "q-bio.BM",
+      "q-bio.GN"
+    ],
+    "arxiv_kw": [
+      "synthetic biology",
+      "metabolic engineering",
+      "protein design",
+      "directed evolution"
+    ],
+    "nih_terms": [
+      "synthetic biology",
+      "metabolic engineering biosynthesis"
+    ],
+    "ct_query": "synthetic biology engineered",
+    "color": "#f87171"
+  },
+  "protein_engineering": {
+    "label": "Protein Engineering & AI",
+    "category": "Biotechnology",
+    "icon": "🧬",
+    "arxiv_cats": [
+      "q-bio.BM",
+      "cs.LG"
+    ],
+    "arxiv_kw": [
+      "protein structure",
+      "AlphaFold",
+      "protein design",
+      "protein language model"
+    ],
+    "nih_terms": [
+      "protein engineering therapeutic",
+      "AI protein structure prediction"
+    ],
+    "ct_query": "protein engineering",
+    "color": "#f87171"
+  },
+  "digital_health": {
+    "label": "Digital Health & Wearables",
+    "category": "Health Technology",
+    "icon": "⌚",
+    "arxiv_cats": [
+      "cs.HC",
+      "eess.SP",
+      "cs.LG"
+    ],
+    "arxiv_kw": [
+      "wearable",
+      "digital health",
+      "remote monitoring",
+      "health sensor",
+      "mHealth"
+    ],
+    "nih_terms": [
+      "digital health wearable monitoring",
+      "remote patient monitoring"
+    ],
+    "ct_query": "digital health wearable monitoring device",
+    "color": "#f59e0b"
+  },
+  "medical_devices": {
+    "label": "Medical Devices & Implants",
+    "category": "Health Technology",
+    "icon": "🏥",
+    "arxiv_cats": [
+      "eess.SP",
+      "cs.RO"
+    ],
+    "arxiv_kw": [
+      "medical device",
+      "implantable",
+      "brain computer interface",
+      "neural implant",
+      "cochlear"
+    ],
+    "nih_terms": [
+      "implantable medical device",
+      "neural interface brain computer"
+    ],
+    "ct_query": "implant medical device neural",
+    "color": "#f59e0b"
+  },
+  "ai_diagnostics": {
+    "label": "AI Diagnostics & Imaging",
+    "category": "Health Technology",
+    "icon": "🩺",
+    "arxiv_cats": [
+      "cs.CV",
+      "eess.IV",
+      "cs.LG"
+    ],
+    "arxiv_kw": [
+      "medical image",
+      "radiology AI",
+      "pathology deep learning",
+      "diagnostic AI",
+      "liquid biopsy"
+    ],
+    "nih_terms": [
+      "AI diagnostic imaging",
+      "deep learning radiology pathology"
+    ],
+    "ct_query": "artificial intelligence diagnostic imaging screening",
+    "color": "#f59e0b"
+  },
+  "immuno_oncology": {
+    "label": "Immuno-Oncology",
+    "category": "Health Technology",
+    "icon": "🎯",
+    "arxiv_cats": [
+      "q-bio.TO",
+      "q-bio.CB"
+    ],
+    "arxiv_kw": [
+      "immunotherapy",
+      "checkpoint inhibitor",
+      "PD-1",
+      "tumor microenvironment",
+      "antibody drug conjugate"
+    ],
+    "nih_terms": [
+      "immunotherapy cancer checkpoint",
+      "PD-1 PD-L1 cancer"
+    ],
+    "ct_query": "immunotherapy checkpoint inhibitor cancer",
+    "color": "#f59e0b"
+  },
+  "semiconductors": {
+    "label": "Advanced Semiconductors",
+    "category": "Semiconductors & Computing",
+    "icon": "💾",
+    "arxiv_cats": [
+      "cond-mat.mes-hall",
+      "cond-mat.mtrl-sci",
+      "cs.AR"
+    ],
+    "arxiv_kw": [
+      "semiconductor",
+      "transistor",
+      "2D material",
+      "silicon photonics",
+      "GAA",
+      "FinFET",
+      "3nm"
+    ],
+    "nih_terms": [
+      "semiconductor nanotechnology biomedical"
+    ],
+    "ct_query": "",
+    "color": "#a78bfa"
+  },
+  "quantum": {
+    "label": "Quantum Computing",
+    "category": "Semiconductors & Computing",
+    "icon": "⚛️",
+    "arxiv_cats": [
+      "quant-ph",
+      "cs.ET"
+    ],
+    "arxiv_kw": [
+      "quantum computing",
+      "qubit",
+      "quantum error correction",
+      "quantum advantage",
+      "quantum algorithm"
+    ],
+    "nih_terms": [
+      "quantum computing biosimulation",
+      "quantum sensing biomedical"
+    ],
+    "ct_query": "quantum",
+    "color": "#a78bfa"
+  },
+  "photonics": {
+    "label": "Photonics & Optical",
+    "category": "Semiconductors & Computing",
+    "icon": "💡",
+    "arxiv_cats": [
+      "physics.optics",
+      "eess.SP",
+      "physics.app-ph"
+    ],
+    "arxiv_kw": [
+      "photonics",
+      "optical computing",
+      "LiDAR",
+      "laser",
+      "silicon photonics"
+    ],
+    "nih_terms": [
+      "optical imaging photonics biomedical",
+      "photodynamic therapy"
+    ],
+    "ct_query": "photodynamic optical therapy",
+    "color": "#a78bfa"
+  },
+  "edge_computing": {
+    "label": "Edge Computing & IoT",
+    "category": "Semiconductors & Computing",
+    "icon": "🌐",
+    "arxiv_cats": [
+      "cs.DC",
+      "cs.NI",
+      "cs.AR"
+    ],
+    "arxiv_kw": [
+      "edge computing",
+      "IoT",
+      "federated learning",
+      "TinyML",
+      "on-device inference"
+    ],
+    "nih_terms": [
+      "edge computing healthcare federated learning"
+    ],
+    "ct_query": "remote monitoring IoT device",
+    "color": "#a78bfa"
+  },
+  "wireless": {
+    "label": "5G / 6G Wireless",
+    "category": "Communications & Infrastructure",
+    "icon": "📡",
+    "arxiv_cats": [
+      "eess.SP",
+      "cs.NI",
+      "cs.IT"
+    ],
+    "arxiv_kw": [
+      "5G",
+      "6G",
+      "mmWave",
+      "massive MIMO",
+      "beamforming",
+      "reconfigurable intelligent surface"
+    ],
+    "nih_terms": [
+      "wireless health monitoring 5G"
+    ],
+    "ct_query": "",
+    "color": "#34d399"
+  },
+  "cybersecurity": {
+    "label": "Cybersecurity",
+    "category": "Communications & Infrastructure",
+    "icon": "🔐",
+    "arxiv_cats": [
+      "cs.CR",
+      "cs.AI"
+    ],
+    "arxiv_kw": [
+      "adversarial attack",
+      "differential privacy",
+      "homomorphic encryption",
+      "zero trust",
+      "intrusion detection"
+    ],
+    "nih_terms": [
+      "cybersecurity health data privacy",
+      "secure health information"
+    ],
+    "ct_query": "",
+    "color": "#34d399"
+  },
+  "space_tech": {
+    "label": "Satellite & Space Tech",
+    "category": "Communications & Infrastructure",
+    "icon": "🛸",
+    "arxiv_cats": [
+      "eess.SP",
+      "cs.NI",
+      "physics.space-ph"
+    ],
+    "arxiv_kw": [
+      "LEO satellite",
+      "starlink",
+      "satellite communication",
+      "space computing",
+      "CubeSat"
+    ],
+    "nih_terms": [
+      "space medicine microgravity health"
+    ],
+    "ct_query": "space microgravity",
+    "color": "#34d399"
+  },
+  "batteries": {
+    "label": "Battery & Energy Storage",
+    "category": "Energy & Cleantech",
+    "icon": "🔋",
+    "arxiv_cats": [
+      "cond-mat.mtrl-sci",
+      "physics.chem-ph"
+    ],
+    "arxiv_kw": [
+      "solid state battery",
+      "lithium",
+      "energy storage",
+      "sodium ion",
+      "anode cathode"
+    ],
+    "nih_terms": [
+      "battery energy storage biomedical implant"
+    ],
+    "ct_query": "",
+    "color": "#00c896"
+  },
+  "nuclear_fusion": {
+    "label": "Nuclear Fusion",
+    "category": "Energy & Cleantech",
+    "icon": "☀️",
+    "arxiv_cats": [
+      "physics.plasm-ph"
+    ],
+    "arxiv_kw": [
+      "nuclear fusion",
+      "tokamak",
+      "inertial confinement",
+      "plasma confinement",
+      "fusion reactor"
+    ],
+    "nih_terms": [
+      "fusion energy"
+    ],
+    "ct_query": "",
+    "color": "#00c896"
+  },
+  "nanotechnology": {
+    "label": "Nanotechnology",
+    "category": "Energy & Cleantech",
+    "icon": "🔩",
+    "arxiv_cats": [
+      "cond-mat.mes-hall",
+      "cond-mat.mtrl-sci"
+    ],
+    "arxiv_kw": [
+      "nanoparticle",
+      "nanotechnology",
+      "graphene",
+      "carbon nanotube",
+      "nano drug delivery"
+    ],
+    "nih_terms": [
+      "nanotechnology drug delivery cancer",
+      "nanoparticle therapeutic"
+    ],
+    "ct_query": "nanoparticle drug delivery",
+    "color": "#00c896"
+  }
+};
+const CAT_ORDER    = ["Artificial Intelligence", "Biotechnology", "Health Technology", "Semiconductors & Computing", "Communications & Infrastructure", "Energy & Cleantech"];
+const CAT_ICONS    = {"Artificial Intelligence": "🧠", "Biotechnology": "🧬", "Health Technology": "🏥", "Semiconductors & Computing": "💾", "Communications & Infrastructure": "📡", "Energy & Cleantech": "⚡"};
+
+let activeSources = new Set(['arxiv', 'nih', 'trials']);
+
+// ── Source toggles ──────────────────────────────────────────────────────────
+function toggleSource(btn) {
+  const src = btn.dataset.src;
+  if (activeSources.has(src)) { activeSources.delete(src); btn.classList.remove('active'); }
+  else                         { activeSources.add(src);    btn.classList.add('active');    }
+}
+
+// ── Category select all ─────────────────────────────────────────────────────
+function toggleCategory(cat) {
+  const boxes = document.querySelectorAll(`.topic-cb[data-cat="${cat}"]`);
+  const allChecked = [...boxes].every(b => b.checked);
+  boxes.forEach(b => { b.checked = !allChecked; });
+  updateCount();
+}
+
+function selectAll(on) {
+  document.querySelectorAll('.topic-cb').forEach(b => { b.checked = on; });
+  updateCount();
+}
+
+function updateCount() {
+  const n   = [...document.querySelectorAll('.topic-cb:checked')].length;
+  document.getElementById('sel-count').textContent = n === 0 ? 'No topics selected' : `${n} topic${n === 1 ? '' : 's'} selected`;
+  document.getElementById('btn-scan').disabled = n === 0;
+}
+
+document.querySelectorAll('.topic-cb').forEach(b => b.addEventListener('change', updateCount));
+
+// ── Server detection ────────────────────────────────────────────────────────
+async function findServer() {
+  for (const port of [5050, 5051]) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/scripts`, {signal: AbortSignal.timeout(2000)});
+      if (r.ok) return `http://127.0.0.1:${port}`;
+    } catch {}
+  }
+  return null;
+}
+
+// ── Scan ────────────────────────────────────────────────────────────────────
+async function runScan() {
+  const selectedKeys = [...document.querySelectorAll('.topic-cb:checked')].map(b => b.value);
+  if (!selectedKeys.length) return;
+
+  const days    = parseInt(document.getElementById('days-input').value) || 30;
+  const sources = [...activeSources];
+
+  const res = document.getElementById('results');
+  res.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+                height:100%;gap:16px;color:var(--muted)">
+      <div class="spinner"></div>
+      <div style="font-size:14px">Scanning ${selectedKeys.length} topic${selectedKeys.length>1?'s':''}…</div>
+    </div>`;
+
+  const base = await findServer();
+  if (!base) {
+    res.innerHTML = `
+      <div class="server-warning">
+        ⚠ &nbsp;<strong>ValuationSuite server not found.</strong><br><br>
+        This tool requires the Flask server to be running. Start it by launching
+        <code>ValuationSuite.app</code> or running <code>python app.py</code>
+        from the project folder, then click Scan again.
+      </div>`;
+    return;
+  }
+
+  let data;
+  try {
+    const r = await fetch(`${base}/api/research-topics`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({topics: selectedKeys, days, sources}),
+    });
+    data = await r.json();
+  } catch (err) {
+    res.innerHTML = `<div class="server-warning">⚠ Fetch error: ${err}</div>`;
+    return;
+  }
+
+  if (data.error) {
+    res.innerHTML = `<div class="server-warning">⚠ ${data.error}</div>`;
+    return;
+  }
+
+  renderResults(data, selectedKeys, days);
+}
+
+// ── Render ──────────────────────────────────────────────────────────────────
+function pill(text, color) {
+  return `<span class="pill" style="color:${color};border-color:${color}44;background:${color}18">${text}</span>`;
+}
+
+function statusDot(status) {
+  if (status.includes('Completed'))  return '<span class="dot-green">●</span>';
+  if (status.includes('Active'))     return '<span class="dot-orange">●</span>';
+  return '<span style="color:var(--muted)">●</span>';
+}
+
+function renderResults(data, selectedKeys, days) {
+  const arxiv  = data.arxiv  || [];
+  const nih    = data.nih    || [];
+  const trials = data.trials || [];
+  const total  = arxiv.length + nih.length + trials.length;
+
+  const selectedLabels = selectedKeys.map(k => TOPICS[k]?.label || k);
+  const topicList      = selectedLabels.slice(0,4).join(', ') + (selectedLabels.length > 4 ? ` +${selectedLabels.length-4} more` : '');
+
+  let html = `
+    <div class="results-header">
+      <h2>Scan Results</h2>
+      <div class="results-meta"><b>${total}</b> items · <b>${selectedKeys.length}</b> topics · last <b>${days}</b> days</div>
+    </div>
+    <div style="color:var(--muted);font-size:12px;margin-bottom:20px">${topicList}</div>`;
+
+  // ── arXiv section
+  if (arxiv.length) {
+    html += `<div class="section-header">📄 arXiv Research Papers <span class="section-count">${arxiv.length}</span></div>`;
+    html += '<div class="cards-grid">';
+    for (const p of arxiv) {
+      const topicColor = Object.values(TOPICS).find(t => t.label === p.topic)?.color || '#8b949e';
+      html += `
+        <div class="paper-card">
+          <div class="card-top">
+            <div style="display:flex;gap:6px;flex-wrap:wrap">${pill(p.topic, topicColor)}</div>
+            <span class="card-date">${p.date}</span>
+          </div>
+          <a class="card-title" href="${p.url}" target="_blank" rel="noopener noreferrer">${p.title}</a>
+          <div class="card-summary">${p.summary}</div>
+          <div class="card-author">${p.authors}</div>
+        </div>`;
+    }
+    html += '</div>';
+  }
+
+  // ── Clinical Trials section
+  if (trials.length) {
+    html += `<div class="section-header">🧬 Clinical Trials (Phase 2/3) <span class="section-count">${trials.length}</span></div>`;
+    html += `<div style="overflow-x:auto"><table class="data-table">
+      <thead><tr>
+        <th>Trial</th><th>Topic</th><th>Sponsor</th><th>Conditions</th>
+        <th style="text-align:center">Status</th><th style="text-align:center">Completion</th>
+      </tr></thead><tbody>`;
+    for (const t of trials) {
+      const topicColor = Object.values(TOPICS).find(x => x.label === t.topic)?.color || '#8b949e';
+      const indBadge   = t.industry ? '<span class="ind-badge">Industry</span>' : '';
+      html += `<tr>
+        <td><a href="${t.url}" target="_blank" rel="noopener noreferrer"
+               style="color:var(--text);text-decoration:none;font-size:12px">${t.title}</a>
+            <br><span style="color:var(--muted);font-size:11px">${t.nct_id}</span></td>
+        <td>${pill(t.topic, topicColor)}</td>
+        <td style="font-size:12px;color:var(--muted)">${t.sponsor} ${indBadge}</td>
+        <td style="font-size:12px;color:var(--muted)">${t.conditions}</td>
+        <td style="text-align:center">${statusDot(t.status)} <span style="font-size:11px;color:var(--muted)">${t.status}</span></td>
+        <td style="text-align:center;font-size:12px;color:var(--muted);white-space:nowrap">${t.completion}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  // ── NIH Grants section
+  if (nih.length) {
+    html += `<div class="section-header">💰 NIH Research Grants <span class="section-count">${nih.length}</span></div>`;
+    html += `<div style="overflow-x:auto"><table class="data-table">
+      <thead><tr>
+        <th>Project</th><th>Topic</th><th>Institution</th>
+        <th style="text-align:right">Award</th><th style="text-align:center">FY</th><th style="text-align:center">Link</th>
+      </tr></thead><tbody>`;
+    for (const g of nih) {
+      const topicColor = Object.values(TOPICS).find(x => x.label === g.topic)?.color || '#8b949e';
+      const fmt = new Intl.NumberFormat('en-US', {style:'currency', currency:'USD', maximumFractionDigits:0}).format(g.amount);
+      html += `<tr>
+        <td style="font-size:12px">${g.title}</td>
+        <td>${pill(g.topic, topicColor)}</td>
+        <td style="font-size:12px;color:var(--muted)">${g.org}</td>
+        <td style="text-align:right;font-size:12px;color:#00c896;font-family:monospace">${fmt}</td>
+        <td style="text-align:center;font-size:12px;color:var(--muted)">${g.year}</td>
+        <td style="text-align:center"><a class="ext" href="${g.url}" target="_blank">NIH ↗</a></td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+  }
+
+  if (!total) {
+    html += `<div style="color:var(--muted);font-size:13px;padding:20px">
+      No results found for the selected topics and time window. Try increasing the days or selecting different topics.
+    </div>`;
+  }
+
+  document.getElementById('results').innerHTML = html;
+}
+</script>
+</body>
+</html>

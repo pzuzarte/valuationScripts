@@ -45,7 +45,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from valuation_models import growth_adjusted_multiples, run_graham_number
+from valuation_models import growth_adjusted_multiples, run_graham_number, run_pie, run_fcf_yield
 
 # ── optional dependencies ──────────────────────────────────────────
 try:
@@ -95,7 +95,7 @@ GROWTH_PE_MAX          = 40     # P/E > 40 likely growth / speculative
 VALUE_PE_MAX           = 20     # P/E < 20 → value territory
 
 # Backtest
-DEFAULT_BACKTEST_DAYS  = 252    # 1 year
+DEFAULT_BACKTEST_DAYS  = 500    # ~2 years
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1525,6 +1525,8 @@ def run_all_valuations(fund: dict, benchmarks: dict = None, analyst: dict = None
     r = run_price_target_model(fund, analyst);          (fvs.__setitem__("Analyst Tgt", r) if r else None)
     r = run_graham_number(fund);                        (fvs.__setitem__("Graham",      r) if r else None)
     r = run_tv_fundamental_price(fund);                 (fvs.__setitem__("TV Fund.",     r) if r else None)
+    r = run_pie(fund);       (fvs.__setitem__("PIE",       r["fair_value"]) if (r and r.get("fair_value")) else None)
+    r = run_fcf_yield(fund); (fvs.__setitem__("FCF Yield", r["fair_value"]) if (r and r.get("fair_value")) else None)
     return fvs
 
 
@@ -1749,18 +1751,394 @@ def project_price(fund: dict, tech: dict, analyst: dict,
 
 
 # ─────────────────────────────────────────────────────────────────
-#  BACKTEST — find best method
+#  BACKTEST — point-in-time helpers + main function
 # ─────────────────────────────────────────────────────────────────
 
-def backtest_methods(fund: dict, bars: list, benchmarks: dict = None) -> dict:
+def _fetch_ttm_snapshots_pa(ticker: str) -> list:
     """
-    MAPE-based backtest. benchmarks passed through to run_all_valuations
-    so P/E, P/FCF, EV/EBITDA use live industry medians, not hardcoded defaults.
-    Relative scoring: best method = 100, others proportional (avoids 0% floor).
+    Fetch quarterly fundamentals from yfinance and compute TTM for each
+    quarter-end date.  Returns list of snapshots sorted oldest-first.
+    Used by backtest_methods() for point-in-time fair value computation.
+    Falls back to [] on any error; caller will use static backtest instead.
+    """
+    if not _YF:
+        return []
+    try:
+        ticker_clean = ticker.split(":")[-1] if ":" in ticker else ticker
+        tk = yf.Ticker(ticker_clean)
+
+        q_inc = tk.quarterly_income_stmt
+        q_cf  = tk.quarterly_cash_flow
+        q_bs  = tk.quarterly_balance_sheet
+
+        if q_inc is None or q_inc.empty:
+            return []
+
+        REV_NAMES   = ["Total Revenue", "Revenue", "Net Revenue"]
+        NI_NAMES    = ["Net Income", "Net Income Common Stockholders"]
+        GP_NAMES    = ["Gross Profit"]
+        EBIT_NAMES  = ["Operating Income", "EBIT", "Operating Income Loss"]
+        FCF_NAMES   = ["Free Cash Flow"]
+        CFO_NAMES   = ["Operating Cash Flow", "Cash Flow From Operations",
+                       "Cash Flow From Continuing Operating Activities"]
+        CAPEX_NAMES = ["Capital Expenditure", "Purchase Of Plant And Equipment",
+                       "Capital Expenditures"]
+        DEBT_NAMES  = ["Total Debt", "Long Term Debt And Capital Lease Obligation",
+                       "Long Term Debt", "TotalDebt"]
+
+        def _get_s(df, candidates):
+            if df is None or df.empty:
+                return None
+            for name in candidates:
+                if name in df.index:
+                    return df.loc[name]
+            return None
+
+        rev_s   = _get_s(q_inc, REV_NAMES)
+        ni_s    = _get_s(q_inc, NI_NAMES)
+        gp_s    = _get_s(q_inc, GP_NAMES)
+        ebit_s  = _get_s(q_inc, EBIT_NAMES)
+        fcf_s   = _get_s(q_cf,  FCF_NAMES)
+        cfo_s   = _get_s(q_cf,  CFO_NAMES)
+        capex_s = _get_s(q_cf,  CAPEX_NAMES)
+        debt_s  = _get_s(q_bs,  DEBT_NAMES)
+
+        if rev_s is None:
+            return []
+
+        if fcf_s is None and cfo_s is not None and capex_s is not None:
+            try:
+                _al = cfo_s.align(capex_s, join="inner")
+                fcf_s = _al[0] + _al[1]
+            except Exception:
+                fcf_s = None
+
+        dates = sorted(rev_s.index)
+        if len(dates) < 4:
+            return []
+
+        def _val(series, ts):
+            if series is None:
+                return None
+            try:
+                v = series.get(ts)
+                if v is None:
+                    return None
+                f = float(v)
+                return None if f != f else f
+            except Exception:
+                return None
+
+        def _ttm4(series, window_dates):
+            if series is None:
+                return None
+            vals = [_val(series, d) for d in window_dates]
+            good = [v for v in vals if v is not None]
+            return sum(good) if len(good) == 4 else None
+
+        snapshots = []
+        for i in range(3, len(dates)):
+            window   = dates[i - 3: i + 1]
+            dt_end   = dates[i]
+            date_str = (dt_end.strftime("%Y-%m-%d")
+                        if hasattr(dt_end, "strftime") else str(dt_end)[:10])
+
+            ttm_rev  = _ttm4(rev_s,  window)
+            ttm_ni   = _ttm4(ni_s,   window)
+            ttm_gp   = _ttm4(gp_s,   window)
+            ttm_ebit = _ttm4(ebit_s, window)
+            ttm_fcf  = _ttm4(fcf_s,  window)
+
+            if ttm_fcf is None:
+                ttm_cfo = _ttm4(cfo_s, window) if cfo_s is not None else None
+                if ttm_cfo is not None:
+                    ttm_fcf = ttm_cfo * 0.85
+
+            debt         = _val(debt_s, dt_end)
+            gross_margin = (ttm_gp   / ttm_rev * 100) if (ttm_gp   and ttm_rev and ttm_rev > 0) else None
+            op_margin    = (ttm_ebit / ttm_rev * 100) if (ttm_ebit and ttm_rev and ttm_rev > 0) else None
+            ebitda       = (ttm_ebit * 1.15)           if ttm_ebit is not None else None
+
+            if ttm_rev is None and ttm_fcf is None:
+                continue
+
+            snapshots.append({
+                "date":         date_str,
+                "revenue":      ttm_rev,
+                "net_income":   ttm_ni,
+                "fcf":          ttm_fcf,
+                "ebitda":       ebitda,
+                "total_debt":   debt,
+                "gross_margin": gross_margin,
+                "op_margin":    op_margin,
+                "filing_lag":   45,
+            })
+
+        snapshots.sort(key=lambda x: x["date"])
+        return snapshots
+
+    except Exception as exc:
+        print("  [PA TTM] fetch failed for {}: {}".format(ticker, exc))
+        return []
+
+
+def _fetch_annual_snapshots_pa(ticker: str) -> list:
+    """
+    Fetch the last 4 fiscal years of fundamentals from yfinance annual statements.
+    Provides older history beyond yfinance's ~5-quarter quarterly window.
+    Returns list of snapshots sorted oldest-first, filing_lag=75 days.
+    """
+    if not _YF:
+        return []
+    try:
+        ticker_clean = ticker.split(":")[-1] if ":" in ticker else ticker
+        tk = yf.Ticker(ticker_clean)
+
+        a_inc = tk.income_stmt
+        a_cf  = tk.cashflow
+        a_bs  = tk.balance_sheet
+
+        if a_inc is None or a_inc.empty:
+            return []
+
+        REV_NAMES   = ["Total Revenue", "Revenue", "Net Revenue"]
+        NI_NAMES    = ["Net Income", "Net Income Common Stockholders"]
+        GP_NAMES    = ["Gross Profit"]
+        EBIT_NAMES  = ["Operating Income", "EBIT", "Operating Income Loss"]
+        FCF_NAMES   = ["Free Cash Flow"]
+        CFO_NAMES   = ["Operating Cash Flow", "Cash Flow From Operations",
+                       "Cash Flow From Continuing Operating Activities"]
+        CAPEX_NAMES = ["Capital Expenditure", "Purchase Of Plant And Equipment",
+                       "Capital Expenditures"]
+        DEBT_NAMES  = ["Total Debt", "Long Term Debt And Capital Lease Obligation",
+                       "Long Term Debt", "TotalDebt"]
+
+        def _get_s(df, candidates):
+            if df is None or df.empty:
+                return None
+            for name in candidates:
+                if name in df.index:
+                    return df.loc[name]
+            return None
+
+        rev_s   = _get_s(a_inc, REV_NAMES)
+        ni_s    = _get_s(a_inc, NI_NAMES)
+        gp_s    = _get_s(a_inc, GP_NAMES)
+        ebit_s  = _get_s(a_inc, EBIT_NAMES)
+        fcf_s   = _get_s(a_cf,  FCF_NAMES)
+        cfo_s   = _get_s(a_cf,  CFO_NAMES)
+        capex_s = _get_s(a_cf,  CAPEX_NAMES)
+        debt_s  = _get_s(a_bs,  DEBT_NAMES)
+
+        if rev_s is None:
+            return []
+
+        def _val(series, ts):
+            if series is None:
+                return None
+            try:
+                v = series.get(ts)
+                if v is None:
+                    return None
+                f = float(v)
+                return None if f != f else f
+            except Exception:
+                return None
+
+        dates = sorted(rev_s.index)   # oldest-first
+        snapshots = []
+        for dt in dates:
+            date_str = (dt.strftime("%Y-%m-%d")
+                        if hasattr(dt, "strftime") else str(dt)[:10])
+
+            rev  = _val(rev_s,  dt)
+            ni   = _val(ni_s,   dt)
+            gp   = _val(gp_s,   dt)
+            ebit = _val(ebit_s, dt)
+            debt = _val(debt_s, dt)
+
+            fcf = _val(fcf_s, dt)
+            if fcf is None:
+                cfo   = _val(cfo_s,   dt)
+                capex = _val(capex_s, dt)
+                if cfo is not None and capex is not None:
+                    fcf = cfo + capex   # capex is negative in yfinance
+                elif cfo is not None:
+                    fcf = cfo * 0.85
+
+            gross_margin = (gp   / rev * 100) if (gp   and rev and rev > 0) else None
+            op_margin    = (ebit / rev * 100) if (ebit and rev and rev > 0) else None
+            ebitda       = (ebit * 1.15)       if ebit is not None else None
+
+            if rev is None and fcf is None:
+                continue
+
+            snapshots.append({
+                "date":         date_str,
+                "revenue":      rev,
+                "net_income":   ni,
+                "fcf":          fcf,
+                "ebitda":       ebitda,
+                "total_debt":   debt,
+                "gross_margin": gross_margin,
+                "op_margin":    op_margin,
+                "filing_lag":   75,
+            })
+
+        snapshots.sort(key=lambda x: x["date"])
+        return snapshots
+
+    except Exception as exc:
+        print("  [PA Annual] fetch failed for {}: {}".format(ticker, exc))
+        return []
+
+
+def _pick_snap_pa(snapshots: list, date_str: str):
+    """Return the most recent snapshot available on date_str.
+    Uses each snapshot's filing_lag (45 days for 10-Q, 75 days for 10-K)."""
+    best = None
+    for snap in snapshots:
+        try:
+            lag   = snap.get("filing_lag", 45)
+            avail = (datetime.datetime.strptime(snap["date"], "%Y-%m-%d")
+                     + datetime.timedelta(days=lag)).strftime("%Y-%m-%d")
+        except Exception:
+            continue
+        if avail <= date_str:
+            best = snap
+    return best
+
+
+def _apply_snap_pa(fund_current: dict, snap: dict, hist_price: float) -> dict:
+    """
+    Build a point-in-time fund dict by overlaying historical TTM fundamentals
+    and historical price onto the current fund dict.
+
+    Mirrors valuationMaster._rebuild_d_from_snapshot exactly:
+    - est_growth derived from FCF-margin proxy (forward estimates unavailable historically)
+    - fwd_eps / fwd_rev zeroed out (analyst estimates not available for historical dates)
+    - EBITDA = operating income + 5% of revenue as D&A estimate
+    """
+    d      = dict(fund_current)
+    shares = d.get("shares") or 1
+    cash   = d.get("cash")   or 0
+
+    def _or(new, fallback):
+        return new if (new is not None and new == new) else fallback
+
+    rev  = _or(snap.get("revenue"),      d.get("revenue"))
+    fcf  = _or(snap.get("fcf"),          d.get("fcf"))
+    debt = _or(snap.get("total_debt"),   d.get("total_debt"))
+    gm   = _or(snap.get("gross_margin"), d.get("gross_margin"))
+    opm  = _or(snap.get("op_margin"),    d.get("op_margin"))
+
+    d["price"]        = hist_price
+    d["revenue"]      = rev
+    d["fcf"]          = fcf
+    d["total_debt"]   = debt
+    d["gross_margin"] = gm
+    d["op_margin"]    = opm
+
+    if fcf and shares > 0:
+        d["fcf_per_share"] = fcf / shares
+
+    ni = snap.get("net_income")
+    if ni is not None and ni == ni and shares > 0:
+        d["eps"] = ni / shares
+
+    # EBITDA: operating income + estimated D&A (5% of revenue) — matches valuationMaster
+    if rev and opm:
+        d["ebitda"] = rev * (opm / 100.0) + rev * 0.05
+    else:
+        d["ebitda"] = _or(snap.get("ebitda"), d.get("ebitda"))
+
+    # est_growth proxy from FCF margin — forward analyst estimates unavailable historically
+    # Identical to valuationMaster._rebuild_d_from_snapshot growth proxy
+    fcf_margin = (fcf / rev) if (fcf and rev and rev > 0) else None
+    if   fcf_margin and fcf_margin > 0.40: d["est_growth"] = 0.15
+    elif fcf_margin and fcf_margin > 0.20: d["est_growth"] = 0.12
+    elif fcf_margin and fcf_margin > 0.10: d["est_growth"] = 0.09
+    else:                                   d["est_growth"] = 0.06
+
+    # Zero out forward-looking analyst estimates — not available for historical dates
+    d["fwd_eps"] = None
+    d["fwd_rev"] = None
+
+    market_cap      = hist_price * shares
+    d["market_cap"] = market_cap
+    d["ev_approx"]  = market_cap + (debt or 0) - cash
+
+    return d
+
+
+def backtest_methods(fund: dict, bars: list, benchmarks: dict = None,
+                     snapshots: list = None) -> dict:
+    """
+    MAPE-based backtest.
+
+    If 'snapshots' are provided: point-in-time backtest — fundamentals are
+    updated at each historical date using the most recently available quarterly
+    TTM snapshot (45-day filing lag).  This eliminates the static-snapshot bias
+    where a single current fair value is measured against historical prices.
+
+    If no snapshots (or all bars predate available snapshots): falls back to
+    the original static approach for backward compatibility.
+
+    Relative scoring: best method = 100, others proportional.
     """
     if len(bars) < 60:
         return {}
 
+    # ── Point-in-time path ────────────────────────────────────────────────────
+    if snapshots:
+        method_errors  = {}
+        prev_snap_date = None
+        fund_hist      = None
+
+        for bar in bars:
+            snap = _pick_snap_pa(snapshots, bar["date"])
+            if snap is None:
+                continue   # no fundamental data available yet for this date
+
+            if snap["date"] != prev_snap_date:
+                # Snapshot changed — rebuild full fund_hist
+                prev_snap_date = snap["date"]
+                fund_hist      = _apply_snap_pa(fund, snap, bar["close"])
+            else:
+                # Same snapshot — only update price-dependent fields
+                fund_hist["price"]      = bar["close"]
+                mc                      = bar["close"] * (fund_hist.get("shares") or 1)
+                fund_hist["market_cap"] = mc
+                fund_hist["ev_approx"]  = (mc
+                                           + (fund_hist.get("total_debt") or 0)
+                                           - (fund_hist.get("cash") or 0))
+
+            fvs   = run_all_valuations(fund_hist, benchmarks, analyst=None)
+            price = bar["close"]
+            for method, fv in fvs.items():
+                if fv and fv > 0 and price > 0:
+                    method_errors.setdefault(method, []).append(
+                        abs(fv - price) / price * 100)
+
+        if method_errors:
+            mapes = {m: round(sum(e) / len(e), 1)
+                     for m, e in method_errors.items() if e}
+            if mapes:
+                best      = min(mapes, key=mapes.get)
+                best_mape = mapes[best]
+                rel       = {m: round(min(100.0, best_mape / (e + 0.001) * 100), 1)
+                             for m, e in mapes.items()}
+                fvs_now   = run_all_valuations(fund, benchmarks, analyst=None)
+                return {
+                    "best_method":    best,
+                    "mape":           mapes,
+                    "relative_score": rel,
+                    "fv":             fvs_now,
+                    "best_fv":        fvs_now.get(best),
+                }
+        # Fall through to static if point-in-time yielded no usable data
+
+    # ── Static fallback (original behaviour) ─────────────────────────────────
     closes = [b["close"] for b in bars]
     fvs    = run_all_valuations(fund, benchmarks, analyst=None)
     mapes  = {}
@@ -1775,17 +2153,13 @@ def backtest_methods(fund: dict, bars: list, benchmarks: dict = None) -> dict:
 
     best      = min(mapes, key=mapes.get)
     best_mape = mapes[best]
-
-    # Relative scores: best = 100, others proportional
-    # Add small epsilon so we never divide by zero
-    rel = {m: round(min(100.0, best_mape / (e + 0.001) * 100), 1)
-           for m, e in mapes.items()}
-
+    rel       = {m: round(min(100.0, best_mape / (e + 0.001) * 100), 1)
+                 for m, e in mapes.items()}
     return {
         "best_method":    best,
-        "mape":           mapes,          # raw MAPE % per method
-        "relative_score": rel,            # 0–100, best=100
-        "fv":             fvs,            # fair value per method
+        "mape":           mapes,
+        "relative_score": rel,
+        "fv":             fvs,
         "best_fv":        fvs.get(best),
     }
 
@@ -4548,7 +4922,18 @@ def main():
             (fund.get("sector"), fund.get("industry")),
             fetch_market_benchmarks(sector=fund.get("sector"), industry=fund.get("industry")))
 
-        bt        = backtest_methods(fund, bars, benchmarks) if bars else {}
+        # Merge quarterly TTM (recent, dense) + annual (older history).
+        # Annual fills years beyond yfinance's ~5-quarter quarterly window.
+        # Quarterly overwrites annual on overlapping dates (more accurate).
+        if bars:
+            _ttm_snaps    = _fetch_ttm_snapshots_pa(ticker)
+            _annual_snaps = _fetch_annual_snapshots_pa(ticker)
+            _snap_dict    = {s["date"]: s for s in _annual_snaps}
+            _snap_dict.update({s["date"]: s for s in _ttm_snaps})
+            snaps = sorted(_snap_dict.values(), key=lambda x: x["date"])
+        else:
+            snaps = []
+        bt        = backtest_methods(fund, bars, benchmarks, snapshots=snaps) if bars else {}
         signal    = generate_signal(fund, tech, cls, bt, analyst, benchmarks)
         forecast  = project_price(fund, tech, analyst, benchmarks)
         sentiment = sd.get("sentiment", {})
