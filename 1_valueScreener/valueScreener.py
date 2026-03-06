@@ -1307,7 +1307,8 @@ def main():
         write_csv(results, out_csv)
         print(f"  CSV saved:  {out_csv}")
 
-    webbrowser.open("file://" + os.path.abspath(out))
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        webbrowser.open("file://" + os.path.abspath(out))
     print(f"\nDone. ({len(results)} stocks scored)")
     print("="*60)
 

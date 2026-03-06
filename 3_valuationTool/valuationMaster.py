@@ -2885,7 +2885,29 @@ def fetch_historical_prices(ticker: str, days: int, _unused=None) -> list:
         except Exception:
             continue
 
-    print("  [Stooq] All symbol variants failed for '{}'".format(ticker))
+    print("  [Stooq] All symbol variants failed for '{}' — trying yfinance…".format(ticker))
+    try:
+        import yfinance as _yf, math as _math
+        cal_days = _math.ceil(days * 1.6) + 60
+        hist = _yf.Ticker(ticker).history(period="{}d".format(cal_days))
+        if hist is not None and not hist.empty:
+            pts = []
+            for ts, row in hist.iterrows():
+                try:
+                    cl = float(row["Close"])
+                    dt = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+                    if cl > 0 and dt:
+                        pts.append({"date": dt, "close": cl})
+                except (ValueError, TypeError):
+                    continue
+            pts.sort(key=lambda x: x["date"])
+            pts = pts[-days:]
+            if len(pts) >= 10:
+                print("  [yfinance] Got {} price points for '{}'".format(len(pts), ticker))
+                return pts
+    except Exception as _e:
+        print("  [yfinance] price fallback error: {}".format(_e))
+
     return []
 
 
@@ -6536,8 +6558,9 @@ def main():
         top_method  = top_8[0]["method"] if top_8 else "",
     )
 
-    print("\nOpening report in browser...")
-    webbrowser.open("file://" + os.path.abspath(outfile))
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        print("\nOpening report in browser...")
+        webbrowser.open("file://" + os.path.abspath(outfile))
     print("\nDone.")
 
 

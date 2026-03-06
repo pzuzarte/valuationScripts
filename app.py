@@ -59,7 +59,8 @@ SCRIPTS = {
             dict(id="index",    label="Index",        type="option", flag="--index",
                  required=True,  default="SPX",  values=["SPX", "NDX", "RUT", "TSX", "SPXRUT"]),
             dict(id="top",      label="Top N",        type="entry",  flag="--top",
-                 required=False, default=""),
+                 required=False, default="",
+                 hint="Stocks to screen (default: SPX=503 NDX=110 RUT=500)"),
             dict(id="backtest", label="Full Backtest", type="check",  flag="--backtest",
                  required=False, default=False),
             dict(id="backtest_days", label="Backtest days", type="entry", flag="--backtest-days",
@@ -176,23 +177,57 @@ SIDEBAR_GROUPS = [
 ]
 
 # ── Active runs ───────────────────────────────────────────────────────────────
-# run_id → {"proc": Popen, "q": Queue, "done": bool, "tmpfile": path|None}
+# run_id → {"proc": Popen, "q": Queue, "done": bool, "tmpfile": path|None, "cwd": str}
 _runs: dict = {}
 _runs_lock   = threading.Lock()
 
+import re as _re
+# Matches any whitespace-delimited token that is a file path with a known
+# output extension.  Handles all scripts:
+#   "  Saved: /abs/path/file.html"          ← valuationMaster, portfolioAnalyzer
+#   "  HTML saved: relpath/file.html"       ← growthScreener, valueScreener
+#   "  ✓  Report saved → /path/file.html  (42 KB)"  ← sentiment, macro
+#   "  Plot saved → /abs/path/file.png"    ← run_model.py (matplotlib PNG)
+_OUTPUT_PAT = _re.compile(r'(\S+\.(?:html|png|jpg|jpeg|svg|pdf))\b', _re.IGNORECASE)
+
 
 def _reader_thread(run_id: str) -> None:
-    """Read subprocess stdout into the run's queue; put None sentinel when done."""
+    """Read subprocess stdout into the run's queue; put None sentinel when done.
+
+    Also scans output lines for HTML file paths printed by the script (e.g.
+    "  Saved: /path/to/report.html").  When the process finishes successfully,
+    opens the last detected HTML file via webbrowser from the Flask server
+    process, which has the correct macOS Aqua/window-server context.
+
+    Scripts launched as subprocesses with start_new_session=True may have their
+    own webbrowser.open() calls fail silently on macOS — opening from here is
+    the reliable fallback.
+    """
     with _runs_lock:
         run = _runs.get(run_id)
     if run is None:
         return
 
-    proc = run["proc"]
-    q    = run["q"]
+    proc        = run["proc"]
+    q           = run["q"]
+    cwd         = run.get("cwd") or ""
+    output_path = None   # last matched output file seen in the script's stdout
+
     try:
         for line in iter(proc.stdout.readline, ""):
             q.put(line)
+            # Detect output file path from the script's print() statements.
+            # Covers HTML reports (all screeners/analyzers) and PNG plots (run_model.py).
+            m = _OUTPUT_PAT.search(line)
+            if m:
+                candidate = m.group(1).rstrip(")>\"'")
+                # Resolve relative paths against the script's working directory
+                if not os.path.isabs(candidate) and cwd:
+                    candidate = os.path.join(cwd, candidate)
+                candidate = os.path.abspath(candidate)
+                if os.path.isfile(candidate):
+                    output_path = candidate
+
         proc.stdout.close()
         proc.wait()
         rc = proc.returncode
@@ -200,6 +235,21 @@ def _reader_thread(run_id: str) -> None:
         q.put(f"\n{sep}\n")
         q.put("  ✓  Completed (exit 0)\n" if rc == 0 else f"  ✗  Exited with code {rc}\n")
         q.put(f"{sep}\n")
+
+        # Open the output file from the Flask process — has reliable macOS Aqua access.
+        # Scripts' own webbrowser.open() calls fail silently when run as subprocesses
+        # with start_new_session=True (disconnected from the window server session).
+        #
+        # Use macOS 'open' for all file types: routes PNGs → Preview, HTML → browser.
+        # webbrowser.open("file://...") uses osascript 'open location' which only
+        # works for HTML — it silently fails for images (.png, .jpg, etc.).
+        if output_path and rc == 0:
+            import platform as _platform
+            if _platform.system() == "Darwin":
+                subprocess.Popen(["open", output_path])
+            else:
+                webbrowser.open("file://" + output_path)
+
     except Exception as exc:
         q.put(f"\nERROR: {exc}\n")
     finally:
@@ -269,19 +319,23 @@ def api_run():
                 cmd.append(val)
 
     run_id = uuid.uuid4().hex[:8]
+    # Pass VALUATION_SUITE_LAUNCHED so scripts skip their own webbrowser.open()
+    # calls — _reader_thread is the single place that opens output files.
+    child_env = {**os.environ, "VALUATION_SUITE_LAUNCHED": "1"}
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
             start_new_session=True,
+            env=child_env,
         )
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
     q = queue.Queue()
     with _runs_lock:
-        _runs[run_id] = {"proc": proc, "q": q, "done": False, "tmpfile": None}
+        _runs[run_id] = {"proc": proc, "q": q, "done": False, "tmpfile": None, "cwd": cwd}
 
     threading.Thread(target=_reader_thread, args=(run_id,), daemon=True).start()
     return jsonify({"run_id": run_id})
@@ -940,6 +994,40 @@ function exitApp() {
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+def _refresh_yf_cookies() -> None:
+    """Delete stale yfinance cookie cache and reset the in-memory singleton.
+
+    Yahoo Finance rotates its crumb token periodically.  yfinance persists the
+    cookie to ~/Library/Caches/py-yfinance/cookies.db; when that cookie
+    expires on Yahoo's side the next API call returns HTTP 401 "Invalid Crumb".
+
+    Deleting cookies.db before the first subprocess launch forces yfinance (in
+    every child process) to fetch a fresh cookie/crumb from Yahoo.  We also
+    reset the in-memory YfData singleton in case this process itself calls
+    yfinance (e.g. the backtest price-history fallback in growthScreener).
+    """
+    import glob
+    cache_dir = os.path.expanduser("~/Library/Caches/py-yfinance")
+    removed = []
+    for f in glob.glob(os.path.join(cache_dir, "cookies.db*")):
+        try:
+            os.remove(f)
+            removed.append(os.path.basename(f))
+        except OSError:
+            pass
+    if removed:
+        print(f"  [yfinance] cleared stale cookie cache: {', '.join(removed)}")
+
+    # Also reset the in-memory singleton so this process re-fetches immediately
+    try:
+        from yfinance.data import YfData
+        yd = YfData()
+        yd._crumb  = None
+        yd._cookie = None
+    except Exception:
+        pass   # yfinance not importable yet — subprocesses will handle it
+
+
 def _port_open(port: int) -> bool:
     """Return True if something is already listening on *port*."""
     import socket
@@ -959,24 +1047,52 @@ def _our_server_alive(url: str) -> bool:
 
 
 def _kill_port(port: int) -> None:
-    """Kill whatever process is bound to *port* (macOS / Linux)."""
-    import subprocess, time
+    """Terminate whatever process is bound to *port* and wait until it is free.
+
+    Strategy:
+      1. Send SIGTERM (clean shutdown) to each PID holding the port.
+      2. Poll up to 4 s for the port to become free.
+      3. If still busy, escalate to SIGKILL and poll another 2 s.
+    """
+    import subprocess, time, socket as _sock
     try:
-        res = subprocess.run(
-            ["lsof", "-ti", f":{port}"],
-            capture_output=True, text=True,
-        )
-        for pid in res.stdout.strip().splitlines():
-            pid = pid.strip()
-            if pid.isdigit():
-                subprocess.run(["kill", "-9", pid], capture_output=True)
-        time.sleep(0.6)          # give the OS a moment to release the port
+        def _pids():
+            r = subprocess.run(["lsof", "-ti", f":{port}"],
+                               capture_output=True, text=True)
+            return [p.strip() for p in r.stdout.strip().splitlines()
+                    if p.strip().isdigit()]
+
+        def _free():
+            with _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM) as s:
+                s.settimeout(0.1)
+                return s.connect_ex(("127.0.0.1", port)) != 0
+
+        # Step 1 — SIGTERM
+        for pid in _pids():
+            subprocess.run(["kill", pid], capture_output=True)
+
+        # Step 2 — poll up to 4 s
+        for _ in range(20):
+            time.sleep(0.2)
+            if _free():
+                return
+
+        # Step 3 — escalate to SIGKILL
+        for pid in _pids():
+            subprocess.run(["kill", "-9", pid], capture_output=True)
+
+        # Final wait
+        for _ in range(10):
+            time.sleep(0.2)
+            if _free():
+                return
+
     except Exception:
         pass
 
 
 if __name__ == "__main__":
-    import time as _time
+    import signal as _signal, socket as _socket, time as _time
 
     parser = argparse.ArgumentParser(description="ValuationSuite web launcher")
     parser.add_argument("--port",       type=int,  default=5050, help="Port (default 5050)")
@@ -986,21 +1102,47 @@ if __name__ == "__main__":
     port = args.port
     url  = f"http://127.0.0.1:{port}"
 
-    if _port_open(port):
-        if _our_server_alive(url):
-            # ── Server already running (browser was closed but Flask wasn't) ──
-            # Just reopen the browser — no need to restart anything.
-            print(f"\n  ValuationSuite already running → {url}")
-            print("  Reopening browser…\n")
-            webbrowser.open(url)
-            sys.exit(0)
-        else:
-            # ── Something else is on this port — clear it and start fresh ─────
-            print(f"\n  Port {port} in use by another process — clearing…")
-            _kill_port(port)
+    # ── Already running? Just reopen the browser ─────────────────────────────
+    if _port_open(port) and _our_server_alive(url):
+        print(f"\n  ValuationSuite already running → {url}")
+        print("  Reopening browser…\n")
+        webbrowser.open(url)
+        sys.exit(0)
 
+    # ── Port busy with a dead/foreign process → clear it ─────────────────────
+    if _port_open(port):
+        print(f"\n  Port {port} is busy — clearing stale process…")
+        _kill_port(port)
+
+    # ── Find first free port (try up to +2 in case primary is slow to release) ─
+    chosen = None
+    for candidate in [port, port + 1, port + 2]:
+        if not _port_open(candidate):
+            chosen = candidate
+            break
+    if chosen is None:
+        print(f"\n  ERROR: Ports {port}–{port + 2} are all in use.\n"
+              "  Close other applications on those ports and try again.")
+        sys.exit(1)
+    port = chosen
+    url  = f"http://127.0.0.1:{port}"
+
+    # ── Clean SIGTERM handler (macOS Dock → Quit sends SIGTERM) ──────────────
+    def _on_sigterm(sig, frame):
+        print("\n  ValuationSuite — received stop signal, shutting down…")
+        sys.exit(0)
+    _signal.signal(_signal.SIGTERM, _on_sigterm)
+
+    # ── Clear stale yfinance cookie cache (prevents 401 Invalid Crumb) ───────
+    _refresh_yf_cookies()
+
+    # ── Open browser after server is ready ───────────────────────────────────
     if not args.no_browser:
-        threading.Timer(0.8, webbrowser.open, args=[url]).start()
+        threading.Timer(1.2, webbrowser.open, args=[url]).start()
 
     print(f"\n  ValuationSuite  →  {url}\n  Ctrl-C to quit\n")
-    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    try:
+        app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
+    except OSError as exc:
+        print(f"\n  ERROR: Could not bind to port {port}: {exc}")
+        sys.exit(1)

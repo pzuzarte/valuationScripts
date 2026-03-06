@@ -820,7 +820,7 @@ def _xbrl_annual_series(facts: dict, *concepts) -> list:
     return []
 
 def _fetch_prices(ticker: str, days: int) -> list:
-    """Fetch daily closes via Stooq. Returns [{date, close}, ...] oldest-first."""
+    """Fetch daily closes via Stooq with yfinance fallback. Returns [{date, close}, ...] oldest-first."""
     end_dt   = datetime.date.today()
     start_dt = end_dt - datetime.timedelta(days=int(days * 1.6) + 60)
     df, dt   = start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d")
@@ -828,7 +828,7 @@ def _fetch_prices(ticker: str, days: int) -> list:
     for sym in list(dict.fromkeys([t+".us", t+".ca", t+".uk", t+".de", t])):
         url = f"https://stooq.com/q/d/l/?s={sym}&d1={df}&d2={dt}&i=d"
         raw = _http_get(url)
-        if not raw or b"No data" in raw or len(raw) < 50:
+        if not raw or b"No data" in raw or b"Exceeded" in raw or len(raw) < 50:
             continue
         try:
             rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8", errors="replace"))))
@@ -842,7 +842,33 @@ def _fetch_prices(ticker: str, days: int) -> list:
             return pts[-days:]
         except Exception:
             continue
-    print(f"  [Stooq] All variants failed for '{ticker}'")
+
+    # ── yfinance fallback (Stooq rate-limited or unavailable) ────────────────
+    print(f"  [Stooq] All variants failed for '{ticker}' — trying yfinance…")
+    try:
+        import yfinance as yf
+        import math
+        cal_days = math.ceil(days * 1.6) + 60
+        hist = yf.Ticker(ticker).history(period=f"{cal_days}d")
+        if hist is not None and not hist.empty:
+            pts = []
+            for ts, row in hist.iterrows():
+                try:
+                    cl = float(row["Close"])
+                    dt_str = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+                    if cl > 0 and dt_str:
+                        pts.append({"date": dt_str, "close": cl})
+                except (ValueError, TypeError):
+                    continue
+            pts.sort(key=lambda x: x["date"])
+            pts = pts[-days:]
+            if len(pts) >= 10:
+                print(f"  [yfinance] {len(pts)} price points for '{ticker}'")
+                return pts
+    except Exception as e:
+        print(f"  [yfinance] price fallback error: {e}")
+
+    print(f"  [prices] No data available for '{ticker}'")
     return []
 
 def _fetch_fundamentals(ticker: str) -> list:
@@ -1363,11 +1389,18 @@ def plot_backtest(ticker: str, d: dict, benchmarks: dict,
                 facecolor=fig.get_facecolor())
     plt.close(fig)
     print(f"  Plot saved → {fpath}")
-    try:
-        import webbrowser
-        webbrowser.open(f"file://{fpath}")
-    except Exception:
-        pass
+    # When launched from ValuationSuite, _reader_thread detects the path above
+    # and opens the file — skip opening here to avoid duplicates.
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        try:
+            import platform, subprocess as _sp
+            if platform.system() == "Darwin":
+                _sp.Popen(["open", fpath])
+            else:
+                import webbrowser
+                webbrowser.open(f"file://{fpath}")
+        except Exception:
+            pass
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

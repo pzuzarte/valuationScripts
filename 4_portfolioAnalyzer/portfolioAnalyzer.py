@@ -4976,8 +4976,9 @@ def main():
     # Persist portfolio signals to ~/.valuation_suite/data.db (silent)
     _save_portfolio_signals(args.portfolio, stocks_data)
 
-    print("\nOpening report in browser...")
-    webbrowser.open("file://" + os.path.abspath(outfile))
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        print("\nOpening report in browser...")
+        webbrowser.open("file://" + os.path.abspath(outfile))
     print("\nDone.")
 
 

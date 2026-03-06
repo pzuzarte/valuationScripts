@@ -54,7 +54,7 @@ EXAMPLES
   python sp500_growth_screener.py --index RUT --top 200  # Russell 2000, top 200
 """
 
-import sys, math, datetime, webbrowser, os, csv
+import sys, math, datetime, webbrowser, os, csv, threading, logging as _logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -70,6 +70,76 @@ try:
     _YF_AVAIL = True
 except ImportError:
     _YF_AVAIL = False
+
+# ── yfinance 401 / Invalid Crumb recovery ─────────────────────────────────────
+# Yahoo Finance rotates its crumb token.  yfinance sets hide_exceptions=True by
+# default, meaning HTTPError is caught internally, printed via logger.error(),
+# and the property returns None — the exception never reaches our code.
+#
+# Fix: install a logging handler on the 'yfinance' logger that sets a
+# thread-local flag when it detects a 401 message.  _fetch_yf_data_gs checks
+# the flag after every batch of property accesses and retries with a fresh
+# session when needed.
+
+_yf_refresh_lock = threading.Lock()
+_yf_refresh_ts   = [0.0]   # last refresh timestamp — list for in-place mutation
+_yf_401_tls      = threading.local()  # per-thread detected flag
+
+def _is_yf_401_str(s: str) -> bool:
+    """Return True if string *s* indicates a Yahoo Finance 401 / auth error."""
+    return ("401" in s or "Invalid Crumb" in s
+            or ("Unauthorized" in s and "yahoo" in s.lower())
+            or "User is unable to access this feature" in s)
+
+class _YF401LogHandler(_logging.Handler):
+    """Logging handler that sets a thread-local flag on 401 log messages.
+
+    yfinance logs HTTP errors via utils.get_yf_logger().error() when
+    hide_exceptions=True (the default).  This handler intercepts those messages
+    so _fetch_yf_data_gs can detect and recover from 401s without needing the
+    exception to propagate.
+    """
+    def emit(self, record: _logging.LogRecord) -> None:
+        try:
+            if _is_yf_401_str(record.getMessage()):
+                _yf_401_tls.detected = True
+        except Exception:
+            pass
+
+def _yf_refresh_session() -> bool:
+    """Delete stale cookie cache and reset the YfData singleton.
+
+    Thread-safe with 30-second debounce so parallel worker threads don't all
+    hammer the refresh simultaneously — only the first thread does the work;
+    subsequent threads within the debounce window return False immediately.
+    Returns True if a refresh was performed, False if debounced.
+    """
+    import glob, time
+    with _yf_refresh_lock:
+        now = time.time()
+        if now - _yf_refresh_ts[0] < 30:
+            return False          # another thread just refreshed — skip
+        _yf_refresh_ts[0] = now
+
+        cache_dir = os.path.expanduser("~/Library/Caches/py-yfinance")
+        for f in glob.glob(os.path.join(cache_dir, "cookies.db*")):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        try:
+            from yfinance.data import YfData
+            yd = YfData()
+            yd._crumb  = None
+            yd._cookie = None
+        except Exception:
+            pass
+        print("  [yfinance] session refreshed after 401 Invalid Crumb — retrying…")
+        return True
+
+# Install the handler once at module load (no-op if yfinance not available)
+if _YF_AVAIL:
+    _logging.getLogger("yfinance").addHandler(_YF401LogHandler())
 
 # ── Optional: import point-in-time backtest engine from valuationMaster ───────
 # Used when --backtest flag is passed. Falls back to consensus ranking otherwise.
@@ -324,8 +394,6 @@ def fetch_stocks(index_code, limit=None):
         combined = combined.drop_duplicates(subset=["name"], keep="first")
         combined = combined.sort_values("market_cap_basic", ascending=False).reset_index(drop=True)
         combined["index_label"] = "S&P 500 + Russell 2000"
-        if limit:
-            combined = combined.head(limit).reset_index(drop=True)
         print(f"  S&P 500 + Russell 2000: {len(combined)} stocks")
         return combined
 
@@ -338,7 +406,7 @@ def fetch_stocks(index_code, limit=None):
     # ── Primary: isin filter on known constituents ────────────────────────────
     if tickers:
         try:
-            lim = limit or len(tickers) + 20   # slight buffer
+            lim = len(tickers) + 20   # always fetch full constituent list
             _, df = (
                 Query().select(*FIELDS)
                 .where(col("name").isin(tickers), col("is_primary") == True)
@@ -372,7 +440,7 @@ def fetch_stocks(index_code, limit=None):
 
     else:
         # US indexes — NYSE + NASDAQ, trim to requested size
-        cap = limit or (503 if index_code == "SPX" else 110 if index_code == "NDX" else 2000)
+        cap = (503 if index_code == "SPX" else 110 if index_code == "NDX" else 2000)
         for exch in ["NYSE", "NASDAQ"]:
             try:
                 _, df = (
@@ -1000,109 +1068,127 @@ def _fetch_yf_data_gs(ticker):
     Fetch key fundamentals from yfinance (no price history — not needed for
     consensus ranking).  Returns dict with keys: fcf, ebitda, revenue,
     total_debt, cash, gross_margin.  All values are None when unavailable.
+
+    Retries once automatically if Yahoo Finance returns 401 Invalid Crumb.
+    Detection uses the _YF401LogHandler installed on the 'yfinance' logger,
+    because yfinance sets hide_exceptions=True by default — it catches the
+    HTTPError internally, logs it, and returns None without re-raising.
     """
-    out = {"fcf": None, "ebitda": None,
-           "revenue": None, "fwd_rev": None, "total_debt": None, "cash": None,
-           "gross_margin": None, "fwd_eps": None}
-    try:
-        tk = yf.Ticker(ticker)
+    _EMPTY = lambda: {"fcf": None, "ebitda": None,
+                      "revenue": None, "fwd_rev": None, "total_debt": None,
+                      "cash": None, "gross_margin": None, "fwd_eps": None}
 
-        # ── Gross margin + forward EPS from info (single HTTP call) ──────────
-        try:
-            info = tk.info or {}
-            gm = info.get("grossMargins")
-            if gm is not None:
-                out["gross_margin"] = round(gm * 100, 2)  # fraction → percent
-            fwd_eps = info.get("forwardEps")
-            if fwd_eps is not None and fwd_eps > 0:
-                out["fwd_eps"] = float(fwd_eps)
-        except Exception:
-            pass
+    for _attempt in range(2):
+        out = _EMPTY()
+        _yf_401_tls.detected = False   # reset per-thread flag before this attempt
 
-        # ── Analyst NTM revenue estimate ──────────────────────────────────────
-        # Gives EV/NTM Rev the same analyst-consensus forward revenue that
-        # valuationMaster uses — critical for cyclical-recovery stocks (MU etc.)
         try:
-            rev_est = tk.revenue_estimate
-            if rev_est is not None and not rev_est.empty:
-                for row_label in ["+1y", "0y"]:
-                    if row_label in rev_est.index:
-                        avg = rev_est.loc[row_label, "avg"]
-                        if avg is not None and float(avg) > 0:
-                            out["fwd_rev"] = float(avg)
+            tk = yf.Ticker(ticker)
+
+            # ── Gross margin + forward EPS from info (single HTTP call) ──────────
+            try:
+                info = tk.info or {}
+                gm = info.get("grossMargins")
+                if gm is not None:
+                    out["gross_margin"] = round(gm * 100, 2)  # fraction → percent
+                fwd_eps = info.get("forwardEps")
+                if fwd_eps is not None and fwd_eps > 0:
+                    out["fwd_eps"] = float(fwd_eps)
+            except Exception:
+                pass
+
+            # ── Analyst NTM revenue estimate ──────────────────────────────────────
+            # Gives EV/NTM Rev the same analyst-consensus forward revenue that
+            # valuationMaster uses — critical for cyclical-recovery stocks (MU etc.)
+            try:
+                rev_est = tk.revenue_estimate
+                if rev_est is not None and not rev_est.empty:
+                    for row_label in ["+1y", "0y"]:
+                        if row_label in rev_est.index:
+                            avg = rev_est.loc[row_label, "avg"]
+                            if avg is not None and float(avg) > 0:
+                                out["fwd_rev"] = float(avg)
+                                break
+            except Exception:
+                pass
+
+            # ── FCF from annual cashflow statement ────────────────────────────────
+            try:
+                cf = tk.cashflow
+                if cf is not None and not cf.empty:
+                    for name in ["Free Cash Flow", "FreeCashFlow"]:
+                        if name in cf.index:
+                            v = cf.loc[name].dropna()
+                            if len(v):
+                                out["fcf"] = float(v.iloc[0])
                             break
-        except Exception:
-            pass
+                    if out["fcf"] is None:
+                        # Derive: Operating CF + CapEx (CapEx stored as negative)
+                        ocf = capex = None
+                        for n in ["Operating Cash Flow",
+                                  "Cash Flow From Continuing Operating Activities"]:
+                            if n in cf.index:
+                                v = cf.loc[n].dropna()
+                                ocf = float(v.iloc[0]) if len(v) else None
+                                break
+                        for n in ["Capital Expenditure",
+                                  "Purchase Of Property Plant And Equipment"]:
+                            if n in cf.index:
+                                v = cf.loc[n].dropna()
+                                capex = float(v.iloc[0]) if len(v) else None
+                                break
+                        if ocf is not None and capex is not None:
+                            out["fcf"] = ocf + capex   # capex is negative → FCF
+            except Exception:
+                pass
 
-        # ── FCF from annual cashflow statement ────────────────────────────────
-        try:
-            cf = tk.cashflow
-            if cf is not None and not cf.empty:
-                for name in ["Free Cash Flow", "FreeCashFlow"]:
-                    if name in cf.index:
-                        v = cf.loc[name].dropna()
-                        if len(v):
-                            out["fcf"] = float(v.iloc[0])
-                        break
-                if out["fcf"] is None:
-                    # Derive: Operating CF + CapEx (CapEx stored as negative)
-                    ocf = capex = None
-                    for n in ["Operating Cash Flow",
-                              "Cash Flow From Continuing Operating Activities"]:
-                        if n in cf.index:
-                            v = cf.loc[n].dropna()
-                            ocf = float(v.iloc[0]) if len(v) else None
+            # ── Revenue + EBITDA from annual income statement ─────────────────────
+            try:
+                inc = tk.income_stmt
+                if inc is not None and not inc.empty:
+                    for n in ["Total Revenue", "Revenue", "Net Revenue"]:
+                        if n in inc.index:
+                            v = inc.loc[n].dropna()
+                            out["revenue"] = float(v.iloc[0]) if len(v) else None
                             break
-                    for n in ["Capital Expenditure",
-                              "Purchase Of Property Plant And Equipment"]:
-                        if n in cf.index:
-                            v = cf.loc[n].dropna()
-                            capex = float(v.iloc[0]) if len(v) else None
+                    for n in ["EBITDA", "Normalized EBITDA"]:
+                        if n in inc.index:
+                            v = inc.loc[n].dropna()
+                            out["ebitda"] = float(v.iloc[0]) if len(v) else None
                             break
-                    if ocf is not None and capex is not None:
-                        out["fcf"] = ocf + capex   # capex is negative → FCF
+            except Exception:
+                pass
+
+            # ── Debt + cash from balance sheet ────────────────────────────────────
+            try:
+                bs = tk.balance_sheet
+                if bs is not None and not bs.empty:
+                    for n in ["Total Debt",
+                              "Long Term Debt And Capital Lease Obligation",
+                              "Long Term Debt"]:
+                        if n in bs.index:
+                            v = bs.loc[n].dropna()
+                            out["total_debt"] = float(v.iloc[0]) if len(v) else None
+                            break
+                    for n in ["Cash And Cash Equivalents",
+                              "Cash Cash Equivalents And Short Term Investments"]:
+                        if n in bs.index:
+                            v = bs.loc[n].dropna()
+                            out["cash"] = float(v.iloc[0]) if len(v) else None
+                            break
+            except Exception:
+                pass
+
         except Exception:
             pass
 
-        # ── Revenue + EBITDA from annual income statement ─────────────────────
-        try:
-            inc = tk.income_stmt
-            if inc is not None and not inc.empty:
-                for n in ["Total Revenue", "Revenue", "Net Revenue"]:
-                    if n in inc.index:
-                        v = inc.loc[n].dropna()
-                        out["revenue"] = float(v.iloc[0]) if len(v) else None
-                        break
-                for n in ["EBITDA", "Normalized EBITDA"]:
-                    if n in inc.index:
-                        v = inc.loc[n].dropna()
-                        out["ebitda"] = float(v.iloc[0]) if len(v) else None
-                        break
-        except Exception:
-            pass
-
-        # ── Debt + cash from balance sheet ────────────────────────────────────
-        try:
-            bs = tk.balance_sheet
-            if bs is not None and not bs.empty:
-                for n in ["Total Debt",
-                          "Long Term Debt And Capital Lease Obligation",
-                          "Long Term Debt"]:
-                    if n in bs.index:
-                        v = bs.loc[n].dropna()
-                        out["total_debt"] = float(v.iloc[0]) if len(v) else None
-                        break
-                for n in ["Cash And Cash Equivalents",
-                          "Cash Cash Equivalents And Short Term Investments"]:
-                    if n in bs.index:
-                        v = bs.loc[n].dropna()
-                        out["cash"] = float(v.iloc[0]) if len(v) else None
-                        break
-        except Exception:
-            pass
-
-    except Exception:
-        pass
+        # ── Retry once on 401 after refreshing the session ───────────────────
+        # _yf_401_tls.detected is set by _YF401LogHandler when yfinance logs
+        # an "HTTP Error 401 / Invalid Crumb" message (hide_exceptions=True path).
+        if getattr(_yf_401_tls, "detected", False) and _attempt == 0:
+            _yf_refresh_session()   # thread-safe, debounced — only one thread refreshes
+            continue                # second attempt with fresh cookie
+        break                       # success (or non-401 error) — exit loop
 
     return out
 
@@ -2738,7 +2824,7 @@ def main():
     print("="*60)
 
     print("\n[1/3] Fetching stocks...")
-    df = fetch_stocks(index_code, limit)
+    df = fetch_stocks(index_code)
 
     print("\n[2/3] Scoring stocks...")
     results, skipped = [], 0
@@ -2764,8 +2850,13 @@ def main():
         if stocks:
             print(f"    {name.ljust(25)} {str(len(stocks)).rjust(3)}  {'█'*min(len(stocks),50)}")
 
+    results.sort(key=lambda x: -x["growth_score"])
+    if limit:
+        results = results[:limit]
+        print(f"\n  Trimmed to top {limit} by growth score ({len(results)} stocks in report).")
+
     print("\n  Top 15 by Growth Score:")
-    top15 = sorted(results, key=lambda x: -x["growth_score"])[:15]
+    top15 = results[:15]
     for i, r in enumerate(top15, 1):
         flags = f" [{','.join(r['flags'])}]" if r["flags"] else ""
         eps_src = r.get('eps_source','?')[:8]
@@ -2779,7 +2870,7 @@ def main():
     # ── Top-3 column: PIT backtest or fast consensus ─────────────────────────
     # Step 1 (both modes): fetch yfinance fundamentals to improve method accuracy
     if _YF_AVAIL:
-        print("\n[2b/3] Fetching yfinance fundamentals for valuation inputs...")
+        print("\n  Enriching valuations with yfinance fundamentals (FCF, revenue, margins)...")
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = {pool.submit(_fetch_yf_data_gs, r["ticker"]): r["ticker"]
                        for r in results}
@@ -2800,9 +2891,12 @@ def main():
 
     if use_pit_backtest and _BT_ENGINE_AVAIL:
         # ── Point-in-time MAPE backtest (same engine as valuationMaster) ─────
-        n = len(results)
+        # Only backtest the top N stocks by growth score — expensive per ticker.
+        # limit controls both the initial fetch (--top) and the backtest scope.
+        bt_results = results   # already sorted and trimmed to top N by growth score
+        n = len(bt_results)
         est_min = round(n * 14 / 5 / 60, 1)   # ~14s/stock, 5 workers
-        print(f"\n[2c/3] Running point-in-time backtest on {n} stocks "
+        print(f"\n[3/4] Running point-in-time backtest on top {n} stocks "
               f"({backtest_days} days, est. ~{est_min} min with 5 workers)...")
         print("  Uses Stooq prices + SEC EDGAR + yfinance quarterly TTM")
         # 5 workers: EDGAR rate-limits at 10 req/s; 5 parallel is safe
@@ -2811,7 +2905,7 @@ def main():
                 yf_data = bars_map.get(r["ticker"], {})
                 vm = _build_vm_dict(r, yf_data)
                 return r["ticker"], _run_pit_backtest_gs(r["ticker"], vm, days=backtest_days)
-            pit_futures = {pool.submit(_pit_task, r): r["ticker"] for r in results}
+            pit_futures = {pool.submit(_pit_task, r): r["ticker"] for r in bt_results}
             pit_map = {}
             done = 0
             for fut in as_completed(pit_futures):
@@ -2822,8 +2916,8 @@ def main():
                     pit_map[tk] = res
                 except Exception:
                     pit_map[tk] = (None, [])
-                if done % 5 == 0 or done == len(results):
-                    print(f"  [{done}/{len(results)}] done...", end="\r")
+                if done % 5 == 0 or done == n:
+                    print(f"  [{done}/{n}] done...", end="\r")
         print()  # newline after progress
         for r in results:
             mean_fv, methods = pit_map.get(r["ticker"], (None, []))
@@ -2868,7 +2962,8 @@ def main():
         best3_tooltip = "yfinance not available — column disabled."
 
     # ── Sentiment fetch ───────────────────────────────────────────────────────
-    print("\n[3/3] Building report...")
+    _report_step = "[4/4]" if (use_pit_backtest and _BT_ENGINE_AVAIL) else "[3/3]"
+    print(f"\n{_report_step} Building report...")
     ts = datetime.datetime.now().strftime("%b %d, %Y  %H:%M")
     html = build_html(results, ts, len(results), index_name,
                       best3_label=best3_label, best3_tooltip=best3_tooltip)
@@ -2886,7 +2981,8 @@ def main():
         write_csv(results, out_csv)
         print(f"  CSV saved:  {out_csv}")
 
-    webbrowser.open("file://" + os.path.abspath(out))
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        webbrowser.open("file://" + os.path.abspath(out))
     print(f"\nDone. ({len(results)} stocks scored)")
     print("="*60)
 
