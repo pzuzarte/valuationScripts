@@ -587,8 +587,9 @@ def main():
             f.write(html)
 
         print("  Saved: {}".format(outfile))
-        print("\nOpening report in browser...")
-        webbrowser.open("file://" + os.path.abspath(outfile))
+        if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+            print("\nOpening report in browser...")
+            webbrowser.open("file://" + os.path.abspath(outfile))
 
     print("\nDone.")
 

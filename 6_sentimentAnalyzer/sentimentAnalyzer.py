@@ -3301,8 +3301,9 @@ def main():
 
     size_kb = os.path.getsize(outfile) / 1024
     print(f"\n  ✓  Report saved → {outfile}  ({size_kb:.0f} KB)")
-    print(f"  Opening in browser...\n")
-    webbrowser.open(f"file://{os.path.abspath(outfile)}")
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        print(f"  Opening in browser...\n")
+        webbrowser.open(f"file://{os.path.abspath(outfile)}")
 
 
 if __name__ == "__main__":
