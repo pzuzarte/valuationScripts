@@ -211,7 +211,8 @@ def _reader_thread(run_id: str) -> None:
     proc        = run["proc"]
     q           = run["q"]
     cwd         = run.get("cwd") or ""
-    output_path = None   # last matched output file seen in the script's stdout
+    output_path    = None   # last matched output file seen in the script's stdout
+    _last_candidate = None  # last resolved candidate path (for post-wait re-check)
 
     try:
         for line in iter(proc.stdout.readline, ""):
@@ -225,6 +226,7 @@ def _reader_thread(run_id: str) -> None:
                 if not os.path.isabs(candidate) and cwd:
                     candidate = os.path.join(cwd, candidate)
                 candidate = os.path.abspath(candidate)
+                _last_candidate = candidate   # remember even if file not yet visible
                 if os.path.isfile(candidate):
                     output_path = candidate
 
@@ -235,6 +237,13 @@ def _reader_thread(run_id: str) -> None:
         q.put(f"\n{sep}\n")
         q.put("  ✓  Completed (exit 0)\n" if rc == 0 else f"  ✗  Exited with code {rc}\n")
         q.put(f"{sep}\n")
+
+        # Re-check the candidate path now that the process has fully exited and
+        # all file writes are guaranteed flushed.  Handles the rare case where
+        # os.path.isfile() returned False during the streaming loop (e.g. a brief
+        # filesystem flush delay right after plt.savefig()).
+        if _last_candidate and not output_path and os.path.isfile(_last_candidate):
+            output_path = _last_candidate
 
         # Open the output file from the Flask process — has reliable macOS Aqua access.
         # Scripts' own webbrowser.open() calls fail silently when run as subprocesses
@@ -321,7 +330,14 @@ def api_run():
     run_id = uuid.uuid4().hex[:8]
     # Pass VALUATION_SUITE_LAUNCHED so scripts skip their own webbrowser.open()
     # calls — _reader_thread is the single place that opens output files.
-    child_env = {**os.environ, "VALUATION_SUITE_LAUNCHED": "1"}
+    # MPLBACKEND=Agg forces matplotlib to use the file-only Agg backend for any
+    # subprocess that generates plots.  Without this, macOS defaults to the
+    # MacOSX interactive backend, which requires a window-server connection that
+    # start_new_session=True subprocesses don't have — plt.savefig() silently
+    # produces nothing.  Setting it here is more reliable than calling
+    # matplotlib.use("Agg") inside the script because it takes effect before
+    # any import can touch the backend.
+    child_env = {**os.environ, "VALUATION_SUITE_LAUNCHED": "1", "MPLBACKEND": "Agg"}
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd,

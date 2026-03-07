@@ -54,8 +54,8 @@ EXAMPLES
   python sp500_growth_screener.py --index RUT --top 200  # Russell 2000, top 200
 """
 
-import sys, math, datetime, webbrowser, os, csv, threading, logging as _logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys, math, datetime, webbrowser, os, csv, threading, logging as _logging, json as _json, time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as _cf_wait, FIRST_COMPLETED as _CF_FIRST
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
@@ -141,6 +141,39 @@ def _yf_refresh_session() -> bool:
 if _YF_AVAIL:
     _logging.getLogger("yfinance").addHandler(_YF401LogHandler())
 
+# ── yfinance disk cache (24-hour TTL) ─────────────────────────────────────────
+# Saves per-ticker fundamentals to .yf_cache.json so repeat runs within a day
+# skip all yfinance HTTP calls for already-fetched tickers.
+_YF_CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yf_cache.json")
+_YF_CACHE_TTL  = 24 * 3600          # seconds — refresh after 24 hours
+_yf_cache: dict = {}                 # populated by _load_yf_cache() at run time
+_yf_cache_lock  = threading.Lock()  # guards writes from concurrent worker threads
+
+def _load_yf_cache() -> None:
+    """Load cache from disk, discarding entries older than TTL."""
+    global _yf_cache
+    try:
+        if os.path.exists(_YF_CACHE_FILE):
+            with open(_YF_CACHE_FILE) as _f:
+                raw = _json.load(_f)
+            now = _time.time()
+            _yf_cache = {k: v for k, v in raw.items()
+                         if now - v.get("_ts", 0) < _YF_CACHE_TTL}
+            if _yf_cache:
+                print(f"  [cache] loaded {len(_yf_cache)} cached yfinance entries "
+                      f"(TTL {_YF_CACHE_TTL//3600}h)")
+    except Exception:
+        _yf_cache = {}
+
+def _save_yf_cache() -> None:
+    """Persist the in-memory cache to disk (best-effort)."""
+    try:
+        with _yf_cache_lock:
+            with open(_YF_CACHE_FILE, "w") as _f:
+                _json.dump(_yf_cache, _f)
+    except Exception:
+        pass
+
 # ── Optional: import point-in-time backtest engine from valuationMaster ───────
 # Used when --backtest flag is passed. Falls back to consensus ranking otherwise.
 try:
@@ -171,7 +204,6 @@ from valuation_models import (
     calc_growth_momentum_score,
     calc_momentum_score,
     calc_valuation_score,
-    calc_growth_score,
     derive_sentiment,
     derive_accumulation,
     run_scurve_tam,
@@ -439,21 +471,28 @@ def fetch_stocks(index_code, limit=None):
             print(f"  TSX country filter failed: {str(e)[:60]}")
 
     else:
-        # US indexes — NYSE + NASDAQ, trim to requested size
+        # US indexes — NYSE + NASDAQ queried in parallel to halve fetch time
         cap = (503 if index_code == "SPX" else 110 if index_code == "NDX" else 2000)
-        for exch in ["NYSE", "NASDAQ"]:
-            try:
-                _, df = (
-                    Query().select(*FIELDS)
-                    .where(col("exchange") == exch, col("is_primary") == True,
-                           col("typespecs").has_none_of("preferred"))
-                    .order_by("market_cap_basic", ascending=False)
-                    .limit(1500).get_scanner_data()
-                )
-                frames.append(df)
-                print(f"    {exch}: {len(df)} stocks")
-            except Exception as e:
-                print(f"    {exch} failed: {str(e)[:60]}")
+        def _query_exchange(exch):
+            _, df = (
+                Query().select(*FIELDS)
+                .where(col("exchange") == exch, col("is_primary") == True,
+                       col("typespecs").has_none_of("preferred"))
+                .order_by("market_cap_basic", ascending=False)
+                .limit(1500).get_scanner_data()
+            )
+            return exch, df
+        with ThreadPoolExecutor(max_workers=2) as _tv_pool:
+            _tv_futs = {_tv_pool.submit(_query_exchange, exch): exch
+                        for exch in ["NYSE", "NASDAQ"]}
+            for _tv_fut in as_completed(_tv_futs):
+                try:
+                    exch, df = _tv_fut.result()
+                    frames.append(df)
+                    print(f"    {exch}: {len(df)} stocks")
+                except Exception as e:
+                    exch = _tv_futs[_tv_fut]
+                    print(f"    {exch} failed: {str(e)[:60]}")
 
         if frames:
             combined = pd.concat([f.reset_index(drop=True) for f in frames], ignore_index=True)
@@ -891,6 +930,18 @@ def score_stock(d):
     bear_composite = sum(p * w for p, w in bear_parts) / sum(w for _, w in bear_parts) if bear_parts else composite * 0.80
     bull_composite = sum(p * w for p, w in bull_parts) / sum(w for _, w in bull_parts) if bull_parts else composite * 1.20
 
+    # ── Sanity cap — prevent growth-multiple inflation or bad input data from
+    # producing targets that are disconnected from current price.
+    # A 12-month bull target above 3× current price has no historical precedent
+    # except in binary biotech events; cap here keeps the column interpretable.
+    _MAX_BASE_MULT = 2.5
+    _MAX_BULL_MULT = 3.0
+    _MAX_BEAR_MULT = 2.0
+    if price > 0:
+        composite      = min(composite,      price * _MAX_BASE_MULT)
+        bear_composite = min(bear_composite, price * _MAX_BEAR_MULT)
+        bull_composite = min(bull_composite, price * _MAX_BULL_MULT)
+
     upside_pct = (composite - price) / price * 100
 
     # ── Sentiment (derived from TV data already in d)
@@ -913,13 +964,14 @@ def score_stock(d):
         if lo <= upside_pct < hi:
             tier_name = name; break
 
-    # ── Growth Score
-    growth_score = calc_growth_score(d, composite, flags)
-    # Sub-scores for display
+    # ── Growth Score — compute sub-scores once and reuse for display
+    # (calc_growth_score internally calls these four functions, so calling both
+    # would double-compute every pillar; inline the formula instead)
     _q  = calc_quality_score(d)
     _gm = calc_growth_momentum_score(d)
     _t  = calc_momentum_score(d)
     _v  = calc_valuation_score(d, composite)
+    growth_score = max(0.0, min(100.0, round(_q + _gm + _t + _v - len(flags) * 4, 1)))
 
     # Momentum score for display (same as _t, no need to call again)
     momentum_score = round(_t, 1)
@@ -1054,6 +1106,7 @@ def _build_vm_dict(r, yf_data=None):
         "gross_margin":  gross_margin,
         "est_growth":    est_growth,
         "ev_approx":     mktcap + net_debt,
+        "analyst_target": r.get("analyst_target"),
         "ticker":        r.get("ticker", ""),
         "wacc_raw":      {"beta_yf": None, "interest_expense": None,
                           "income_tax_expense": None, "pretax_income": None,
@@ -1077,6 +1130,12 @@ def _fetch_yf_data_gs(ticker):
     _EMPTY = lambda: {"fcf": None, "ebitda": None,
                       "revenue": None, "fwd_rev": None, "total_debt": None,
                       "cash": None, "gross_margin": None, "fwd_eps": None}
+
+    # ── Cache hit — skip all HTTP calls ──────────────────────────────────────
+    # No lock needed: dict.get() is GIL-protected and safe from any thread
+    _cached = _yf_cache.get(ticker)
+    if _cached is not None:
+        return {k: v for k, v in _cached.items() if k != "_ts"}
 
     for _attempt in range(2):
         out = _EMPTY()
@@ -1190,6 +1249,11 @@ def _fetch_yf_data_gs(ticker):
             continue                # second attempt with fresh cookie
         break                       # success (or non-401 error) — exit loop
 
+    # ── Write to cache if we got at least one useful value ────────────────────
+    if any(out.get(k) is not None for k in ("fcf", "revenue", "gross_margin")):
+        with _yf_cache_lock:
+            _yf_cache[ticker] = {**out, "_ts": _time.time()}
+
     return out
 
 
@@ -1278,10 +1342,17 @@ def _run_gs_valuations(vm):
     try: _s("Graham",     run_graham_number(vm))
     except Exception: pass
 
+    # Analyst consensus target — professional anchor to prevent outlier inflation
+    try:
+        at = vm.get("analyst_target")
+        if at and float(at) > 0:
+            fvs["Analyst Target"] = float(at)
+    except Exception: pass
+
     return fvs
 
 
-def _consensus_top3_gs(fvs):
+def _consensus_top3_gs(fvs, price=None):
     """
     Consensus-based method selection: pick the 3 methods whose fair values
     are closest to the ensemble median.  Methods that agree with the majority
@@ -1292,8 +1363,18 @@ def _consensus_top3_gs(fvs):
     RIM, Rule of 40 all cluster near the median; outlier methods (Fwd PEG,
     S-Curve TAM) are excluded unless the ensemble is pulled that way.
 
+    price (optional): current stock price.  When supplied, fair values outside
+    0.25×–4× current price are trimmed before computing the median, preventing
+    growth-adjusted multiples from anchoring the consensus too high.
+
     Returns (mean_fv, [method_names]).
     """
+    if not fvs:
+        return None, []
+    # Trim extreme outliers relative to current price
+    if price and price > 0:
+        fvs = {m: v for m, v in fvs.items()
+               if 0.25 * price <= v <= 4.0 * price}
     if not fvs:
         return None, []
     vals = sorted(fvs.values())
@@ -1321,17 +1402,15 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
     Requires _BT_ENGINE_AVAIL = True (valuationMaster importable).
     """
     # ── 1. Price history ─────────────────────────────────────────────────────
-    # Primary: Stooq (same source as valuationMaster backtest)
-    # Fallback: yfinance — used when Stooq hits its daily request cap
+    # Primary: yfinance — covers all US-listed tickers including RUT small-caps.
+    #   Stooq probes multiple symbol variants sequentially and each variant can
+    #   block for 15-20 s when the ticker isn't indexed there, consuming the
+    #   entire per-ticker budget before returning.  yfinance is faster and has
+    #   better coverage for the indices growthScreener targets.
+    # Fallback: Stooq — used only when yfinance returns insufficient history.
     prices = []
-    try:
-        prices = _bt_fetch_prices(ticker, days)
-    except Exception as e:
-        print(f"  [PIT:{ticker}] Stooq error: {e}")
-
-    if len(prices) < 10 and _YF_AVAIL:
+    if _YF_AVAIL:
         try:
-            import math
             cal_days = math.ceil(days * 1.6) + 60
             hist = yf.Ticker(ticker).history(period=f"{cal_days}d")
             if hist is not None and not hist.empty:
@@ -1348,13 +1427,19 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
                 yf_prices = yf_prices[-days:]
                 if len(yf_prices) >= 10:
                     prices = yf_prices
-                    print(f"  [yfinance] {len(prices)} price pts for '{ticker}' (Stooq rate-limited)")
+                    print(f"  [yfinance] Got {len(prices)} price points for '{ticker}'")
         except Exception as e:
-            print(f"  [PIT:{ticker}] yfinance price fallback error: {e}")
+            print(f"  [PIT:{ticker}] yfinance price error: {e}")
+
+    if len(prices) < 10:
+        try:
+            prices = _bt_fetch_prices(ticker, days) or []
+        except Exception as e:
+            print(f"  [PIT:{ticker}] Stooq fallback error: {e}")
 
     if len(prices) < 10:
         print(f"  [PIT:{ticker}] insufficient price data ({len(prices)} points) — skipping")
-        return None, []
+        return None, [], []
 
     # ── 2. Fundamentals ──────────────────────────────────────────────────────
     try:
@@ -1370,7 +1455,7 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
 
     if not q_snaps and not a_snaps:
         print(f"  [PIT:{ticker}] no fundamental snapshots available — skipping")
-        return None, []
+        return None, [], []
 
     # Merge: quarterly preferred on same date (more accurate TTM)
     snap_dict = {}
@@ -1402,7 +1487,7 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
 
     if not time_series:
         print(f"  [PIT:{ticker}] no trading days overlapped with filed snapshots — skipping")
-        return None, []
+        return None, [], []
 
     print(f"  [PIT:{ticker}] {len(time_series)} days × {len(fv_cache)} snapshots "
           f"(q={len(q_snaps)}, a={len(a_snaps)})")
@@ -1421,7 +1506,7 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
 
     if not method_mapes:
         print(f"  [PIT:{ticker}] no methods produced enough valid days — skipping")
-        return None, []
+        return None, [], []
 
     # ── 5. Top-3 by lowest MAPE ───────────────────────────────────────────────
     top3 = sorted(method_mapes.items(), key=lambda x: x[1])[:3]
@@ -1453,19 +1538,21 @@ def _run_pit_backtest_gs(ticker, vm_dict, days=500):
         current_fvs = _bt_run_methods(d_current, bm)
     except Exception as e:
         print(f"  [PIT:{ticker}] current FV computation error: {e}")
-        return None, []
+        return None, [], []
 
     top3_vals = [current_fvs[m] for m in top3_names
                  if current_fvs.get(m) and current_fvs[m] > 0]
     if not top3_vals:
         print(f"  [PIT:{ticker}] top-3 methods produced no current FV — skipping")
-        return None, []
+        return None, [], []
 
     g_used = d_current.get("est_growth", "?")
     indiv  = {m: round(current_fvs[m], 2) for m in top3_names if current_fvs.get(m)}
     print(f"  [PIT:{ticker}] top-3: {top3_names} g={g_used:.2%} "
           f"fvs={indiv} → ${sum(top3_vals)/len(top3_vals):,.2f}")
-    return sum(top3_vals) / len(top3_vals), top3_names[:len(top3_vals)]
+    # Return mean, method names, AND individual values so the caller can derive
+    # bear/base/bull from min/mean/max of the historically-accurate methods.
+    return sum(top3_vals) / len(top3_vals), top3_names[:len(top3_vals)], top3_vals
 
 
 # ── FORMAT HELPERS ────────────────────────────────────────────────────────────
@@ -2834,7 +2921,7 @@ def main():
             r = score_stock(d)
             if r: results.append(r)
             else: skipped += 1
-        except Exception as e:
+        except Exception:
             skipped += 1
 
     print(f"  Scored: {len(results)} | Skipped: {skipped}")
@@ -2870,8 +2957,9 @@ def main():
     # ── Top-3 column: PIT backtest or fast consensus ─────────────────────────
     # Step 1 (both modes): fetch yfinance fundamentals to improve method accuracy
     if _YF_AVAIL:
+        _load_yf_cache()   # warm in-memory cache from disk before spawning workers
         print("\n  Enriching valuations with yfinance fundamentals (FCF, revenue, margins)...")
-        with ThreadPoolExecutor(max_workers=10) as pool:
+        with ThreadPoolExecutor(max_workers=20) as pool:
             futures = {pool.submit(_fetch_yf_data_gs, r["ticker"]): r["ticker"]
                        for r in results}
             bars_map = {}
@@ -2882,6 +2970,7 @@ def main():
                                          "revenue": None, "total_debt": None,
                                          "cash": None, "gross_margin": None,
                                          "fwd_eps": None}
+        _save_yf_cache()   # persist any newly-fetched entries for next run
         n_fetched = sum(1 for v in bars_map.values()
                         if any(v.get(k) is not None
                                for k in ("fcf", "revenue", "gross_margin")))
@@ -2898,7 +2987,7 @@ def main():
         est_min = round(n * 14 / 5 / 60, 1)   # ~14s/stock, 5 workers
         print(f"\n[3/4] Running point-in-time backtest on top {n} stocks "
               f"({backtest_days} days, est. ~{est_min} min with 5 workers)...")
-        print("  Uses Stooq prices + SEC EDGAR + yfinance quarterly TTM")
+        print("  Uses yfinance prices + SEC EDGAR + yfinance quarterly TTM")
         # 5 workers: EDGAR rate-limits at 10 req/s; 5 parallel is safe
         with ThreadPoolExecutor(max_workers=5) as pool:
             def _pit_task(r):
@@ -2908,26 +2997,73 @@ def main():
             pit_futures = {pool.submit(_pit_task, r): r["ticker"] for r in bt_results}
             pit_map = {}
             done = 0
-            for fut in as_completed(pit_futures):
-                tk = pit_futures[fut]
-                done += 1
-                try:
-                    _, res = fut.result()
-                    pit_map[tk] = res
-                except Exception:
-                    pit_map[tk] = (None, [])
-                if done % 5 == 0 or done == n:
-                    print(f"  [{done}/{n}] done...", end="\r")
+            # Per-ticker running timeout — each future gets _PIT_PER_TICKER_SEC
+            # seconds from the moment its worker thread actually STARTS RUNNING.
+            # We poll every 30 s so the UI stays responsive and stuck workers are
+            # evicted quickly instead of blocking until a global deadline.
+            _PIT_PER_TICKER_SEC = 90  # ~enough for Stooq + EDGAR + yfinance quarterly
+            _pit_run_since: dict = {}  # fut → timestamp when first seen as running
+            pending = set(pit_futures.keys())
+            while pending:
+                done_set, _ = _cf_wait(pending, timeout=30, return_when=_CF_FIRST)
+                pending -= done_set
+                for fut in done_set:
+                    tk = pit_futures[fut]
+                    done += 1
+                    try:
+                        _, res = fut.result()
+                        pit_map[tk] = res
+                    except Exception:
+                        pit_map[tk] = (None, [], [])
+                    if done % 5 == 0 or done == n:
+                        print(f"  [{done}/{n}] done...", end="\r")
+                # Evict futures that have been RUNNING (not just queued) too long
+                now = _time.time()
+                to_expire = []
+                for fut in list(pending):
+                    if fut.running():
+                        if fut not in _pit_run_since:
+                            _pit_run_since[fut] = now
+                        elif now - _pit_run_since[fut] > _PIT_PER_TICKER_SEC:
+                            to_expire.append(fut)
+                for fut in to_expire:
+                    pending.discard(fut)
+                    tk = pit_futures[fut]
+                    done += 1
+                    print(f"\n  [{done}/{n}] {tk}: timed out — skipping")
+                    pit_map[tk] = (None, [], [])
         print()  # newline after progress
         for r in results:
-            mean_fv, methods = pit_map.get(r["ticker"], (None, []))
+            mean_fv, methods, indiv_vals = pit_map.get(r["ticker"], (None, [], []))
             r["best3_mean"]    = mean_fv
             r["best3_methods"] = methods
             r["best3_upside"]  = ((mean_fv - r["price"]) / r["price"] * 100
                                   if mean_fv and r["price"] else None)
+            # Replace bear/base/bull with backtest-derived values:
+            #   BEAR = min of top-3 method values (most conservative)
+            #   BASE = mean of top-3 method values
+            #   BULL = max of top-3 method values (most optimistic)
+            # The spread is the natural disagreement between historically-
+            # accurate methods rather than a synthetic ±20% haircut.
+            #
+            # Price-relative cap (same limits as non-backtest path): prevents
+            # methods like ERG/TAM from inflating bear/base/bull when the most
+            # recent snapshot has an anomalous blowout quarter. The MAPE ranking
+            # itself is unaffected — only the display values are bounded.
+            if indiv_vals and r.get("price"):
+                price = r["price"]
+                capped = [min(v, price * 3.0) for v in indiv_vals]
+                capped_mean = sum(capped) / len(capped)
+                r["target_bear"]  = round(min(capped), 2)
+                r["target_base"]  = round(capped_mean, 2)
+                r["target_bull"]  = round(max(capped), 2)
+                r["upside_pct"]   = round((capped_mean - price) / price * 100, 1)
+                # Keep BACKTEST TOP-3 column consistent with base target
+                r["best3_mean"]   = round(capped_mean, 2)
+                r["best3_upside"] = r["upside_pct"]
         best3_label = "BACKTEST TOP-3"
         best3_tooltip = ("Top-3 valuation methods by point-in-time MAPE backtest — "
-                         "same engine as valuationMaster (Stooq prices, SEC EDGAR + "
+                         "same engine as valuationMaster (yfinance prices, SEC EDGAR + "
                          "yfinance quarterly fundamentals). Methods and fair values "
                          "match what valuationMaster would show for these stocks.")
 
@@ -2939,7 +3075,7 @@ def main():
             vm  = _build_vm_dict(r, yf_data)
             fvs = _run_gs_valuations(vm)
             if fvs:
-                mean_fv, methods = _consensus_top3_gs(fvs)
+                mean_fv, methods = _consensus_top3_gs(fvs, price=r.get("price"))
                 r["best3_mean"]    = mean_fv
                 r["best3_methods"] = methods
                 r["best3_upside"]  = ((mean_fv - r["price"]) / r["price"] * 100
@@ -2965,14 +3101,17 @@ def main():
     _report_step = "[4/4]" if (use_pit_backtest and _BT_ENGINE_AVAIL) else "[3/3]"
     print(f"\n{_report_step} Building report...")
     ts = datetime.datetime.now().strftime("%b %d, %Y  %H:%M")
+    if use_pit_backtest and _BT_ENGINE_AVAIL:
+        ts += f" · Backtest {backtest_days}d"
     html = build_html(results, ts, len(results), index_name,
                       best3_label=best3_label, best3_tooltip=best3_tooltip)
 
     index_slug = index_code.lower()  # e.g. "spx", "ndx", "tsx"
     date_str   = datetime.datetime.now().strftime("%Y_%m_%d")
+    bt_suffix  = f"_bt{backtest_days}d" if (use_pit_backtest and _BT_ENGINE_AVAIL) else ""
     os.makedirs("growthData", exist_ok=True)
-    out     = os.path.join("growthData", f"{date_str}_growth_report_{index_slug}.html")
-    out_csv = os.path.join("growthData", f"{date_str}_growth_report_{index_slug}.csv")
+    out     = os.path.join("growthData", f"{date_str}_growth_report_{index_slug}{bt_suffix}.html")
+    out_csv = os.path.join("growthData", f"{date_str}_growth_report_{index_slug}{bt_suffix}.csv")
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"  HTML saved: {out}")

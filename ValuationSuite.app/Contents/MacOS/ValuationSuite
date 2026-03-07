@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ── ValuationSuite.app launcher ──────────────────────────────────────────────
-# Project path baked in by install.sh on 2026-03-06.
+# Project path baked in by install.sh on 2026-03-07.
 # Copy this .app anywhere — it will always launch the correct project.
 # If you move the project folder, re-run install.sh to update this path.
 

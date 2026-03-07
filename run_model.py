@@ -820,9 +820,46 @@ def _xbrl_annual_series(facts: dict, *concepts) -> list:
     return []
 
 def _fetch_prices(ticker: str, days: int) -> list:
-    """Fetch daily closes via Stooq with yfinance fallback. Returns [{date, close}, ...] oldest-first."""
+    """Fetch daily closes via yfinance (primary) with Stooq fallback.
+    Returns [{date, close}, ...] oldest-first."""
+    import math
+
+    cal_days = math.ceil(days * 1.6) + 60
+
+    # ── Primary: yfinance — fast, reliable, no per-variant probe loop ────────
+    # Use explicit start/end dates rather than period="NNNd": Yahoo Finance only
+    # officially supports specific period strings ("1d","5d","1mo"…"max"), so
+    # large day values like "1660d" may silently return empty data in some
+    # yfinance versions.
+    try:
+        import yfinance as yf
+        _end   = datetime.date.today()
+        _start = _end - datetime.timedelta(days=cal_days)
+        hist = yf.Ticker(ticker).history(
+            start=_start.strftime("%Y-%m-%d"),
+            end=_end.strftime("%Y-%m-%d"),
+        )
+        if hist is not None and not hist.empty:
+            pts = []
+            for ts, row in hist.iterrows():
+                try:
+                    cl = float(row["Close"])
+                    dt_str = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+                    if cl > 0 and dt_str:
+                        pts.append({"date": dt_str, "close": cl})
+                except (ValueError, TypeError):
+                    continue
+            pts.sort(key=lambda x: x["date"])
+            pts = pts[-days:]
+            if len(pts) >= 10:
+                print(f"  [yfinance] {len(pts)} price points for '{ticker}'")
+                return pts
+    except Exception as e:
+        print(f"  [yfinance] price error: {e}")
+
+    # ── Fallback: Stooq ───────────────────────────────────────────────────────
     end_dt   = datetime.date.today()
-    start_dt = end_dt - datetime.timedelta(days=int(days * 1.6) + 60)
+    start_dt = end_dt - datetime.timedelta(days=cal_days)
     df, dt   = start_dt.strftime("%Y%m%d"), end_dt.strftime("%Y%m%d")
     t        = ticker.lower()
     for sym in list(dict.fromkeys([t+".us", t+".ca", t+".uk", t+".de", t])):
@@ -842,31 +879,6 @@ def _fetch_prices(ticker: str, days: int) -> list:
             return pts[-days:]
         except Exception:
             continue
-
-    # ── yfinance fallback (Stooq rate-limited or unavailable) ────────────────
-    print(f"  [Stooq] All variants failed for '{ticker}' — trying yfinance…")
-    try:
-        import yfinance as yf
-        import math
-        cal_days = math.ceil(days * 1.6) + 60
-        hist = yf.Ticker(ticker).history(period=f"{cal_days}d")
-        if hist is not None and not hist.empty:
-            pts = []
-            for ts, row in hist.iterrows():
-                try:
-                    cl = float(row["Close"])
-                    dt_str = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
-                    if cl > 0 and dt_str:
-                        pts.append({"date": dt_str, "close": cl})
-                except (ValueError, TypeError):
-                    continue
-            pts.sort(key=lambda x: x["date"])
-            pts = pts[-days:]
-            if len(pts) >= 10:
-                print(f"  [yfinance] {len(pts)} price points for '{ticker}'")
-                return pts
-    except Exception as e:
-        print(f"  [yfinance] price fallback error: {e}")
 
     print(f"  [prices] No data available for '{ticker}'")
     return []
@@ -1104,6 +1116,12 @@ def plot_backtest(ticker: str, d: dict, benchmarks: dict,
     """
     try:
         import matplotlib
+        # Force non-interactive backend before importing pyplot.
+        # When launched as a subprocess by the Flask launcher (start_new_session=True)
+        # the process is detached from macOS's window server, so the default MacOSX
+        # backend fails silently — plt.savefig() produces nothing and the plot is lost.
+        # Agg renders to a file buffer with no display dependency.
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         import matplotlib.dates as mdates
         import matplotlib.ticker as mticker
@@ -1112,6 +1130,18 @@ def plot_backtest(ticker: str, d: dict, benchmarks: dict,
         print("\n  ERROR: matplotlib is not installed.  pip install matplotlib")
         return
 
+    # ── Body (all exceptions surfaced explicitly — no silent crashes) ────────
+    try:
+        _plot_backtest_body(ticker, d, benchmarks, model_key, days, label, plt,
+                            mdates, mticker, mpatches)
+    except Exception as _plot_err:
+        import traceback
+        print(f"\n  [Plot] ERROR: {_plot_err}")
+        traceback.print_exc()
+
+
+def _plot_backtest_body(ticker, d, benchmarks, model_key, days, label,
+                        plt, mdates, mticker, mpatches):
     # ── 1. Fetch price history ────────────────────────────────────────────────
     print(f"\n[Plot] Fetching {days}-day price history…")
     prices = _fetch_prices(ticker, days)

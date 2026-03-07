@@ -1311,7 +1311,8 @@ PEG_WEIGHT = 0.60
 REV_WEIGHT = 0.40
 
 MAX_GROWTH_RATE   = 0.80
-MAX_FWD_PE        = 80.0
+MAX_FWD_PE        = 45.0   # 45× cap prevents cyclical/small-cap PE inflation
+MAX_PEG_GROWTH    = 40.0   # growth rate (%) used in PEG PE calc — capped lower than MAX_GROWTH_RATE
 MIN_GROWTH_THRESH = 0.05
 
 SECTOR_PE = {
@@ -1389,8 +1390,10 @@ def calc_peg_targets(d):
     if growth_pct is None or growth_pct <= 0:
         return None, None, None, None, None
 
-    # Cap growth at 80% for P/E calculation to prevent absurd multiples
-    g = min(growth_pct, MAX_GROWTH_RATE * 100)
+    # Cap growth used in PE calc at MAX_PEG_GROWTH (40%) — beyond that the
+    # market does not linearly reward growth with a higher P/E multiple.
+    # Full growth_pct is preserved for bull scenario (PEG_BULL already stretches it).
+    g = min(growth_pct, MAX_PEG_GROWTH)
 
     bear = fwd_eps * min(g * PEG_BEAR, MAX_FWD_PE)
     base = fwd_eps * min(g * PEG_BASE, MAX_FWD_PE)
@@ -1439,11 +1442,12 @@ def calc_rev_target(d):
     # Sector P/E as valuation anchor
     sec_pe = SECTOR_PE.get(d["sector"], MARKET_PE)
 
-    # Adjust P/E upward for high-growth companies (growth premium)
+    # Modest growth premium — forward revenue already bakes in the growth,
+    # so layering a large P/E bonus double-counts it.
     rev_g = d["rev_growth_dec"] or 0
-    if   rev_g >= 0.50: growth_pe_bonus = sec_pe * 0.60
-    elif rev_g >= 0.25: growth_pe_bonus = sec_pe * 0.35
-    elif rev_g >= 0.10: growth_pe_bonus = sec_pe * 0.15
+    if   rev_g >= 0.50: growth_pe_bonus = sec_pe * 0.25
+    elif rev_g >= 0.25: growth_pe_bonus = sec_pe * 0.15
+    elif rev_g >= 0.10: growth_pe_bonus = sec_pe * 0.07
     else:               growth_pe_bonus = 0.0
 
     applied_pe = min(sec_pe + growth_pe_bonus, MAX_FWD_PE)
@@ -1487,14 +1491,15 @@ def calc_ev_target(d):
     # Sector base EV/EBITDA multiple
     sec_mult = SECTOR_EV_EBITDA.get(d.get("sector", ""), MARKET_EV_EBITDA)
 
-    # Growth premium — faster growth justifies higher EV/EBITDA
+    # Modest growth premium on EV/EBITDA — forward EBITDA already reflects
+    # growth, so the multiple bonus should be conservative.
     g = growth or 0
-    if   g >= 50: mult_bonus = sec_mult * 0.60
-    elif g >= 25: mult_bonus = sec_mult * 0.35
-    elif g >= 10: mult_bonus = sec_mult * 0.15
+    if   g >= 50: mult_bonus = sec_mult * 0.25
+    elif g >= 25: mult_bonus = sec_mult * 0.15
+    elif g >= 10: mult_bonus = sec_mult * 0.07
     else:         mult_bonus = 0.0
 
-    applied_mult = min(sec_mult + mult_bonus, sec_mult * 2.5)
+    applied_mult = min(sec_mult + mult_bonus, sec_mult * 1.75)
 
     fair_ev     = fwd_ebitda * applied_mult
     fair_equity = fair_ev - net_debt

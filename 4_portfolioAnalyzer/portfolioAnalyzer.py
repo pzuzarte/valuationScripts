@@ -4962,12 +4962,15 @@ def main():
     # 5. Generate report
     print("\n[5/5] Generating HTML report...")
     ts  = datetime.datetime.now().strftime("%B %d, %Y  %H:%M")
+    if backtest_days > 0:
+        ts += " · Backtest {}d".format(backtest_days)
     html = build_html(raw, stocks_data, metrics, ts)
 
     outdir = "portfolioData"
     os.makedirs(outdir, exist_ok=True)
     date_prefix = datetime.datetime.now().strftime("%Y_%m_%d")
-    outfile = os.path.join(outdir, date_prefix + "_portfolio.html")
+    bt_suffix   = "_bt{}d".format(backtest_days) if backtest_days > 0 else ""
+    outfile = os.path.join(outdir, date_prefix + "_portfolio" + bt_suffix + ".html")
     with open(outfile, "w", encoding="utf-8") as f:
         f.write(html)
 

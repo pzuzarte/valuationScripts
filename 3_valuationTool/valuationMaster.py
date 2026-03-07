@@ -87,6 +87,7 @@ import datetime
 import webbrowser
 import os
 import json
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -2838,58 +2839,30 @@ def _stooq_symbol(ticker: str) -> str:
 
 def fetch_historical_prices(ticker: str, days: int, _unused=None) -> list:
     """
-    Fetch daily closing prices using Stooq's free CSV endpoint.
-    No authentication, no API key, no crumb.
-
-    Falls back through several symbol variants if the first fails.
+    Fetch daily closing prices via yfinance (primary) with Stooq fallback.
     Returns list of {"date": "YYYY-MM-DD", "close": float}, oldest-first,
     trimmed to the most recent `days` trading days.
+
+    yfinance is primary because it covers all US-listed tickers in a single
+    fast request.  Stooq's sequential per-variant probe loop (up to 5 × 20 s)
+    was the main source of hangs in the backtest / plot pipeline.
     """
-    # Stooq date range: go back 3× trading days to be safe (covers weekends + holidays)
-    end_dt   = datetime.date.today()
-    start_dt = end_dt - datetime.timedelta(days=int(days * 1.6) + 60)
-    date_from = start_dt.strftime("%Y%m%d")
-    date_to   = end_dt.strftime("%Y%m%d")
+    import math as _math
+    cal_days = _math.ceil(days * 1.6) + 60
 
-    suffixes = [".us", ".us", ".ca", ".uk", ".de", ""]   # .us twice: bare ticker retry
-    t = ticker.lower()
-    candidates = [t + s for s in suffixes]
-    # Also try the ticker as-is (some indices / ETFs have no suffix on Stooq)
-    candidates = list(dict.fromkeys(candidates))   # deduplicate, preserve order
-
-    for sym in candidates:
-        url = ("https://stooq.com/q/d/l/?s={sym}&d1={df}&d2={dt}&i=d"
-               ).format(sym=sym, df=date_from, dt=date_to)
-        raw = _http_get(url)
-        if not raw or b"No data" in raw or b"Exceed" in raw or len(raw) < 50:
-            continue
-
-        try:
-            text   = raw.decode("utf-8", errors="replace")
-            reader = csv.DictReader(io.StringIO(text))
-            prices = []
-            for row in reader:
-                try:
-                    cl = float(row.get("Close") or row.get("close") or 0)
-                    dt = (row.get("Date") or row.get("date") or "").strip()
-                    if cl > 0 and dt:
-                        # Stooq dates are YYYY-MM-DD already
-                        prices.append({"date": dt, "close": cl})
-                except (ValueError, TypeError):
-                    continue
-            if len(prices) < 10:
-                continue
-            prices.sort(key=lambda x: x["date"])
-            print("  [Stooq] Got {} price points for symbol '{}'".format(len(prices), sym))
-            return prices[-days:]
-        except Exception:
-            continue
-
-    print("  [Stooq] All symbol variants failed for '{}' — trying yfinance…".format(ticker))
+    # ── Primary: yfinance — fast single request, broad coverage ─────────────
+    # Use explicit start/end dates: Yahoo Finance only officially supports
+    # specific period strings ("1d","5d","1mo"…"max"), so large "NNNd"
+    # values may silently return empty data in some yfinance versions.
     try:
-        import yfinance as _yf, math as _math
-        cal_days = _math.ceil(days * 1.6) + 60
-        hist = _yf.Ticker(ticker).history(period="{}d".format(cal_days))
+        import yfinance as _yf
+        import datetime as _dt_mod
+        _end_yf   = _dt_mod.date.today()
+        _start_yf = _end_yf - _dt_mod.timedelta(days=cal_days)
+        hist = _yf.Ticker(ticker).history(
+            start=_start_yf.strftime("%Y-%m-%d"),
+            end=_end_yf.strftime("%Y-%m-%d"),
+        )
         if hist is not None and not hist.empty:
             pts = []
             for ts, row in hist.iterrows():
@@ -2906,32 +2879,73 @@ def fetch_historical_prices(ticker: str, days: int, _unused=None) -> list:
                 print("  [yfinance] Got {} price points for '{}'".format(len(pts), ticker))
                 return pts
     except Exception as _e:
-        print("  [yfinance] price fallback error: {}".format(_e))
+        print("  [yfinance] price error: {}".format(_e))
+
+    # ── Fallback: Stooq ───────────────────────────────────────────────────────
+    end_dt    = datetime.date.today()
+    start_dt  = end_dt - datetime.timedelta(days=cal_days)
+    date_from = start_dt.strftime("%Y%m%d")
+    date_to   = end_dt.strftime("%Y%m%d")
+    t = ticker.lower()
+    candidates = list(dict.fromkeys([t+".us", t+".ca", t+".uk", t+".de", t]))
+
+    for sym in candidates:
+        url = ("https://stooq.com/q/d/l/?s={sym}&d1={df}&d2={dt}&i=d"
+               ).format(sym=sym, df=date_from, dt=date_to)
+        raw = _http_get(url)
+        if not raw or b"No data" in raw or b"Exceed" in raw or len(raw) < 50:
+            continue
+        try:
+            text   = raw.decode("utf-8", errors="replace")
+            reader = csv.DictReader(io.StringIO(text))
+            prices = []
+            for row in reader:
+                try:
+                    cl = float(row.get("Close") or row.get("close") or 0)
+                    dt = (row.get("Date") or row.get("date") or "").strip()
+                    if cl > 0 and dt:
+                        prices.append({"date": dt, "close": cl})
+                except (ValueError, TypeError):
+                    continue
+            if len(prices) < 10:
+                continue
+            prices.sort(key=lambda x: x["date"])
+            print("  [Stooq] Got {} price points for symbol '{}'".format(len(prices), sym))
+            return prices[-days:]
+        except Exception:
+            continue
 
     return []
 
 
 # ── Fundamental data via SEC EDGAR ───────────────────────────────
 
+# company_tickers.json is ~3 MB and identical for every ticker lookup.
+# Cache it in memory after the first download so concurrent workers (e.g. the
+# growthScreener PIT backtest with 5 threads × 40 tickers) only pay the
+# download cost once per process instead of once per ticker.
+_EDGAR_TICKERS: dict = {}
+_EDGAR_TICKERS_LOCK = threading.Lock()
+
 def _edgar_cik(ticker: str) -> str:
     """
     Look up the SEC CIK number for a ticker using EDGAR's company search API.
     Returns zero-padded 10-digit CIK string, or "" if not found.
     """
-    url  = "https://efts.sec.gov/LATEST/search-index?q=%22{}%22&dateRange=custom&startdt=2000-01-01&forms=10-K".format(
-        urllib.parse.quote(ticker.upper()))
-    # Preferred: use the ticker→CIK mapping file (much faster)
-    map_url = "https://www.sec.gov/files/company_tickers.json"
-    raw = _http_get(map_url, timeout=15)
-    if raw:
-        try:
-            mapping = json.loads(raw)
-            for entry in mapping.values():
-                if entry.get("ticker", "").upper() == ticker.upper():
-                    cik = str(entry["cik_str"]).zfill(10)
-                    return cik
-        except Exception:
-            pass
+    global _EDGAR_TICKERS
+    # Download company_tickers.json once; all subsequent calls use the in-memory copy
+    with _EDGAR_TICKERS_LOCK:
+        if not _EDGAR_TICKERS:
+            map_url = "https://www.sec.gov/files/company_tickers.json"
+            raw = _http_get(map_url, timeout=15)
+            if raw:
+                try:
+                    _EDGAR_TICKERS = json.loads(raw)
+                except Exception:
+                    _EDGAR_TICKERS = {}
+    for entry in _EDGAR_TICKERS.values():
+        if entry.get("ticker", "").upper() == ticker.upper():
+            return str(entry["cik_str"]).zfill(10)
     return ""
 
 
@@ -4836,6 +4850,8 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
     name         = d["name"]
     company_name = d.get("company_name", ticker)
     ts      = datetime.datetime.now().strftime("%B %d, %Y  %H:%M")
+    if bt and not bt.get("error") and bt.get("days"):
+        ts += " · Backtest {}d".format(bt["days"])
 
     applicability_scores = applicability_scores or {}
     top_8    = top_8    or results
@@ -6508,6 +6524,7 @@ def main():
     print("  Verdict: " + conv["verdict"])
 
     bt = None
+    backtest_days = 0
     if args.backtest > 0:
         backtest_days = min(args.backtest, 365 * 5)  # cap at 5 years (~1260 trading days)
         print("\n[Backtest] Running {}-day price backtest...".format(backtest_days))
@@ -6540,7 +6557,8 @@ def main():
     outdir = "valuationData"
     os.makedirs(outdir, exist_ok=True)
     date_prefix = datetime.datetime.now().strftime("%Y_%m_%d")
-    outfile = os.path.join(outdir, date_prefix + "_valuation_" + ticker + ".html")
+    bt_suffix   = "_bt{}d".format(backtest_days) if backtest_days > 0 else ""
+    outfile = os.path.join(outdir, date_prefix + "_valuation_" + ticker + bt_suffix + ".html")
     with open(outfile, "w", encoding="utf-8") as f:
         f.write(html)
 
