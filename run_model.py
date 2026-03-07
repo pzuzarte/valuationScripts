@@ -57,8 +57,15 @@ Examples
   python run_model.py AAPL all --plot --days 500
 """
 
-import sys, os, argparse, math, csv, io, datetime
-import urllib.request, urllib.parse
+import sys
+import os
+import argparse
+import math
+import csv
+import io
+import datetime
+import json
+import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # ── Library imports ───────────────────────────────────────────────────────────
@@ -315,6 +322,10 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
 # ── Print helpers ─────────────────────────────────────────────────────────────
 W = 62
 SEP = "─" * W
+
+TRADING_DAYS_PER_YEAR = 252   # business days per year used in forward projection
+CALENDAR_SLIPPAGE     = 1.6   # trading-day to calendar-day conversion factor
+CALENDAR_PADDING      = 60    # extra calendar days buffer for holiday gaps
 
 def _header(ticker, model_name, price):
     print()
@@ -781,7 +792,7 @@ def _edgar_cik(ticker: str) -> str:
     raw = _http_get("https://www.sec.gov/files/company_tickers.json", timeout=15)
     if raw:
         try:
-            for entry in __import__("json").loads(raw).values():
+            for entry in json.loads(raw).values():
                 if entry.get("ticker", "").upper() == ticker.upper():
                     return str(entry["cik_str"]).zfill(10)
         except Exception:
@@ -793,7 +804,7 @@ def _edgar_xbrl_facts(cik: str) -> dict:
     if not raw:
         return {}
     try:
-        return __import__("json").loads(raw).get("facts", {})
+        return json.loads(raw).get("facts", {})
     except Exception:
         return {}
 
@@ -824,7 +835,7 @@ def _fetch_prices(ticker: str, days: int) -> list:
     Returns [{date, close}, ...] oldest-first."""
     import math
 
-    cal_days = math.ceil(days * 1.6) + 60
+    cal_days = math.ceil(days * CALENDAR_SLIPPAGE) + CALENDAR_PADDING
 
     # ── Primary: yfinance — fast, reliable, no per-variant probe loop ────────
     # Use explicit start/end dates rather than period="NNNd": Yahoo Finance only
@@ -1230,7 +1241,7 @@ def _plot_backtest_body(ticker, d, benchmarks, model_key, days, label,
     _last_dt = dates_dt[-1]
     future_dates: list = []
     _fd = _last_dt
-    for _ in range(252):
+    for _ in range(TRADING_DAYS_PER_YEAR):
         _fd += datetime.timedelta(days=1)
         while _fd.weekday() >= 5:        # skip Saturday / Sunday
             _fd += datetime.timedelta(days=1)

@@ -38,6 +38,15 @@ Canonical dict keys (as used in valuationMaster.py / fetch_tv_data):
   d["ntm_eps"]        - next-twelve-months EPS estimate
 """
 
+import math
+
+try:
+    import numpy as np
+    _NUMPY_AVAIL = True
+except ImportError:
+    np = None
+    _NUMPY_AVAIL = False
+
 # ── § 1  MODULE CONSTANTS ─────────────────────────────────────────────────────
 
 PROJECTION_YEARS       = 5
@@ -46,6 +55,9 @@ MARGIN_OF_SAFETY       = 0.20
 RISK_FREE_RATE         = 0.043
 EQUITY_RISK_PREMIUM    = 0.055
 CONVERGENCE_THRESHOLD  = 0.15
+DECAY_RATE             = 0.15
+TERM_PE                = 25.0
+TERM_PE_PROXY          = 20.0
 
 
 # ── § 2  WACC ─────────────────────────────────────────────────────────────────
@@ -198,7 +210,6 @@ def run_dcf(d: dict) -> dict:
     wacc, wacc_source = calculate_wacc(d)
 
     # Stage 1: years 1-5, growth decays 15% per year (compounding)
-    DECAY_RATE = 0.15
     g1 = g
     cf = fcf
     pvs = []
@@ -460,57 +471,113 @@ def run_reverse_dcf(d):
     return{"method":"Reverse DCF","implied_growth":ig,"street_growth":sg,"wacc":wacc,"scenarios":scen}
 
 
-def run_forward_peg(d):
-    eps=d["eps"]; fwd_eps=d.get("fwd_eps"); growth=d["est_growth"]; price=d["price"]
-    if fwd_eps and fwd_eps>0: ntm_eps=fwd_eps; eps_source="analyst NTM consensus"
-    elif eps and eps>0: ntm_eps=eps*(1+growth); eps_source="TTM EPS grown "+format(growth*100,".1f")+"%"
-    else: return None
-    g_pct=growth*100
-    if g_pct<=0: return None
-    cap=price*5 if price else 9999
-    fv_c=max(0,min(ntm_eps*g_pct*1.0,cap)); fv_b=max(0,min(ntm_eps*g_pct*1.5,cap))
-    fv_p=max(0,min(ntm_eps*g_pct*2.0,cap))
-    cpeg=(price/ntm_eps/g_pct) if(ntm_eps>0 and price) else None
-    return{"method":"Fwd PEG","fair_value":fv_b,"mos_value":fv_b*(1-MARGIN_OF_SAFETY),
-           "ntm_eps":ntm_eps,"eps_source":eps_source,"growth":growth,
-           "fv_conserv":fv_c,"fv_base":fv_b,"fv_premium":fv_p,"current_fwd_peg":cpeg}
+def run_forward_peg(d: dict) -> dict:
+    """
+    Forward PEG valuation — prices NTM earnings at a PEG ratio of 1.0.
+
+    Three scenarios based on PEG multiple applied to NTM EPS × growth%:
+      Conservative: PEG 1.0x  (base × 1.0)
+      Base:         PEG 1.5x  (base × 1.5)
+      Premium:      PEG 2.0x  (base × 2.0)
+
+    Returns a dict with fair_value set to the base (PEG 1.5×) scenario,
+    plus fv_conserv, fv_base, fv_premium for the full range.
+    """
+    eps      = d["eps"]
+    fwd_eps  = d.get("fwd_eps")
+    growth   = d["est_growth"]
+    price    = d["price"]
+
+    if fwd_eps and fwd_eps > 0:
+        ntm_eps    = fwd_eps
+        eps_source = "analyst NTM consensus"
+    elif eps and eps > 0:
+        ntm_eps    = eps * (1 + growth)
+        eps_source = "TTM EPS grown " + format(growth * 100, ".1f") + "%"
+    else:
+        return None
+
+    g_pct = growth * 100
+    if g_pct <= 0:
+        return None
+
+    cap   = price * 5 if price else 9999
+    fv_c  = max(0, min(ntm_eps * g_pct * 1.0, cap))
+    fv_b  = max(0, min(ntm_eps * g_pct * 1.5, cap))
+    fv_p  = max(0, min(ntm_eps * g_pct * 2.0, cap))
+    cpeg  = (price / ntm_eps / g_pct) if (ntm_eps > 0 and price) else None
+
+    return {
+        "method":          "Fwd PEG",
+        "fair_value":      fv_b,
+        "mos_value":       fv_b * (1 - MARGIN_OF_SAFETY),
+        "ntm_eps":         ntm_eps,
+        "eps_source":      eps_source,
+        "growth":          growth,
+        "fv_conserv":      fv_c,
+        "fv_base":         fv_b,
+        "fv_premium":      fv_p,
+        "current_fwd_peg": cpeg,
+    }
 
 
 def run_ev_ntm_revenue(d):
-    rev=d["revenue"]; fwd_rev=d.get("fwd_rev"); growth=d["est_growth"]
-    gm=d["gross_margin"]; nd=d["total_debt"]-d["cash"]; shares=d["shares"]; price=d["price"]
-    if not(rev and rev>0 and shares and shares>0): return None
-    ntm_rev=fwd_rev if(fwd_rev and fwd_rev>0) else rev*(1+growth)
-    rev_source="analyst NTM consensus" if(fwd_rev and fwd_rev>0) else "TTM grown "+format(growth*100,".1f")+"%"
+    rev        = d["revenue"]
+    fwd_rev    = d.get("fwd_rev")
+    growth     = d["est_growth"]
+    gm         = d["gross_margin"]
+    nd         = d["total_debt"] - d["cash"]
+    shares     = d["shares"]
+    price      = d["price"]
+
+    if not (rev and rev > 0 and shares and shares > 0):
+        return None
+
+    ntm_rev    = fwd_rev if (fwd_rev and fwd_rev > 0) else rev * (1 + growth)
+    rev_source = (
+        "analyst NTM consensus"
+        if (fwd_rev and fwd_rev > 0)
+        else "TTM grown " + format(growth * 100, ".1f") + "%"
+    )
 
     # ── Step 1: Gross-margin tier base ranges (wider than before) ──
-    if gm and gm>=70:   base_lo,base_mid,base_hi=8.0,15.0,25.0;  tier="High-margin (GM ≥70%)"
-    elif gm and gm>=50: base_lo,base_mid,base_hi=4.0,8.0,16.0;   tier="Mid-high margin (GM 50–70%)"
-    elif gm and gm>=30: base_lo,base_mid,base_hi=2.5,4.5,9.0;    tier="Mid margin (GM 30–50%)"
-    else:               base_lo,base_mid,base_hi=1.0,2.5,5.0;    tier="Low margin (GM <30%)"
+    if gm and gm >= 70:
+        base_lo, base_mid, base_hi = 8.0, 15.0, 25.0
+        tier = "High-margin (GM ≥70%)"
+    elif gm and gm >= 50:
+        base_lo, base_mid, base_hi = 4.0, 8.0, 16.0
+        tier = "Mid-high margin (GM 50–70%)"
+    elif gm and gm >= 30:
+        base_lo, base_mid, base_hi = 2.5, 4.5, 9.0
+        tier = "Mid margin (GM 30–50%)"
+    else:
+        base_lo, base_mid, base_hi = 1.0, 2.5, 5.0
+        tier = "Low margin (GM <30%)"
 
     # ── Step 2: Growth bonus — scales aggressively for hypergrowth ──
     # +1x mid per 10ppt growth above 15%, accelerating above 40%
     g_pct = growth * 100
     if g_pct > 15:
-        linear   = (g_pct - 15) / 10 * 1.5           # +1.5x per 10ppt above 15%
-        accel    = max(0, (g_pct - 40) / 10) ** 1.3   # accelerating bonus above 40%
+        linear    = (g_pct - 15) / 10 * 1.5           # +1.5x per 10ppt above 15%
+        accel     = max(0, (g_pct - 40) / 10) ** 1.3   # accelerating bonus above 40%
         bonus_mid = linear + accel
         bonus_lo  = bonus_mid * 0.5
         bonus_hi  = bonus_mid * 1.4
     else:
-        bonus_mid = 0.0; bonus_lo = 0.0; bonus_hi = 0.0
+        bonus_mid = 0.0
+        bonus_lo  = 0.0
+        bonus_hi  = 0.0
 
-    tier_lo  = base_lo + bonus_lo
+    tier_lo  = base_lo  + bonus_lo
     tier_mid = base_mid + bonus_mid
-    tier_hi  = base_hi + bonus_hi
+    tier_hi  = base_hi  + bonus_hi
 
     # ── Step 3: Anchor against current market EV/Revenue ──
     # The market's current multiple is information — if it's pricing the stock
     # at 28x revenue, our model shouldn't cap at 20x.  We blend the tier-derived
     # range with the market multiple so the output brackets reality.
     current_ev_rev = (d["ev_approx"] / rev) if rev > 0 else None
-    anchor_source = "tier-only"
+    anchor_source  = "tier-only"
 
     if current_ev_rev and current_ev_rev > 1.0:
         mkt = current_ev_rev
@@ -524,18 +591,32 @@ def run_ev_ntm_revenue(d):
         lo, mid, hi = tier_lo, tier_mid, tier_hi
 
     # ── Step 4: Apply reasonable floor/ceiling per tier ──
-    lo  = max(1.0,  round(lo,  1))
-    mid = max(2.0,  round(mid, 1))
-    hi  = max(3.0,  round(hi,  1))
+    lo  = max(1.0, round(lo,  1))
+    mid = max(2.0, round(mid, 1))
+    hi  = max(3.0, round(hi,  1))
 
-    def fv_at(m): eq=ntm_rev*m-nd; return(eq/shares) if eq>0 else 0.0
-    return{"method":"EV/NTM Rev","fair_value":fv_at(mid),"mos_value":fv_at(mid)*(1-MARGIN_OF_SAFETY),
-           "ntm_rev":ntm_rev,"rev_source":rev_source,"tier":tier,"gross_margin":gm,
-           "mult_lo":round(lo,1),"mult_mid":round(mid,1),"mult_hi":round(hi,1),
-           "growth_bonus":round(bonus_mid,2),
-           "anchor_source":anchor_source,
-           "fv_lo":fv_at(lo),"fv_mid":fv_at(mid),"fv_hi":fv_at(hi),
-           "current_ev_rev":current_ev_rev}
+    def fv_at(m):
+        eq = ntm_rev * m - nd
+        return (eq / shares) if eq > 0 else 0.0
+
+    return {
+        "method":          "EV/NTM Rev",
+        "fair_value":      fv_at(mid),
+        "mos_value":       fv_at(mid) * (1 - MARGIN_OF_SAFETY),
+        "ntm_rev":         ntm_rev,
+        "rev_source":      rev_source,
+        "tier":            tier,
+        "gross_margin":    gm,
+        "mult_lo":         round(lo,  1),
+        "mult_mid":        round(mid, 1),
+        "mult_hi":         round(hi,  1),
+        "growth_bonus":    round(bonus_mid, 2),
+        "anchor_source":   anchor_source,
+        "fv_lo":           fv_at(lo),
+        "fv_mid":          fv_at(mid),
+        "fv_hi":           fv_at(hi),
+        "current_ev_rev":  current_ev_rev,
+    }
 
 
 def run_tam_scenario(d):
@@ -544,7 +625,6 @@ def run_tam_scenario(d):
     if not(rev and rev>0 and shares and shares>0): return None
     wacc, _ = calculate_wacc(d)
     tam_m=min(10+max(0,(growth-0.20)/0.10*2.5),20.0); tam=rev*tam_m
-    TERM_PE=25.0
 
     # ── Net margin: use actual TTM net margin where available ──────────
     # Deriving from gross margin (gm*0.35) systematically underestimates
@@ -2059,9 +2139,7 @@ def run_monte_carlo_dcf(d: dict, n_sims: int = 5000) -> dict:
     Returns median fair value plus confidence interval percentiles.
     Requires numpy; returns None if numpy unavailable or FCF ≤ 0.
     """
-    try:
-        import numpy as np
-    except ImportError:
+    if not _NUMPY_AVAIL:
         return None
 
     fcf    = d.get("fcf")
@@ -2073,7 +2151,6 @@ def run_monte_carlo_dcf(d: dict, n_sims: int = 5000) -> dict:
         return None
 
     base_wacc, wacc_source = calculate_wacc(d)
-    DECAY_RATE = 0.15
 
     # Draw samples
     rng    = np.random.default_rng(seed=42)
@@ -2442,8 +2519,6 @@ def run_scurve_tam(d: dict) -> dict:
         - current_share ≥ 0.70 (company already dominates TAM — logistic invalid)
         - current_share ≤ 0.001 (too early stage — t0 undefined)
     """
-    import math
-
     rev     = d.get("revenue")
     growth  = d.get("est_growth") or 0.10
     gm      = d.get("gross_margin") or 50.0
@@ -2491,8 +2566,6 @@ def run_scurve_tam(d: dict) -> dict:
         gm_frac = gm / 100.0
         ratio   = 0.45 if gm_frac >= 0.70 else (0.38 if gm_frac >= 0.50 else 0.30)
         base_nm = max(0.05, gm_frac * ratio)
-
-    TERM_PE = 25.0
 
     scenarios = []
     for label, k_mult, mm in [("Bear", 0.70, 0.85), ("Base", 1.00, 1.00), ("Bull", 1.30, 1.15)]:
@@ -2558,7 +2631,6 @@ def run_pie(d: dict) -> dict:
         return None
 
     wacc, _ = calculate_wacc(d)
-    TERM_PE_PROXY = 20.0
 
     def dcf_at_growth(g):
         """Simple 5-year revenue-based DCF: projects revenue, applies a rough margin."""

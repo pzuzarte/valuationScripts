@@ -23,7 +23,7 @@ import uuid
 import webbrowser
 from datetime import datetime
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, make_response, request
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 app  = Flask(__name__)
@@ -181,14 +181,14 @@ SIDEBAR_GROUPS = [
 _runs: dict = {}
 _runs_lock   = threading.Lock()
 
-import re as _re
+import re
 # Matches any whitespace-delimited token that is a file path with a known
 # output extension.  Handles all scripts:
 #   "  Saved: /abs/path/file.html"          ← valuationMaster, portfolioAnalyzer
 #   "  HTML saved: relpath/file.html"       ← growthScreener, valueScreener
 #   "  ✓  Report saved → /path/file.html  (42 KB)"  ← sentiment, macro
 #   "  Plot saved → /abs/path/file.png"    ← run_model.py (matplotlib PNG)
-_OUTPUT_PAT = _re.compile(r'(\S+\.(?:html|png|jpg|jpeg|svg|pdf))\b', _re.IGNORECASE)
+_OUTPUT_PAT = re.compile(r'(\S+\.(?:html|png|jpg|jpeg|svg|pdf))\b', re.IGNORECASE)
 
 
 def _reader_thread(run_id: str) -> None:
@@ -277,6 +277,12 @@ def _reader_thread(run_id: str) -> None:
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
+def _cors(resp):
+    """Add permissive CORS header — used by data API routes."""
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
 @app.route("/")
 def index():
     return HTML
@@ -294,7 +300,7 @@ def api_groups():
 
 @app.route("/api/run", methods=["POST"])
 def api_run():
-    data        = request.get_json(force=True) or {}
+    data        = request.get_json(force=True, silent=True) or {}
     script_name = data.get("script", "")
     params      = data.get("params", {})
 
@@ -397,7 +403,7 @@ def api_stop(run_id: str):
 
 @app.route("/api/exit", methods=["POST"])
 def api_exit():
-    threading.Timer(0.3, lambda: os._exit(0)).start()
+    threading.Timer(0.3, lambda: sys.exit(0)).start()
     return jsonify({"ok": True})
 
 
@@ -434,16 +440,12 @@ def api_live_quotes():
     symbols_raw = request.args.get("symbols", "")
     tickers = [s.strip() for s in symbols_raw.split(",") if s.strip()]
     if not tickers:
-        resp = jsonify({})
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
+        return _cors(jsonify({}))
 
     now = time.time()
     if now - _lq_cache["ts"] < 60:
         data = {t: _lq_cache["data"].get(t) for t in tickers}
-        resp = jsonify(data)
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp
+        return _cors(jsonify(data))
 
     # Fetch fresh data via yfinance batch download
     result: dict = {}
@@ -477,9 +479,7 @@ def api_live_quotes():
     _lq_cache["ts"]   = time.time()
     _lq_cache["data"] = result
 
-    resp = jsonify({t: result.get(t) for t in tickers})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
+    return _cors(jsonify({t: result.get(t) for t in tickers}))
 
 
 # ── Topic Explorer page (served from Flask so AJAX same-origin works) ─────────
@@ -500,7 +500,6 @@ def topic_explorer_page():
     except Exception as exc:
         return f"<pre>Error loading topicExplorer: {exc}</pre>", 500
 
-    from flask import make_response  # noqa: PLC0415 (already imported at top level)
     resp = make_response(build_html())
     resp.headers["Content-Type"] = "text/html; charset=utf-8"
     return resp
@@ -542,11 +541,9 @@ def api_research_topics():
     try:
         from topicExplorer import fetch_topics  # noqa: PLC0415
     except Exception as exc:
-        resp = jsonify({"error": f"Could not import topicExplorer: {exc}"})
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp, 500
+        return _cors(jsonify({"error": f"Could not import topicExplorer: {exc}"})), 500
 
-    data    = request.get_json(force=True) or {}
+    data    = request.get_json(force=True, silent=True) or {}
     topics  = data.get("topics", [])
     days    = int(data.get("days", 30))
     sources = data.get("sources", ["arxiv", "nih", "trials"])
@@ -554,13 +551,9 @@ def api_research_topics():
     try:
         results = fetch_topics(topics, days=days, sources=sources)
     except Exception as exc:
-        resp = jsonify({"error": str(exc)})
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        return resp, 500
+        return _cors(jsonify({"error": str(exc)})), 500
 
-    resp = jsonify(results)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
+    return _cors(jsonify(results))
 
 
 # ── Embedded HTML / CSS / JS ───────────────────────────────────────────────────

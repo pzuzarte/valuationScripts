@@ -54,7 +54,8 @@ EXAMPLES
   python sp500_growth_screener.py --index RUT --top 200  # Russell 2000, top 200
 """
 
-import sys, math, datetime, webbrowser, os, csv, threading, logging as _logging, json as _json, time as _time
+import sys, math, datetime, webbrowser, os, csv, threading, logging, json, time as _time, argparse
+import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait as _cf_wait, FIRST_COMPLETED as _CF_FIRST
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -91,7 +92,7 @@ def _is_yf_401_str(s: str) -> bool:
             or ("Unauthorized" in s and "yahoo" in s.lower())
             or "User is unable to access this feature" in s)
 
-class _YF401LogHandler(_logging.Handler):
+class _YF401LogHandler(logging.Handler):
     """Logging handler that sets a thread-local flag on 401 log messages.
 
     yfinance logs HTTP errors via utils.get_yf_logger().error() when
@@ -99,7 +100,7 @@ class _YF401LogHandler(_logging.Handler):
     so _fetch_yf_data_gs can detect and recover from 401s without needing the
     exception to propagate.
     """
-    def emit(self, record: _logging.LogRecord) -> None:
+    def emit(self, record: logging.LogRecord) -> None:
         try:
             if _is_yf_401_str(record.getMessage()):
                 _yf_401_tls.detected = True
@@ -139,7 +140,7 @@ def _yf_refresh_session() -> bool:
 
 # Install the handler once at module load (no-op if yfinance not available)
 if _YF_AVAIL:
-    _logging.getLogger("yfinance").addHandler(_YF401LogHandler())
+    logging.getLogger("yfinance").addHandler(_YF401LogHandler())
 
 # ── yfinance disk cache (24-hour TTL) ─────────────────────────────────────────
 # Saves per-ticker fundamentals to .yf_cache.json so repeat runs within a day
@@ -155,7 +156,7 @@ def _load_yf_cache() -> None:
     try:
         if os.path.exists(_YF_CACHE_FILE):
             with open(_YF_CACHE_FILE) as _f:
-                raw = _json.load(_f)
+                raw = json.load(_f)
             now = _time.time()
             _yf_cache = {k: v for k, v in raw.items()
                          if now - v.get("_ts", 0) < _YF_CACHE_TTL}
@@ -170,7 +171,7 @@ def _save_yf_cache() -> None:
     try:
         with _yf_cache_lock:
             with open(_YF_CACHE_FILE, "w") as _f:
-                _json.dump(_yf_cache, _f)
+                json.dump(_yf_cache, _f)
     except Exception:
         pass
 
@@ -418,7 +419,6 @@ INDEX_CONFIG = {
 def fetch_stocks(index_code, limit=None):
     # ── Combined index: fetch both sub-indices and merge ─────────────────────
     if index_code.upper() == "SPXRUT":
-        import pandas as pd
         print("  Fetching S&P 500 + Russell 2000 (two queries)...")
         spx_df = fetch_stocks("SPX", None)
         rut_df = fetch_stocks("RUT", None)
@@ -452,7 +452,6 @@ def fetch_stocks(index_code, limit=None):
             print(f"  isin filter failed ({str(e)[:60]}), trying exchange fallback...")
 
     # ── Fallback: exchange / country filter ───────────────────────────────────
-    import pandas as pd
     frames = []
 
     if index_code == "TSX":
@@ -525,7 +524,7 @@ def parse_row(row):
         v = row.get(f, d)
         if v is None or (isinstance(v, float) and math.isnan(v)): return d
         try: return float(v)
-        except: return d
+        except Exception: return d
 
     price       = s("close", 0)
     mktcap      = s("market_cap_basic", 0)
@@ -655,7 +654,7 @@ def parse_row(row):
             diff = (earn_date - today).days
             if -5 <= diff <= 180:   # within reasonable window
                 days_to_earnings = diff
-        except: pass
+        except Exception: pass
 
     # Blended FCF growth (same logic as EPS/rev)
     fcf_growth = best_growth(fcf_growth_fq, fcf_growth_ttm, None)
@@ -2875,35 +2874,27 @@ def build_html(results, ts, total, index_name="S&P 500",
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print(__doc__)
-        sys.exit(0)
-
-    write_csv_flag = "--csv" in sys.argv
-
-    # --index SPX|NDX|RUT|TSX|SPXRUT  (default: SPX)
-    if "--index" in sys.argv:
-        try: index_code = sys.argv[sys.argv.index("--index")+1].upper()
-        except: index_code = "SPX"
-    else:
-        index_code = "SPX"
-
-    # --top N  overrides default limit for the chosen index (default: all)
-    if "--top" in sys.argv:
-        try: limit = int(sys.argv[sys.argv.index("--top")+1])
-        except: limit = None
-    else:
-        limit = None
-
-    # --backtest  use point-in-time MAPE engine (same as valuationMaster)
-    # Without this flag the fast consensus ranking is used instead (~30s vs minutes)
-    use_pit_backtest = "--backtest" in sys.argv
-
-    # --backtest-days N  number of trading-day price bars to use (default: 500 ≈ 2 years)
-    backtest_days = 500
-    if "--backtest-days" in sys.argv:
-        try: backtest_days = int(sys.argv[sys.argv.index("--backtest-days") + 1])
-        except: backtest_days = 500
+    parser = argparse.ArgumentParser(
+        description="Screen an index for high-growth stocks."
+    )
+    parser.add_argument("--index",        default="SPX",
+                        choices=["SPX", "NDX", "RUT", "TSX", "SPXRUT"],
+                        help="Index to screen (default: SPX)")
+    parser.add_argument("--top",          type=int, default=None,
+                        help="Limit to top N stocks by score")
+    parser.add_argument("--csv",          action="store_true",
+                        help="Export results to CSV")
+    parser.add_argument("--backtest",     action="store_true",
+                        help="Run point-in-time backtest on top stocks")
+    parser.add_argument("--backtest-days", dest="backtest_days",
+                        type=int, default=None,
+                        help="Number of days for backtest price history")
+    args = parser.parse_args()
+    index_code    = args.index
+    limit         = args.top
+    write_csv_flag = args.csv
+    use_pit_backtest = args.backtest
+    backtest_days = args.backtest_days if args.backtest_days is not None else 500
 
     index_name = INDEX_CONFIG.get(index_code, INDEX_CONFIG["SPX"])["name"]
     print("\n" + "="*60)
@@ -2966,7 +2957,7 @@ def main():
             for fut in as_completed(futures):
                 tk = futures[fut]
                 try:    bars_map[tk] = fut.result()
-                except: bars_map[tk] = {"fcf": None, "ebitda": None, "fwd_rev": None,
+                except Exception: bars_map[tk] = {"fcf": None, "ebitda": None, "fwd_rev": None,
                                          "revenue": None, "total_debt": None,
                                          "cash": None, "gross_margin": None,
                                          "fwd_eps": None}

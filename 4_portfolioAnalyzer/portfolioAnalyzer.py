@@ -41,6 +41,7 @@ import math
 import datetime
 import webbrowser
 import argparse
+import sqlite3
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -4991,11 +4992,10 @@ def _save_portfolio_signals(portfolio_file: str, stocks_data: dict):
     Silent try/except — never crashes the parent script.
     """
     try:
-        import sqlite3 as _sq
         _db_dir  = os.path.join(os.path.expanduser("~"), ".valuation_suite")
         _db_path = os.path.join(_db_dir, "data.db")
         os.makedirs(_db_dir, exist_ok=True)
-        _c = _sq.connect(_db_path)
+        _c = sqlite3.connect(_db_path)
         _c.execute(
             """CREATE TABLE IF NOT EXISTS portfolio_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

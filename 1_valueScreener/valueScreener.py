@@ -47,7 +47,7 @@ EXAMPLES
   python valueScreener.py --index RUT --top 200  # Russell 2000, top 200
 """
 
-import sys, math, datetime, webbrowser, os, csv, io
+import sys, math, datetime, webbrowser, os, csv, io, argparse
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
@@ -402,7 +402,7 @@ def parse_row(row):
         v = row.get(f, d)
         if v is None or (isinstance(v, float) and math.isnan(v)): return d
         try: return float(v)
-        except: return d
+        except Exception: return d
 
     price   = s("close", 0)
     mktcap  = s("market_cap_basic", 0)
@@ -1223,25 +1223,20 @@ def build_html(results, bm, ts, total):
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
-    if "--help" in sys.argv or "-h" in sys.argv:
-        print(__doc__)
-        sys.exit(0)
-
-    write_csv_flag = "--csv" in sys.argv
-
-    # --index SPX|NDX|RUT|TSX  (default: SPX)
-    if "--index" in sys.argv:
-        try: index_code = sys.argv[sys.argv.index("--index")+1].upper()
-        except: index_code = "SPX"
-    else:
-        index_code = "SPX"
-
-    # --top N  overrides default limit for the chosen index
-    if "--top" in sys.argv:
-        try: limit = int(sys.argv[sys.argv.index("--top")+1])
-        except: limit = None
-    else:
-        limit = None
+    parser = argparse.ArgumentParser(
+        description="Screen an index for undervalued stocks."
+    )
+    parser.add_argument("--index", default="SPX",
+                        choices=["SPX", "NDX", "RUT", "TSX"],
+                        help="Index to screen (default: SPX)")
+    parser.add_argument("--top",   type=int, default=None,
+                        help="Limit to top N stocks by score")
+    parser.add_argument("--csv",   action="store_true",
+                        help="Export results to CSV")
+    args = parser.parse_args()
+    index_code = args.index
+    limit      = args.top
+    write_csv_flag = args.csv
 
     index_name = INDEX_CONFIG.get(index_code, INDEX_CONFIG["SPX"])["name"]
     print("\n" + "="*60)

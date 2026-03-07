@@ -84,6 +84,9 @@ CHANGES IN v7
 import sys
 import argparse
 import datetime
+import math as _math
+import statistics as _st
+import time as _time
 import webbrowser
 import os
 import json
@@ -112,6 +115,13 @@ try:
     _YF_AVAILABLE = True
 except ImportError:
     _YF_AVAILABLE = False
+
+try:
+    import pandas as _pd
+    _PD_AVAILABLE = True
+except ImportError:
+    _pd = None
+    _PD_AVAILABLE = False
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -215,7 +225,7 @@ def fetch_tv_data(ticker: str) -> dict:
                 v=rv4.get(f)
                 if v is None or v!=v: return None
                 try: return float(v)
-                except: return None
+                except Exception: return None
             fwd_eps=safev4("earnings_per_share_forecast_next_fy")
             fwd_rev=safev4("revenue_forecast_next_fy")
             rev_growth_pct=safev4("total_revenue_yoy_growth_ttm")
@@ -727,7 +737,6 @@ def fetch_yfinance_extended(ticker: str) -> dict:
     All fields default to None on failure; caller must guard accordingly.
     Called in main() immediately after fetch_tv_data().
     """
-    import time as _time
     wall_start = _time.time()
 
     ext = {
@@ -852,7 +861,6 @@ def fetch_yfinance_extended(ticker: str) -> dict:
         try:
             divs = tk.dividends
             if divs is not None and len(divs) >= 2:
-                import pandas as _pd
                 divs_annual = divs.resample("Y").sum()
                 if len(divs_annual) >= 5:
                     d_new = float(divs_annual.iloc[-1])
@@ -985,8 +993,6 @@ def fetch_all_yfinance(ticker: str) -> tuple:
     -------
     (wacc_raw : dict, ext : dict)
     """
-    import time as _time
-
     wacc = {
         "interest_expense":   None,
         "income_tax_expense": None,
@@ -1158,7 +1164,6 @@ def fetch_all_yfinance(ticker: str) -> tuple:
         try:
             divs = tk.dividends
             if divs is not None and len(divs) >= 2:
-                import pandas as _pd
                 divs_annual = divs.resample("Y").sum()
                 if len(divs_annual) >= 5:
                     d_new = float(divs_annual.iloc[-1])
@@ -1646,7 +1651,6 @@ def fetch_seasonality(ticker: str, sector: str = None) -> dict:
       yfinance typically returns only 5–6 quarters of quarterly data.
     - Uses fiscal quarter numbers (Q1–Q4 relative to the company's fiscal year).
     """
-    import datetime as _dt
     from collections import defaultdict
 
     out = {
@@ -1680,7 +1684,7 @@ def fetch_seasonality(ticker: str, sector: str = None) -> dict:
         out["cycle_class"] = "Cyclical"
         out["cycle_desc"]  = "No specific cycle profile mapped for this sector."
 
-    now = _dt.datetime.now()
+    now = datetime.datetime.now()
     out["current_month"] = now.month
 
     if not _YF_AVAILABLE:
@@ -1700,7 +1704,7 @@ def fetch_seasonality(ticker: str, sector: str = None) -> dict:
             for key in ["lastFiscalYearEnd", "nextFiscalYearEnd", "mostRecentQuarter"]:
                 ts = info.get(key)
                 if ts and isinstance(ts, (int, float)) and ts > 0:
-                    fy_end_month = _dt.datetime.fromtimestamp(int(ts)).month
+                    fy_end_month = datetime.datetime.fromtimestamp(int(ts)).month
                     break
         except Exception:
             pass
@@ -1775,7 +1779,7 @@ def fetch_seasonality(ticker: str, sector: str = None) -> dict:
                     if hasattr(ts, "to_pydatetime"):
                         dt = ts.to_pydatetime()
                     elif isinstance(ts, str):
-                        dt = _dt.datetime.strptime(str(ts)[:10], "%Y-%m-%d")
+                        dt = datetime.datetime.strptime(str(ts)[:10], "%Y-%m-%d")
                     else:
                         dt = ts
                     v = float(val)
@@ -1927,8 +1931,6 @@ def _build_growth_interpretation(d, gr, reliability, price):
     Collects fair values from all available growth methods, then interprets the
     degree of convergence / divergence and what it means for the stock.
     """
-    import statistics as _st
-
     # ── Collect fair values and metadata ─────────────────────────────
     METHOD_COLORS = {
         "Reverse DCF": "#e87c3e",
@@ -2272,7 +2274,6 @@ def _build_growth_html(d, gr, reliability=None):
     # Conviction: how many methods agree within 20% of the median growth fair value
     _g_summary_html = ""
     if _gfvs:
-        import statistics as _st
         _vals = list(_gfvs.values())
         _med  = _st.median(_vals) if _vals else 0
         _mean = sum(_vals)/len(_vals) if _vals else 0
@@ -2847,7 +2848,6 @@ def fetch_historical_prices(ticker: str, days: int, _unused=None) -> list:
     fast request.  Stooq's sequential per-variant probe loop (up to 5 × 20 s)
     was the main source of hangs in the backtest / plot pipeline.
     """
-    import math as _math
     cal_days = _math.ceil(days * 1.6) + 60
 
     # ── Primary: yfinance — fast single request, broad coverage ─────────────
@@ -2856,9 +2856,8 @@ def fetch_historical_prices(ticker: str, days: int, _unused=None) -> list:
     # values may silently return empty data in some yfinance versions.
     try:
         import yfinance as _yf
-        import datetime as _dt_mod
-        _end_yf   = _dt_mod.date.today()
-        _start_yf = _end_yf - _dt_mod.timedelta(days=cal_days)
+        _end_yf   = datetime.date.today()
+        _start_yf = _end_yf - datetime.timedelta(days=cal_days)
         hist = _yf.Ticker(ticker).history(
             start=_start_yf.strftime("%Y-%m-%d"),
             end=_end_yf.strftime("%Y-%m-%d"),

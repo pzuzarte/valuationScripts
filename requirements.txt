@@ -7,3 +7,4 @@ scipy>=1.10.0
 flask>=2.3.0
 requests>=2.28.0
 pandas-datareader>=0.10.0
+matplotlib>=3.7.0
