@@ -105,6 +105,22 @@ SCRIPTS = {
                  required=False, default="1000"),
         ],
     },
+    "Scatter Plots": {
+        "path": os.path.join(ROOT, "5_scatterPlots", "scatterPlots.py"),
+        "desc": "Interactive valuation scatter plots — EV/S, P/E, FCF, ROIC and more across an index or custom CSV.",
+        "icon": "📉",
+        "params": [
+            dict(id="index",   label="Index",           type="option", flag="--index",
+                 required=False, default="SPX",       values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",     label="Max tickers",    type="entry",  flag="--top",
+                 required=False, default="150"),
+            dict(id="tickers", label="Tickers (comma-separated — overrides index)",
+                 type="entry",  flag="--tickers",
+                 required=False, default=""),
+            dict(id="csv",     label="Custom CSV",     type="file",   flag="--csv",
+                 required=False, default=""),
+        ],
+    },
     "Sentiment Analyzer": {
         "path": os.path.join(ROOT, "6_sentimentAnalyzer", "sentimentAnalyzer.py"),
         "desc": "Multi-source sentiment — news, social, short interest, insider activity, options, analyst ratings, SEC filings & congressional trading.",
@@ -170,7 +186,7 @@ SCRIPTS = {
 SIDEBAR_GROUPS = [
     {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener"]},
-    {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model"]},
+    {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
     {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker"]},
     {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer"]},
@@ -409,12 +425,18 @@ def api_exit():
 
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
-    """Save an uploaded portfolio CSV to the portfolioAnalyzer directory."""
+    """Save an uploaded CSV.  Optional ?script= query param routes to the correct directory."""
     f = request.files.get("file")
     if not f or not f.filename:
         return jsonify({"error": "No file received"}), 400
     safe_name = os.path.basename(f.filename)
-    dest = os.path.join(ROOT, "4_portfolioAnalyzer", safe_name)
+    script    = request.args.get("script", "")
+    if script == "Scatter Plots":
+        dest_dir = os.path.join(ROOT, "5_scatterPlots")
+    else:
+        dest_dir = os.path.join(ROOT, "4_portfolioAnalyzer")
+    os.makedirs(dest_dir, exist_ok=True)
+    dest = os.path.join(dest_dir, safe_name)
     f.save(dest)
     return jsonify({"path": dest})
 
@@ -837,7 +859,7 @@ function selectScript(name) {
         if (!file) return;
         const fd = new FormData();
         fd.append("file", file);
-        fetch("/api/upload", { method: "POST", body: fd })
+        fetch("/api/upload?script=" + encodeURIComponent(currentScript), { method: "POST", body: fd })
           .then(r => r.json())
           .then(data => {
             if (data.path) inp.value = data.path;

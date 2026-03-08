@@ -8,3 +8,4 @@ flask>=2.3.0
 requests>=2.28.0
 pandas-datareader>=0.10.0
 matplotlib>=3.7.0
+plotly>=5.18.0
