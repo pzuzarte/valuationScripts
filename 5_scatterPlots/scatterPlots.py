@@ -26,6 +26,8 @@ import argparse
 import csv
 import datetime
 import logging
+import random
+import time
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -55,7 +57,7 @@ for _lib in ("yfinance", "yfinance.base", "yfinance.utils",
 # ── Constants ─────────────────────────────────────────────────────────────────
 ROOT        = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUTPUT_DIR  = os.path.join(ROOT, "scatterData")
-MAX_WORKERS = 10
+MAX_WORKERS = 5   # keep well below Yahoo Finance's rate limit
 
 # Colours: teal = below trend (cheap), coral = above trend (expensive)
 COL_CHEAP     = "#00c8a0"
@@ -226,13 +228,21 @@ def _read_csv_tickers(path: str, top: int) -> list[str]:
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def _fetch_one(ticker: str) -> tuple[str, dict]:
-    """Return (ticker, info_dict). On error, returns (ticker, {})."""
-    try:
-        info = yf.Ticker(ticker).info
-        return ticker, info or {}
-    except Exception:
-        return ticker, {}
+def _fetch_one(ticker: str, retries: int = 3) -> tuple[str, dict]:
+    """Return (ticker, info_dict). Retries up to `retries` times with
+    exponential back-off to handle Yahoo Finance rate limits gracefully.
+    A small random jitter is added before each attempt to avoid request bursts."""
+    for attempt in range(retries):
+        time.sleep(random.uniform(0.05, 0.20))   # spread concurrent requests
+        try:
+            info = yf.Ticker(ticker).info
+            if info:
+                return ticker, info
+        except Exception:
+            pass
+        if attempt < retries - 1:
+            time.sleep(0.5 * (2 ** attempt))     # 0.5 s, 1.0 s back-off
+    return ticker, {}
 
 
 def _fetch_all(tickers: list[str]) -> dict[str, dict]:
@@ -280,7 +290,7 @@ def _extract(ticker: str, info: dict) -> dict:
     ev_s         = _num(info.get("enterpriseToRevenue"))
 
     eps_growth   = _pct(info.get("earningsGrowth")) or _pct(info.get("earningsQuarterlyGrowth"))
-    pe           = _num(info.get("trailingPE")) or _num(info.get("forwardPE"))
+    pe           = _num(info.get("trailingPE"))
 
     fcf_raw      = _num(info.get("freeCashflow"))
     rev_raw      = _num(info.get("totalRevenue"))
@@ -296,21 +306,42 @@ def _extract(ticker: str, info: dict) -> dict:
     pb           = _num(info.get("priceToBook"))
     return_52w   = _pct(info.get("fiftyTwoWeekChange"))
 
+    # ── Forward metrics ───────────────────────────────────────────────────────
+    # forwardPE and forwardEps are analyst-consensus fields already in .info.
+    fwd_pe        = _num(info.get("forwardPE"))
+    fwd_eps       = _num(info.get("forwardEps"))
+    trail_eps     = _num(info.get("trailingEps"))
+    if fwd_eps is not None and trail_eps is not None and trail_eps != 0:
+        fwd_eps_growth = (fwd_eps - trail_eps) / abs(trail_eps) * 100.0
+    else:
+        fwd_eps_growth = None
+
+    # Estimated NTM EV/S: project TTM revenue one year forward at the TTM
+    # growth rate.  Not analyst consensus — treat as directional only.
+    if ev_raw and rev_raw and rev_raw > 0 and rev_growth is not None:
+        proj_rev = rev_raw * (1.0 + rev_growth / 100.0)
+        fwd_ev_s = (ev_raw / proj_rev) if proj_rev > 0 else None
+    else:
+        fwd_ev_s = None
+
     return {
-        "ticker":       ticker,
-        "name":         name,
-        "rule40":       rule40,
-        "ev_s":         ev_s,
-        "rev_growth":   rev_growth,
-        "eps_growth":   eps_growth,
-        "pe":           pe,
-        "fcf_margin":   fcf_margin,
-        "ev_fcf":       ev_fcf,
-        "ev_ebitda":    ev_ebitda,
-        "roe":          roe,
-        "gross_margin": gross_margin,
-        "pb":           pb,
-        "return_52w":   return_52w,
+        "ticker":        ticker,
+        "name":          name,
+        "rule40":        rule40,
+        "ev_s":          ev_s,
+        "rev_growth":    rev_growth,
+        "eps_growth":    eps_growth,
+        "pe":            pe,
+        "fcf_margin":    fcf_margin,
+        "ev_fcf":        ev_fcf,
+        "ev_ebitda":     ev_ebitda,
+        "roe":           roe,
+        "gross_margin":  gross_margin,
+        "pb":            pb,
+        "return_52w":    return_52w,
+        "fwd_pe":        fwd_pe,
+        "fwd_eps_growth": fwd_eps_growth,
+        "fwd_ev_s":      fwd_ev_s,
     }
 
 
@@ -372,12 +403,28 @@ def _make_scatter(
     xs = [r[x_key] for r in valid]
     ys = [r[y_key] for r in valid]
 
-    # Clip extreme Y values
+    # Clip extreme Y values for display
     y_max = _clip_outliers(ys, y_clip_pct)
 
-    # Compute trend line
+    # ── OLS subset: exclude extreme-X outliers robustly on any dataset size ──
+    # Sort by X and drop the outermost `n_excl` points from each end.
+    # This handles small CSVs (15 tickers) where a 1st-percentile cut is useless,
+    # as well as large indices where a handful of extreme tickers skew the slope.
+    n_excl = max(1, int(len(xs) * 0.05))          # ~5 % from each end, min 1
+    n_excl = min(n_excl, max(1, len(xs) // 5))    # never more than 20 % from each end
+    _sorted = sorted(zip(xs, ys), key=lambda t: t[0])
+    inner   = _sorted[n_excl : len(_sorted) - n_excl] if len(_sorted) > 2 * n_excl else _sorted
+    _y_lo   = y_floor if y_floor is not None else 0.0
+    _y_hi   = y_max   if y_max  is not None else float(np.percentile(ys, 99))
+    ols_pts = [(x, y) for x, y in inner if _y_lo <= y <= _y_hi]
+    _ols_ok = len(ols_pts) >= 5
+    xs_ols  = [x for x, y in ols_pts]
+    ys_ols  = [y for x, y in ols_pts]
+
+    # Compute trend coefficients on the inner subset
     try:
-        coeffs = np.polyfit(xs, ys, 1)
+        coeffs = np.polyfit(xs_ols if _ols_ok else xs,
+                            ys_ols if _ols_ok else ys, 1)
     except Exception:
         coeffs = None
 
@@ -413,12 +460,20 @@ def _make_scatter(
         showlegend=False,
     ))
 
-    # Trend line
-    if coeffs is not None:
-        x_range, y_range = _trend_line(xs, ys)
-        if x_range is not None:
+    # Trend line — span the OLS inner range only (avoids extending into extreme
+    # outlier territory), then TRIM (not clamp) to [y_floor, y_max] so there is
+    # never a flat horizontal segment at the floor.
+    if coeffs is not None and _ols_ok:
+        x_tl = np.linspace(min(xs_ols), max(xs_ols), 200)
+        y_tl = np.polyval(coeffs, x_tl)
+        mask = np.ones(len(x_tl), dtype=bool)
+        if y_floor is not None:
+            mask &= (y_tl >= y_floor)
+        if y_max is not None:
+            mask &= (y_tl <= y_max)
+        if mask.sum() >= 2:
             fig.add_trace(go.Scatter(
-                x=x_range.tolist(), y=y_range.tolist(),
+                x=x_tl[mask].tolist(), y=y_tl[mask].tolist(),
                 mode="lines",
                 line=dict(color=COL_TREND, width=1.5, dash="dot"),
                 hoverinfo="skip",
@@ -443,7 +498,8 @@ def _make_scatter(
 
 def _style_fig(fig: go.Figure, title: str, x_label: str, y_label: str,
                y_max: float | None = None, y_floor: float | None = None) -> None:
-    y_range = [y_floor if y_floor is not None else None, y_max]
+    y_range    = [y_floor if y_floor is not None else None, y_max]
+    _fix_range = y_floor is not None or y_max is not None
     fig.update_layout(
         title=dict(text=title, font=dict(size=18, color=TEXT_COL), x=0.5, xanchor="center"),
         paper_bgcolor=BG_DARK,
@@ -458,6 +514,7 @@ def _style_fig(fig: go.Figure, title: str, x_label: str, y_label: str,
             title=y_label,
             gridcolor=GRID_COL, zerolinecolor=GRID_COL,
             range=y_range,
+            autorange=False if _fix_range else True,
             showspikes=True, spikecolor="#555", spikethickness=1,
         ),
         hoverlabel=dict(bgcolor="#1e2730", bordercolor="#333", font_size=12),
@@ -571,63 +628,137 @@ CHART_DESCRIPTIONS: dict[str, tuple[str, str]] = {
         "quality than peers growing at the same speed. <b>Coral points</b> have lower margins than "
         "expected — their growth may be more expensive to sustain.",
     ),
+    # ── Forward chart descriptions ─────────────────────────────────────────────
+    "Fwd Rule of 40": (
+        "What it shows",
+        "The TTM Rule of 40 score (revenue growth + EBITDA margin) plotted against analyst-consensus "
+        "Forward P/E. This asks: 'for a given level of combined growth and profitability, how many "
+        "times next year's earnings is the market willing to pay?' <b>Teal points</b> run a strong "
+        "Rule of 40 but carry a modest forward earnings multiple — the market may not yet be pricing "
+        "in the operational efficiency. <b>Coral points</b> carry a premium forward multiple relative "
+        "to their efficiency score. Unlike plotting Rule of 40 against forward EV/S, using Forward P/E "
+        "avoids a mechanical inverse correlation caused by high growth deflating the estimated forward "
+        "revenue denominator.",
+    ),
+    "Fwd Rev Growth": (
+        "What it shows",
+        "TTM revenue growth against analyst-consensus Forward P/E. Useful for identifying where the "
+        "market is paying a high earnings multiple for companies that haven't yet shown strong top-line "
+        "growth, and vice versa. <b>Teal points</b> with strong TTM revenue growth and a low forward "
+        "P/E are priced conservatively — the market may be sceptical the growth will persist, creating "
+        "a potential opportunity if it does. <b>Coral points</b> with modest growth and a high forward "
+        "P/E are pricing in a future improvement that hasn't materialised yet.",
+    ),
+    "Fwd PEG": (
+        "What it shows",
+        "The forward PEG ratio visualised as a scatter — using analyst-consensus forward P/E "
+        "on the Y-axis and forward EPS growth (derived from consensus forward EPS vs trailing EPS) "
+        "on the X-axis. Both inputs are consensus-based, making this more reliable than the TTM "
+        "PEG chart. A forward PEG near 1× (P/E equals growth rate) is historically considered "
+        "fair value. <b>Teal points</b> have a low implied forward PEG — the market is pricing "
+        "earnings growth cheaply relative to consensus expectations. <b>Coral points</b> carry "
+        "a premium; the market expects the growth to be sustained or accelerate further.",
+    ),
+    "Fwd FCF": (
+        "What it shows",
+        "TTM FCF margin against estimated forward EV/Revenue. Companies with strong TTM free "
+        "cash flow and a low forward multiple are particularly interesting — the market may be "
+        "applying a 'revenue slowdown' discount that undervalues the underlying cash generation "
+        "quality. Since FCF is hard to inflate and changes slowly, a high TTM FCF margin paired "
+        "with a cheap forward multiple is one of the more durable valuation signals. "
+        "<b>Teal points</b> fit this profile; <b>coral points</b> carry a full forward premium "
+        "for their cash conversion.",
+    ),
+    "Fwd Gross Margin": (
+        "What it shows",
+        "TTM gross margin (a slow-moving structural quality indicator) against estimated forward "
+        "EV/Revenue. High gross margin reflects pricing power that compounds over time — using it "
+        "against a forward multiple helps identify companies where the market is discounting a "
+        "durable competitive advantage. <b>Teal points</b> have structural quality priced at a "
+        "modest forward multiple. <b>Coral points</b> are paying a full forward premium for their "
+        "margin profile — justified if growth is accelerating, risky if it isn't.",
+    ),
+    "Fwd ROIC": (
+        "What it shows",
+        "TTM return on equity (capital efficiency proxy) against analyst-consensus forward P/E. "
+        "The forward Buffett framework: the market sets a forward earnings multiple that should "
+        "reflect how well the business compounds capital going forward. <b>Teal points</b> with "
+        "high ROE and low forward P/E are the most compelling — the market is pricing in "
+        "mean-reversion in a business that has historically deployed capital well. "
+        "<b>Coral points</b> with low ROE and high forward P/E are pricing in a turnaround in "
+        "capital efficiency that consensus earnings already embed.",
+    ),
+    "Fwd Momentum": (
+        "What it shows",
+        "52-week price return against estimated forward EV/Revenue. The momentum + forward "
+        "valuation combination highlights the most actionable re-rating setups. <b>Teal points</b> "
+        "with strong momentum but low forward multiples suggest the market hasn't fully priced "
+        "the move — potential continued re-rating. <b>Coral points</b> in the upper-right are "
+        "the highest-risk setup: expensive on a forward basis and already priced for perfection. "
+        "Stocks in the lower-left (negative return, low forward multiple) are either unloved "
+        "value opportunities or value traps — the quality tabs help distinguish which.",
+    ),
 }
 
 
 # ── HTML assembly ─────────────────────────────────────────────────────────────
 
-def _build_html(charts: list[tuple[str, go.Figure]], index_label: str, n_tickers: int) -> str:
+def _build_html(
+    charts_ttm: list[tuple[str, go.Figure]],
+    charts_fwd: list[tuple[str, go.Figure]],
+    index_label: str,
+    n_tickers: int,
+) -> str:
     """
-    Assemble a single self-contained HTML page with a tab bar.
-    The first figure exports Plotly.js via CDN; the rest use include_plotlyjs=False.
+    Assemble a self-contained HTML page with a TTM / Forward mode bar and
+    per-mode chart tab bars.  The very first figure exports Plotly.js via CDN.
     """
     today = datetime.date.today().strftime("%B %d, %Y")
 
-    tab_labels = [label for label, _ in charts]
-    tab_ids    = [f"tab{i}" for i in range(len(charts))]
+    # ── render one mode section ──────────────────────────────────────────────
+    def _render_section(charts, prefix, first_chart_idx):
+        tab_ids = [f"{prefix}-tab{i}" for i in range(len(charts))]
+        divs    = []
+        oi      = first_chart_idx
+        for i, (_, fig) in enumerate(charts):
+            div = pio.to_html(
+                fig,
+                full_html=False,
+                include_plotlyjs="cdn" if oi == 0 else False,
+                config={"displayModeBar": True, "scrollZoom": True,
+                        "modeBarButtonsToRemove": ["toImage"],
+                        "responsive": True},
+                div_id=f"chart-{tab_ids[i]}",
+            )
+            divs.append(div)
+            oi += 1
 
-    # Render each figure to an HTML div string
-    divs = []
-    for i, (_, fig) in enumerate(charts):
-        include_js = "cdn" if i == 0 else False
-        div = pio.to_html(
-            fig,
-            full_html=False,
-            include_plotlyjs=include_js,
-            config={"displayModeBar": True, "scrollZoom": True,
-                    "modeBarButtonsToRemove": ["toImage"],
-                    "responsive": True},
-            div_id=f"chart-{tab_ids[i]}",
+        tab_buttons = "\n".join(
+            f'  <button class="tab-btn{" active" if i == 0 else ""}" '
+            f'onclick="showTab(\'{prefix}\', \'{tab_ids[i]}\')" id="btn-{tab_ids[i]}">'
+            f'{label}</button>'
+            for i, (label, _) in enumerate(charts)
         )
-        divs.append(div)
 
-    # Tab bar HTML
-    tab_buttons = "\n".join(
-        f'  <button class="tab-btn{" active" if i==0 else ""}" '
-        f'onclick="showTab(\'{tab_ids[i]}\')" id="btn-{tab_ids[i]}">'
-        f'{label}</button>'
-        for i, label in enumerate(tab_labels)
-    )
+        pane_parts = []
+        for i, (label, _) in enumerate(charts):
+            desc = CHART_DESCRIPTIONS.get(label, ("", ""))
+            desc_html = (
+                f'<div class="chart-desc">'
+                f'<span class="desc-heading">{desc[0]} &mdash;</span> '
+                f'{desc[1]}'
+                f'</div>'
+            ) if desc[1] else ""
+            pane_parts.append(
+                f'<div class="chart-pane{" active" if i == 0 else ""}" id="pane-{tab_ids[i]}">'
+                f'\n{divs[i]}\n'
+                f'{desc_html}'
+                f'</div>'
+            )
+        return tab_buttons, "\n".join(pane_parts), oi
 
-    # Chart divs (first visible, rest hidden) — each pane has the plot then a description block
-    pane_parts = []
-    for i, (label, div) in enumerate(zip(tab_labels, divs)):
-        desc = CHART_DESCRIPTIONS.get(label, ("", ""))
-        desc_heading = desc[0]
-        desc_body    = desc[1]
-        desc_html = (
-            f'<div class="chart-desc">'
-            f'<span class="desc-heading">{desc_heading} &mdash;</span> '
-            f'{desc_body}'
-            f'</div>'
-        ) if desc_body else ""
-        pane_parts.append(
-            f'<div class="chart-pane{" active" if i==0 else ""}" id="pane-{tab_ids[i]}">'
-            f'\n{div}\n'
-            f'{desc_html}'
-            f'</div>'
-        )
-    chart_divs = "\n".join(pane_parts)
+    ttm_tabs, ttm_panes, ni = _render_section(charts_ttm, "ttm", 0)
+    fwd_tabs, fwd_panes, _  = _render_section(charts_fwd,  "fwd", ni)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -654,6 +785,18 @@ def _build_html(charts: list[tuple[str, go.Figure]], index_label: str, n_tickers
                     width: 90px; letter-spacing: 0.05em; }}
   #ticker-search::placeholder {{ color: #444; }}
   #search-status {{ font-size: 0.72rem; min-width: 60px; }}
+  /* ── mode bar ────────────────────────────────────────────────────────── */
+  .mode-bar {{ display: flex; gap: 8px; padding: 12px 20px 10px;
+               border-bottom: 1px solid #1e2730; }}
+  .mode-btn {{ background: #1a2330; border: 1px solid #2a3540; color: #aaa;
+               padding: 7px 22px; border-radius: 6px; cursor: pointer;
+               font-size: 0.82rem; font-family: inherit; font-weight: 600;
+               transition: background 0.15s, color 0.15s; letter-spacing: 0.04em; }}
+  .mode-btn:hover  {{ background: #243040; color: #ccc; }}
+  .mode-btn.active {{ background: {COL_CHEAP}; color: #0a1015; border-color: {COL_CHEAP}; }}
+  .mode-section        {{ display: none; }}
+  .mode-section.active {{ display: block; }}
+  /* ── chart tabs ──────────────────────────────────────────────────────── */
   .tab-bar  {{ display: flex; gap: 4px; padding: 14px 20px 0;
                border-bottom: 1px solid #1e2730; flex-wrap: wrap; }}
   .tab-btn  {{ background: #1a2330; border: 1px solid #2a3540;
@@ -665,7 +808,7 @@ def _build_html(charts: list[tuple[str, go.Figure]], index_label: str, n_tickers
                      border-bottom-color: {BG_DARK}; }}
   .chart-pane        {{ display: none; padding: 10px 20px 0; }}
   .chart-pane.active {{ display: block; }}
-  .chart-pane > div  {{ width: 100%; height: calc(100vh - 150px); }}
+  .chart-pane > div  {{ width: 100%; height: calc(100vh - 190px); }}
   .chart-desc  {{ margin: 18px 4px 28px; padding: 16px 20px;
                   background: #1a2330; border-left: 3px solid #2a4060;
                   border-radius: 0 6px 6px 0;
@@ -688,14 +831,40 @@ def _build_html(charts: list[tuple[str, go.Figure]], index_label: str, n_tickers
     <span id="search-status"></span>
   </div>
 </header>
-<nav class="tab-bar">
-{tab_buttons}
+<nav class="mode-bar">
+  <button class="mode-btn active" onclick="setMode('ttm')" id="modebtn-ttm">TTM</button>
+  <button class="mode-btn" onclick="setMode('fwd')" id="modebtn-fwd">Forward (est.)</button>
 </nav>
-{chart_divs}
+<section id="section-ttm" class="mode-section active">
+<nav class="tab-bar">
+{ttm_tabs}
+</nav>
+{ttm_panes}
+</section>
+<section id="section-fwd" class="mode-section">
+<nav class="tab-bar">
+{fwd_tabs}
+</nav>
+{fwd_panes}
+</section>
 <script>
-function showTab(id) {{
-  document.querySelectorAll(".chart-pane").forEach(p => p.classList.remove("active"));
-  document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+var _curMode = "ttm";
+
+function setMode(mode) {{
+  _curMode = mode;
+  document.querySelectorAll(".mode-section").forEach(s => s.classList.remove("active"));
+  document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+  document.getElementById("section-" + mode).classList.add("active");
+  document.getElementById("modebtn-" + mode).classList.add("active");
+  var el = _activeEl();
+  if (el && window.Plotly) window.Plotly.Plots.resize(el);
+  _reapplySearch();
+}}
+
+function showTab(mode, id) {{
+  var section = document.getElementById("section-" + mode);
+  section.querySelectorAll(".chart-pane").forEach(p => p.classList.remove("active"));
+  section.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
   document.getElementById("pane-" + id).classList.add("active");
   document.getElementById("btn-"  + id).classList.add("active");
   var divEl = document.querySelector("#pane-" + id + " [id^='chart-']");
@@ -710,7 +879,9 @@ var _origMkr   = {{}};   // chartId → {{ colors, size }}
 var _lastQuery = "";
 
 function _activeEl() {{
-  var pane = document.querySelector(".chart-pane.active");
+  var section = document.querySelector(".mode-section.active");
+  if (!section) return null;
+  var pane = section.querySelector(".chart-pane.active");
   return pane ? pane.querySelector("[id^='chart-']") : null;
 }}
 
@@ -932,8 +1103,69 @@ def main() -> None:
         )),
     ]
 
-    # ── 4. Write HTML ──────────────────────────────────────────────────────────
-    html    = _build_html(charts, index_label, n)
+    # ── 4. Build forward charts ────────────────────────────────────────────────
+    print("  Building forward charts…")
+    charts_fwd = [
+        ("Fwd Rule of 40", _make_scatter(
+            rows, "rule40", "fwd_pe",
+            x_label="Rule of 40 (Rev Growth % + EBITDA Margin %)",
+            y_label="Forward P/E (consensus)",
+            title="Fwd P/E vs Rule of 40",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd Rev Growth", _make_scatter(
+            rows, "rev_growth", "fwd_pe",
+            x_label="Revenue Growth YoY (%)",
+            y_label="Forward P/E (consensus)",
+            title="Fwd P/E vs Revenue Growth",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd PEG", _make_scatter(
+            rows, "fwd_eps_growth", "fwd_pe",
+            x_label="Fwd EPS Growth (consensus, %)",
+            y_label="Forward P/E",
+            title="Fwd P/E vs Fwd EPS Growth  (Forward PEG)",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd FCF", _make_scatter(
+            rows, "fcf_margin", "fwd_ev_s",
+            x_label="TTM Free Cash Flow Margin (%)",
+            y_label="Est. NTM EV / Revenue",
+            title="Fwd EV/S vs FCF Margin  (NTM est.)",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd Gross Margin", _make_scatter(
+            rows, "gross_margin", "fwd_ev_s",
+            x_label="Gross Margin (%)",
+            y_label="Est. NTM EV / Revenue",
+            title="Fwd EV/S vs Gross Margin  (NTM est.)",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd ROIC", _make_scatter(
+            rows, "roe", "fwd_pe",
+            x_label="Return on Equity % (ROIC proxy)",
+            y_label="Forward P/E",
+            title="Fwd P/E vs ROE  (ROIC proxy)",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+        ("Fwd Momentum", _make_scatter(
+            rows, "return_52w", "fwd_ev_s",
+            x_label="52-Week Price Return (%)",
+            y_label="Est. NTM EV / Revenue",
+            title="Fwd EV/S vs 52-Week Return  (NTM est.)",
+            x_fmt=".1f", y_fmt=".1f",
+            y_floor=0,
+        )),
+    ]
+
+    # ── 5. Write HTML ──────────────────────────────────────────────────────────
+    html    = _build_html(charts, charts_fwd, index_label, n)
     today   = datetime.date.today().strftime("%Y_%m_%d")
     outfile = os.path.join(OUTPUT_DIR, f"{today}_scatter_{slug}.html")
 

@@ -118,7 +118,8 @@ SCRIPTS = {
                  type="entry",  flag="--tickers",
                  required=False, default=""),
             dict(id="csv",     label="Custom CSV",     type="file",   flag="--csv",
-                 required=False, default=""),
+                 required=False, default="",
+                 mutex_with=["index", "tickers"]),
         ],
     },
     "Sentiment Analyzer": {
@@ -327,8 +328,17 @@ def api_run():
     cmd  = [sys.executable, "-u", info["path"]]  # -u = unbuffered stdout
     cwd  = os.path.dirname(info["path"])
 
+    # Pre-scan: if any param has mutex_with and a non-empty value, skip those peers
+    mutex_skip: set[str] = set()
+    for p in info["params"]:
+        val_pre = str(params.get(p["id"], p.get("default", ""))).strip()
+        if val_pre and p.get("mutex_with"):
+            mutex_skip.update(p["mutex_with"])
+
     for p in info["params"]:
         pid   = p["id"]
+        if pid in mutex_skip:
+            continue
         ptype = p["type"]
         flag  = p.get("flag")
         val   = params.get(pid, p.get("default", ""))
@@ -339,7 +349,10 @@ def api_run():
         elif ptype == "file":
             val = str(val).strip()
             if val:
-                cmd.append(val)
+                if flag:
+                    cmd.extend([flag, val])
+                else:
+                    cmd.append(val)
         else:
             val = str(val).strip()
             if not val:
@@ -419,7 +432,11 @@ def api_stop(run_id: str):
 
 @app.route("/api/exit", methods=["POST"])
 def api_exit():
-    threading.Timer(0.3, lambda: sys.exit(0)).start()
+    # os._exit() terminates the entire process regardless of which thread calls
+    # it.  sys.exit() only raises SystemExit in the calling thread — when called
+    # from a Timer thread it leaves the Flask main thread (and the bound socket)
+    # alive, so the port stays occupied and macOS keeps the app registered.
+    threading.Timer(0.3, lambda: os._exit(0)).start()
     return jsonify({"ok": True})
 
 
@@ -431,10 +448,9 @@ def api_upload():
         return jsonify({"error": "No file received"}), 400
     safe_name = os.path.basename(f.filename)
     script    = request.args.get("script", "")
-    if script == "Scatter Plots":
-        dest_dir = os.path.join(ROOT, "5_scatterPlots")
-    else:
-        dest_dir = os.path.join(ROOT, "4_portfolioAnalyzer")
+    # All CSV uploads land in one shared folder so the same file works across
+    # Portfolio Analyzer, Sentiment Analyzer, and Scatter Plots without re-uploading.
+    dest_dir = os.path.join(ROOT, "4_portfolioAnalyzer")
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, safe_name)
     f.save(dest)
@@ -1161,7 +1177,7 @@ if __name__ == "__main__":
     # ── Clean SIGTERM handler (macOS Dock → Quit sends SIGTERM) ──────────────
     def _on_sigterm(sig, frame):
         print("\n  ValuationSuite — received stop signal, shutting down…")
-        sys.exit(0)
+        os._exit(0)
     _signal.signal(_signal.SIGTERM, _on_sigterm)
 
     # ── Clear stale yfinance cookie cache (prevents 401 Invalid Crumb) ───────

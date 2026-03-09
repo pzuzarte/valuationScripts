@@ -611,23 +611,27 @@ YF_YIELDS = {
     "30Y": "^TYX",
 }
 
-# FRED series IDs for each maturity (free CSV, no API key needed)
-FRED_YIELDS = [
-    ("1M",  "DGS1MO"),
-    ("3M",  "DGS3MO"),
-    ("6M",  "DGS6MO"),
-    ("1Y",  "DGS1"),
-    ("2Y",  "DGS2"),
-    ("3Y",  "DGS3"),
-    ("5Y",  "DGS5"),
-    ("7Y",  "DGS7"),
-    ("10Y", "DGS10"),
-    ("20Y", "DGS20"),
-    ("30Y", "DGS30"),
-]
+# US Treasury XML API field mapping (no API key needed)
+# Source: home.treasury.gov daily yield curve
+TREASURY_XML_MAP = {
+    "1M":  "BC_1MONTH",   # 4-week T-bill (field present from ~2018)
+    "3M":  "BC_3MONTH",
+    "6M":  "BC_6MONTH",
+    "1Y":  "BC_1YEAR",
+    "2Y":  "BC_2YEAR",
+    "3Y":  "BC_3YEAR",
+    "5Y":  "BC_5YEAR",
+    "7Y":  "BC_7YEAR",
+    "10Y": "BC_10YEAR",
+    "20Y": "BC_20YEAR",
+    "30Y": "BC_30YEAR",
+}
+
+# Keep FRED_YIELDS as an alias so nothing else breaks
+FRED_YIELDS = [(label, field) for label, field in TREASURY_XML_MAP.items()]
 
 # Ordered maturity labels (used in charts / tables)
-TREASURY_FIELDS = [(label, None) for label, _ in FRED_YIELDS]
+TREASURY_FIELDS = [(label, None) for label in TREASURY_XML_MAP]
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 def _safe(v):
@@ -1068,44 +1072,71 @@ def _ytd_perf(hist):
 # ── Data fetching ──────────────────────────────────────────────────────────────
 def fetch_treasury_yields() -> dict:
     """
-    Full yield curve via FRED CSV downloads (no API key needed).
-    Fetches all 11 maturities in parallel, builds a date-keyed history dict,
-    and returns {current: {mat: val, ...}, history: [{date, mat: val,...}, ...]}.
+    Full yield curve from the US Treasury XML API (no API key needed).
+
+    The endpoint paginates 300 rows per page, oldest-first.  As of March 2026
+    the dataset spans pages 0-30 (page 30 = most recent 50 entries).  To get
+    ~14 months of daily data we fetch a small window of pages ending at the
+    last non-empty page, discovered by probing downward from an upper bound.
+
+    Switched from FRED CSV (which hangs due to Cloudflare bot-detection) to:
+      home.treasury.gov/resource-center/data-chart-center/interest-rates/
+      pages/xml?data=daily_treasury_yield_curve&field_tdate_value=202603&page=N
     """
+    import re
+
     result   = {"current": {}, "history": []}
-    cutoff   = (datetime.date.today() - datetime.timedelta(days=400)).isoformat()
-    date_map = {}   # date → {maturity: value}
+    today    = datetime.date.today()
+    cutoff   = (today - datetime.timedelta(days=400)).isoformat()
+    date_map = {}
 
-    def _fetch_one(args):
-        label, series_id = args
-        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    _BASE = ("https://home.treasury.gov/resource-center/data-chart-center/"
+             "interest-rates/pages/xml"
+             "?data=daily_treasury_yield_curve&field_tdate_value=202603&page=")
+    _HDR  = {"User-Agent": "Mozilla/5.0 (compatible; ValuationSuite/2.0)"}
+
+    def _fetch_page(page: int) -> list:
+        """Return list of {date, maturity: val} dicts for one page."""
+        rows = []
         try:
-            req = Request(url, headers={"User-Agent": "ValuationSuite/1.0"})
-            with urlopen(req, timeout=20) as r:
+            req = Request(_BASE + str(page), headers=_HDR)
+            with urlopen(req, timeout=25) as r:
                 txt = r.read().decode("utf-8", errors="replace")
-            rows = []
-            for line in txt.strip().split("\n"):
-                if line.startswith("DATE"):
+            for entry in re.findall(r"<m:properties>(.*?)</m:properties>",
+                                    txt, re.DOTALL):
+                dm = re.search(r"<d:NEW_DATE[^>]*>(\d{4}-\d{2}-\d{2})", entry)
+                if not dm:
                     continue
-                parts = line.split(",")
-                if len(parts) != 2:
-                    continue
-                date_str, val_str = parts[0].strip(), parts[1].strip()
-                if date_str < cutoff or val_str in (".", ""):
-                    continue
-                v = _safe(val_str)
-                if v is not None:
-                    rows.append((date_str, v))
-            return label, rows
+                date_str = dm.group(1)
+                rec = {"date": date_str}
+                for label, xml_field in TREASURY_XML_MAP.items():
+                    vm = re.search(rf"<d:{xml_field}[^>]*>([0-9.]+)", entry)
+                    if vm:
+                        rec[label] = float(vm.group(1))
+                rows.append(rec)
         except Exception:
-            return label, []
+            pass
+        return rows
 
+    # Probe to find the last non-empty page (binary-search style, upper bound 60)
+    # Dataset grows by ~1 row/trading day; page size = 300 rows.
+    # Upper bound of 60 is safe until ~2036.
+    lo, hi = 0, 60
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _fetch_page(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    last_page = lo
+
+    # Fetch last_page and enough prior pages to cover cutoff (~2 pages = ~550 rows)
+    pages_to_fetch = list(range(max(0, last_page - 2), last_page + 1))
     with ThreadPoolExecutor(max_workers=6) as pool:
-        for label, rows in pool.map(_fetch_one, FRED_YIELDS):
-            for date_str, val in rows:
-                if date_str not in date_map:
-                    date_map[date_str] = {"date": date_str}
-                date_map[date_str][label] = val
+        for page_rows in pool.map(_fetch_page, pages_to_fetch):
+            for rec in page_rows:
+                if rec["date"] >= cutoff:
+                    date_map[rec["date"]] = rec
 
     if not date_map:
         return result
@@ -1228,42 +1259,78 @@ def fetch_yf_yield_history() -> dict:
 
 def fetch_buffett_index() -> dict:
     """
-    Buffett Indicator: Wilshire 5000 (^W5000 via yfinance) / US Nominal GDP (FRED).
+    Buffett Indicator: Wilshire 5000 (^W5000 via yfinance) / US Nominal GDP.
     Wilshire 5000 index points ≈ total US market cap in billions USD.
-    GDP from FRED in billions USD. Ratio × 100 = Buffett %.
+    GDP from Federal Reserve Z.1 f2.csv — FA086902005.Q (millions, SAAR).
+    Converted to billions (÷1000) to match traditional Buffett calculation.
     Sampled quarterly; 10 years of history.
     Interpretation: <80 undervalued · 80-100 fair · 100-120 modestly overvalued
                     120-150 overvalued · >150 significantly overvalued
     """
+    import re as _re, zipfile as _zf, io as _io, tempfile as _tmp, time as _tm
+    import requests as _req
+
     result = {"current": None, "label": None, "color": None, "history": []}
     try:
         # ── Wilshire 5000 via yfinance (10y daily → quarterly last close) ──────
         w_hist = yf.Ticker("^W5000").history(period="10y")
         if w_hist.empty:
             return result
-        # Remove timezone for consistent date arithmetic
         if hasattr(w_hist.index, "tz") and w_hist.index.tz is not None:
             w_hist.index = w_hist.index.tz_convert(None)
-        # Build quarter-keyed dict (last trading day of each calendar quarter)
         w_quarterly = {}   # "YYYY-Qn" → (date_str, close_val)
         for dt, row in w_hist.iterrows():
             q_key = f"{dt.year}-Q{(dt.month - 1) // 3 + 1}"
             w_quarterly[q_key] = (str(dt.date()), float(row["Close"]))
 
-        # ── GDP from FRED (quarterly, billions USD) ────────────────────────────
+        # ── GDP from Federal Reserve Z.1 (f2.csv, FA086902005.Q, millions SAAR) ─
+        # Reuse the same Z.1 ZIP already fetched/cached for money markets
+        page = _req.get("https://www.federalreserve.gov/releases/z1/",
+                        headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        m = _re.search(r'href=["\'](/releases/z1/\d{8}/z1_csv_files\.zip)["\']',
+                       page.text)
+        zip_url = ("https://www.federalreserve.gov" + m.group(1)) if m else \
+                  "https://www.federalreserve.gov/releases/z1/20260109/z1_csv_files.zip"
+
+        cache_path = os.path.join(
+            _tmp.gettempdir(),
+            "z1_csv_" + zip_url.split("/")[-2] + ".zip"
+        )
+        if os.path.exists(cache_path) and (_tm.time() - os.path.getmtime(cache_path)) < 86400:
+            with open(cache_path, "rb") as _f:
+                z_bytes = _f.read()
+        else:
+            resp = _req.get(zip_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            z_bytes = resp.content
+            with open(cache_path, "wb") as _f:
+                _f.write(z_bytes)
+
+        zf = _zf.ZipFile(_io.BytesIO(z_bytes))
+        content = zf.read("csv/f2.csv").decode("utf-8", errors="replace")
+
+        # Parse FA086902005.Q (GDP in millions SAAR) → billions ÷ 1000
         gdp_data = {}
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDP"
-        req = Request(url, headers={"User-Agent": "ValuationSuite/1.0"})
-        with urlopen(req, timeout=20) as r:
-            txt = r.read().decode("utf-8", errors="replace")
-        for line in txt.strip().split("\n"):
+        lines = content.strip().split("\n")
+        header = lines[0].split(",")
+        gdp_col = next((i for i, h in enumerate(header) if "FA086902005" in h), None)
+        if gdp_col is None:
+            return result
+        for line in lines[1:]:
             parts = line.split(",")
-            if len(parts) != 2:
+            if len(parts) <= gdp_col:
                 continue
-            d, v = parts[0].strip(), parts[1].strip()
-            fv = _safe(v)
-            if fv is not None and d >= "2010-01-01":
-                gdp_data[d] = fv
+            date_str = parts[0].strip()   # e.g. "2024:Q3"
+            val_str  = parts[gdp_col].strip()
+            if ":Q" not in date_str:
+                continue
+            year_s, q_s = date_str.split(":Q")
+            q_end = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}.get(q_s)
+            if not q_end:
+                continue
+            fv = _safe(val_str)
+            if fv is not None and fv > 0:
+                gdp_data[f"{year_s}-{q_end}"] = fv / 1000   # convert millions → billions
+
         if not gdp_data:
             return result
 
@@ -1305,41 +1372,70 @@ def fetch_buffett_index() -> dict:
 
 def fetch_money_markets() -> dict:
     """
-    Total US money market fund assets from FRED Z.1 financial accounts.
-    Series MMMFFAQ027S — Money Market Mutual Funds; Total Financial Assets (quarterly).
-    Auto-scales to trillions regardless of whether FRED returns millions or billions.
+    Total US money market fund assets — FL634090005.Q from Federal Reserve Z.1
+    (Table L.121, Money Market Funds, total financial assets, millions of dollars).
+    Source: federalreserve.gov/releases/z1 CSV ZIP (direct download, no API key required).
+    The ZIP is cached for 24 hours in the system temp directory.
     """
+    import re as _re, zipfile as _zf, io as _io, tempfile as _tmp, time as _tm
+    import requests as _req
+
     result = {"current": None, "change_yoy": None, "history": []}
-    cutoff = (datetime.date.today() - datetime.timedelta(days=365 * 7)).isoformat()
-    url    = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=MMMFFAQ027S"
+    cutoff_year = (datetime.date.today() - datetime.timedelta(days=365 * 7)).year
+
     try:
-        req = Request(url, headers={"User-Agent": "ValuationSuite/1.0"})
-        with urlopen(req, timeout=20) as r:
-            txt = r.read().decode("utf-8", errors="replace")
+        # ── 1. Find the latest Z.1 release ZIP URL ───────────────────────────────
+        page = _req.get("https://www.federalreserve.gov/releases/z1/",
+                        headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        m = _re.search(r'href=["\'](/releases/z1/\d{8}/z1_csv_files\.zip)["\']',
+                       page.text)
+        zip_url = ("https://www.federalreserve.gov" + m.group(1)) if m else \
+                  "https://www.federalreserve.gov/releases/z1/20260109/z1_csv_files.zip"
+
+        # ── 2. Cache the ZIP for 24 h to avoid re-downloading 7 MB each run ─────
+        cache_path = os.path.join(
+            _tmp.gettempdir(),
+            "z1_csv_" + zip_url.split("/")[-2] + ".zip"
+        )
+        if os.path.exists(cache_path) and (_tm.time() - os.path.getmtime(cache_path)) < 86400:
+            with open(cache_path, "rb") as _f:
+                z_bytes = _f.read()
+        else:
+            resp = _req.get(zip_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            z_bytes = resp.content
+            with open(cache_path, "wb") as _f:
+                _f.write(z_bytes)
+
+        # ── 3. Read L.121 CSV — FL634090005.Q = Money Market Funds total assets ──
+        zf      = _zf.ZipFile(_io.BytesIO(z_bytes))
+        content = zf.read("csv/l121.csv").decode("utf-8", errors="replace")
+
         rows = []
-        for line in txt.strip().split("\n"):
-            if line.startswith("DATE"):
+        for line in content.strip().split("\n"):
+            if not line or line.startswith("date"):
                 continue
             parts = line.split(",")
-            if len(parts) != 2:
+            if len(parts) < 2:
                 continue
-            d, v = parts[0].strip(), parts[1].strip()
-            if d < cutoff or v in (".", ""):
+            date_str = parts[0].strip()   # e.g. "2024:Q3"
+            val_str  = parts[1].strip()   # FL634090005.Q (millions)
+            if ":Q" not in date_str:
                 continue
-            fv = _safe(v)
-            if fv is not None:
-                rows.append({"date": d, "raw": fv})
+            year_s, q_s = date_str.split(":Q")
+            if int(year_s) < cutoff_year:
+                continue
+            q_end = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}.get(q_s)
+            if not q_end:
+                continue
+            fv = _safe(val_str)
+            if fv is not None and fv > 0:
+                rows.append({"date": f"{year_s}-{q_end}", "assets": round(fv / 1_000_000, 2)})
+
         if rows:
             rows.sort(key=lambda x: x["date"])
-            # Auto-detect units: millions (>1,000,000) or billions (>1,000)
-            sample = rows[-1]["raw"]
-            scale  = 1_000_000 if sample > 1_000_000 else 1_000 if sample > 1_000 else 1
-            for r in rows:
-                r["assets"] = round(r["raw"] / scale, 2)
-                del r["raw"]
-            result["history"] = rows
-            result["current"] = rows[-1]["assets"]
-            if len(rows) >= 5:   # ~1 year ago (4 quarters back)
+            result["history"]    = rows
+            result["current"]    = rows[-1]["assets"]
+            if len(rows) >= 5:
                 result["change_yoy"] = round(result["current"] - rows[-5]["assets"], 2)
     except Exception:
         pass
@@ -1450,35 +1546,46 @@ def fetch_shiller_cape() -> dict:
 
 def fetch_recession_prob() -> dict:
     """
-    NY Fed 12-month US recession probability (yield-curve model).
-    FRED series RECPROUSM156N — monthly, published with ~3-month lag.
+    NY Fed 12-month US recession probability computed from the yield-curve probit model
+    (Estrella & Mishkin).  P = Φ(−0.5261 + −0.5146 × spread) where spread = 10Y − 3M.
+    Source data: yfinance ^TNX (10Y) and ^IRX (3M), monthly resampled.
+    This replicates FRED RECPROUSM156N without requiring FRED access.
     >30% = high risk; >50% = danger zone.
     """
+    import pandas as _pd, numpy as _np
+    try:
+        from scipy.stats import norm as _norm
+    except ImportError:
+        return {"current": None, "label": None, "color": None, "history": []}
+
     result = {"current": None, "label": None, "color": None, "history": []}
     try:
-        url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=RECPROUSM156N"
-        req = Request(url, headers={"User-Agent": "ValuationSuite/1.0"})
-        with urlopen(req, timeout=20) as r:
-            txt = r.read().decode("utf-8", errors="replace")
-        rows = []
-        for line in txt.strip().split("\n"):
-            parts = line.split(",")
-            if len(parts) != 2:
-                continue
-            d, v = parts[0].strip(), parts[1].strip()
-            fv = _safe(v)
-            if fv is not None and d >= "2000-01-01":
-                rows.append({"date": d, "prob": round(fv, 2)})
+        _A, _B = -0.5261, -0.5146   # probit coefficients
+
+        tnx = yf.Ticker("^TNX").history(period="25y")["Close"]
+        irx = yf.Ticker("^IRX").history(period="25y")["Close"]
+        tnx.index = tnx.index.tz_convert("UTC").normalize()
+        irx.index = irx.index.tz_convert("UTC").normalize()
+
+        spread = tnx.resample("ME").last() - irx.resample("ME").last()
+        spread = spread.dropna()
+        prob   = _pd.Series(
+            [_norm.cdf(_A + _B * s) * 100 for s in spread.values],
+            index=spread.index,
+        )
+        prob = prob[prob.index >= "2000-01-01"].dropna()
+
+        rows = [{"date": str(d.date()), "prob": round(float(v), 2)}
+                for d, v in zip(prob.index, prob.values)]
         if rows:
-            rows.sort(key=lambda x: x["date"])
             result["history"] = rows
             cur = rows[-1]["prob"]
             result["current"] = cur
-            if   cur < 10: result["label"], result["color"] = "Low",        "#00c896"
-            elif cur < 20: result["label"], result["color"] = "Modest",     "#4fc08d"
-            elif cur < 30: result["label"], result["color"] = "Elevated",   "#f0a500"
-            elif cur < 50: result["label"], result["color"] = "High Risk",  "#e07b39"
-            else:          result["label"], result["color"] = "Danger Zone","#e05c5c"
+            if   cur < 10: result["label"], result["color"] = "Low",         "#00c896"
+            elif cur < 20: result["label"], result["color"] = "Modest",      "#4fc08d"
+            elif cur < 30: result["label"], result["color"] = "Elevated",    "#f0a500"
+            elif cur < 50: result["label"], result["color"] = "High Risk",   "#e07b39"
+            else:          result["label"], result["color"] = "Danger Zone", "#e05c5c"
     except Exception:
         pass
     return result
@@ -1486,45 +1593,74 @@ def fetch_recession_prob() -> dict:
 
 def fetch_credit_spreads() -> dict:
     """
-    ICE BofA OAS spreads from FRED.
-    HY: BAMLH0A0HYM2  ·  IG: BAMLC0A0CM
-    Daily data sampled weekly for charts (20-year history).
+    Credit spread proxies computed from yfinance ETF data (FRED is inaccessible).
+
+    HY proxy: HYG (iShares iBoxx $ High Yield) forward yield − 5Y Treasury (^FVX).
+    IG proxy: IGSB (iShares 1-5Y IG Corporate) forward yield − 3M Treasury (^IRX).
+
+    Forward yield = most recent monthly dividend × 12 / current price.
+    History uses rolling monthly forward yields; clipped to ≥ 0 and ≤ 20% (HY) / 8% (IG)
+    to suppress dividend-timing artefacts from double- or missed-payment months.
     """
+    import pandas as _pd, numpy as _np
+
     result = {"hy": {"current": None, "history": []},
               "ig": {"current": None, "history": []}}
 
-    def _fetch_oas(series_id):
-        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-        try:
-            req = Request(url, headers={"User-Agent": "ValuationSuite/1.0"})
-            with urlopen(req, timeout=20) as r:
-                txt = r.read().decode("utf-8", errors="replace")
-            rows = []
-            for line in txt.strip().split("\n"):
-                parts = line.split(",")
-                if len(parts) != 2:
-                    continue
-                d, v = parts[0].strip(), parts[1].strip()
-                fv = _safe(v)
-                if fv is not None and d >= "2004-01-01":
-                    rows.append({"date": d, "spread": round(fv, 3)})
-            if rows:
-                rows.sort(key=lambda x: x["date"])
-                return rows[-1]["spread"], rows[::5]   # current, weekly sample
-            return None, []
-        except Exception:
-            return None, []
+    try:
+        # ── Treasury benchmarks ───────────────────────────────────────────────────
+        fvx_info = yf.Ticker("^FVX").fast_info
+        irx_info = yf.Ticker("^IRX").fast_info
+        tsy5  = float(fvx_info.last_price)   # 5Y Treasury (%)
+        tsy3m = float(irx_info.last_price)   # 3M Treasury (%)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        f_hy = pool.submit(_fetch_oas, "BAMLH0A0HYM2")
-        f_ig = pool.submit(_fetch_oas, "BAMLC0A0CM")
-        hy_cur, hy_hist = f_hy.result()
-        ig_cur, ig_hist = f_ig.result()
+        def _fwd_spread_series(ticker, benchmark_series, lo_clip, hi_clip):
+            """Rolling-12M trailing yield spread vs benchmark — stable across div timing."""
+            h = yf.Ticker(ticker).history(period="6y")[["Close", "Dividends"]]
+            h.index = h.index.tz_convert("UTC").normalize()
+            bm = yf.Ticker(benchmark_series).history(period="6y")[["Close"]]
+            bm.index = bm.index.tz_convert("UTC").normalize()
 
-    result["hy"]["current"] = hy_cur
-    result["hy"]["history"] = hy_hist
-    result["ig"]["current"] = ig_cur
-    result["ig"]["history"] = ig_hist
+            # 63-day (~3 month) rolling sum, annualised ×4.
+            # Shorter window keeps the yield responsive during rapid rate moves
+            # (252-day window lagged Fed hikes by a full year, causing IG to read ~0%).
+            h["roll_div"]    = h["Dividends"].rolling(63, min_periods=45).sum()
+            h["trail_yield"] = h["roll_div"] / h["Close"] * 100 * 4   # annualise
+            # Align benchmark to ETF trading days
+            bm_aligned = bm["Close"].reindex(h.index, method="ffill")
+            spread_d = (h["trail_yield"] - bm_aligned).dropna()
+            spread_d = spread_d.clip(lower=lo_clip, upper=hi_clip)
+            # Monthly sample (last business day each month)
+            spread_m = spread_d.resample("ME").last()
+            spread_m = spread_m[spread_m.index >= "2020-01-01"]
+
+            rows = [{"date": str(d.date()), "spread": round(float(v), 3)}
+                    for d, v in zip(spread_m.index, spread_m.values)]
+            cur = rows[-1]["spread"] if rows else None
+            return cur, rows   # monthly cadence
+
+        # ── HY: HYG − ^FVX ────────────────────────────────────────────────────────
+        def _current_fwd_yield(ticker):
+            h = yf.Ticker(ticker).history(period="35d")
+            divs = h[h["Dividends"] > 0]["Dividends"]
+            if divs.empty:
+                return None
+            return float(divs.iloc[-1]) * 12 / float(h["Close"].iloc[-1]) * 100
+
+        hy_yield = _current_fwd_yield("HYG")
+        ig_yield = _current_fwd_yield("IGSB")
+        hy_cur = round(hy_yield - tsy5,  3) if hy_yield else None
+        ig_cur = round(ig_yield - tsy3m, 3) if ig_yield else None
+
+        hy_hist_cur, hy_hist = _fwd_spread_series("HYG",  "^FVX",  0.0, 20.0)
+        ig_hist_cur, ig_hist = _fwd_spread_series("IGSB", "^IRX",  0.0,  8.0)
+
+        result["hy"]["current"] = hy_cur if hy_cur is not None else hy_hist_cur
+        result["hy"]["history"] = hy_hist
+        result["ig"]["current"] = ig_cur if ig_cur is not None else ig_hist_cur
+        result["ig"]["history"] = ig_hist
+    except Exception:
+        pass
     return result
 
 
@@ -2266,7 +2402,7 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
         h += f'<div style="text-align:center;color:{rec_color};font-weight:600;margin-bottom:8px">{rec_label}</div>'
     else:
         h += '<div class="stat-val" style="color:var(--muted);text-align:center">—</div>'
-    h += ('<p class="note">Yield-curve model (10Y-3M spread). Published with ~3-month lag. '
+    h += ('<p class="note">NY Fed probit model (10Y−3M spread). '
           '&lt;10% low · 20-30% elevated · &gt;30% high risk.</p>')
     h += '</div>'
 
@@ -2301,10 +2437,10 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
     h += '</div>'
 
     h += (f'<div class="chart-card">'
-          f'<h3>HY &amp; IG Credit Spreads — 20-Year History {help_btn("credit-spread-chart")}</h3>'
+          f'<h3>HY &amp; IG Credit Spreads — 5-Year History {help_btn("credit-spread-chart")}</h3>'
           '<div class="chart-wrap" style="height:200px"><canvas id="chart-oas"></canvas></div>'
           '<p class="note" style="margin-top:8px">Spread spikes = credit stress / risk-off. '
-          'Source: ICE BofA via FRED.</p>'
+          'Proxy via HYG/IGSB trailing yield vs Treasury benchmark (FRED unavailable).</p>'
           '</div>')
     h += '</div>'  # two-col
 
@@ -2327,7 +2463,7 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
           f'<h3>NY Fed 12-Month Recession Probability {help_btn("recession-chart")}</h3>'
           '<div class="chart-wrap" style="height:180px"><canvas id="chart-recession"></canvas></div>'
           '<p class="note" style="margin-top:8px">Shaded area = NBER recession periods. '
-          'Source: FRED RECPROUSM156N. Published with ~3-month lag.</p>'
+          'Source: NY Fed probit model (10Y−3M spread via yfinance ^TNX/^IRX). ~3-month lag.</p>'
           '</div>')
 
     # ── Cash on Sidelines ──────────────────────────────────────────────────────
@@ -2360,8 +2496,8 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
     h += (f'<div class="chart-card">'
           f'<h3>Money Market Fund Assets — History ($T) {help_btn("money-markets")}</h3>'
           '<div class="chart-wrap" style="height:200px"><canvas id="chart-mktmoney"></canvas></div>'
-          '<p class="note" style="margin-top:8px">Source: FRED MMMFFAQ027S '
-          '— Federal Reserve Z.1 Financial Accounts (quarterly).</p>'
+          '<p class="note" style="margin-top:8px">Source: Federal Reserve Z.1 L.121 '
+          '(FL634090005.Q, quarterly). Lags ~1 quarter.</p>'
           '</div>')
     h += '</div>'  # two-col
 
@@ -2409,9 +2545,10 @@ def _tab_macro_signals(buffett: dict, money_mkt: dict, global_idx: dict,
     h += '<div class="two-col" style="margin-top:16px">'
     h += (f'<div class="chart-card">'
           f'<h3>QQQ vs Global Indices — 1Y Normalised (Base = 100) {help_btn("global-norm-chart")}</h3>'
-          '<div class="chart-wrap" style="height:300px"><canvas id="chart-global-norm"></canvas></div>'
+          '<div class="chart-wrap" style="height:360px"><canvas id="chart-global-norm"></canvas></div>'
           '<p class="note" style="margin-top:8px">All set to 100 at start of window. '
-          'QQQ shown in bold blue as the growth benchmark. Sampled weekly for clarity.</p></div>')
+          'QQQ (bold blue) is the growth benchmark. Dashed lines = broad aggregates (EFA, EEM). '
+          'Sampled weekly for clarity.</p></div>')
     h += (f'<div class="chart-card">'
           f'<h3>Global 1M Returns — Ranked Best to Worst {help_btn("global-bar-chart")}</h3>'
           '<div class="chart-wrap" style="height:300px"><canvas id="chart-global-bar"></canvas></div>'
@@ -3056,16 +3193,20 @@ if(mmCtx){{
 """
 
     # ── 11. Global indices normalised (QQQ vs World) ──────────────────────────
-    # Chart subset: QQQ, SPY, VGK, EWJ, EFA, MCHI, INDA, EEM — 8 lines, weekly
+    # Chart subset: QQQ, SPY, EWC, VGK, EWJ, EFA, MCHI, INDA, EEM — 9 lines, weekly
+    # Colors chosen from across the spectrum for maximum distinctiveness on dark bg.
+    # EFA and EEM are aggregates → dashed to visually subordinate them.
+    # (ticker, label, color, borderWidth, borderDash)
     gi_spec = [
-        ("QQQ",  "QQQ (US Growth)",    "#4f8ef7", 3.0),
-        ("SPY",  "SPY (US)",           "#60a5fa", 1.8),
-        ("VGK",  "VGK (Europe)",       "#00c896", 1.8),
-        ("EWJ",  "EWJ (Japan)",        "#4fc08d", 1.8),
-        ("EFA",  "EFA (Dev. ex-US)",   "#34d399", 1.5),
-        ("MCHI", "MCHI (China)",       "#f0a500", 1.8),
-        ("INDA", "INDA (India)",       "#fb923c", 1.8),
-        ("EEM",  "EEM (Emerging)",     "#e07b39", 1.5),
+        ("QQQ",  "QQQ (US Growth)",    "#3b82f6", 2.5, []),      # blue       — bold benchmark
+        ("SPY",  "SPY (US)",           "#22d3ee", 1.8, []),      # cyan
+        ("EWC",  "Canada (EWC)",       "#f87171", 1.8, []),      # red
+        ("VGK",  "Europe (VGK)",       "#4ade80", 1.8, []),      # green
+        ("EWJ",  "Japan (EWJ)",        "#c084fc", 1.8, []),      # purple
+        ("MCHI", "China (MCHI)",       "#fbbf24", 1.8, []),      # amber
+        ("INDA", "India (INDA)",       "#f472b6", 1.8, []),      # pink
+        ("EFA",  "Dev. ex-US (EFA)",   "#2dd4bf", 1.5, [5, 4]), # teal  — dashed aggregate
+        ("EEM",  "Emerging (EEM)",     "#fb923c", 1.5, [5, 4]), # orange — dashed aggregate
     ]
     ref_gi   = global_idx.get("QQQ", {})
     gi_dates = ref_gi.get("dates", [])[::5]
@@ -3084,10 +3225,11 @@ if(mmCtx){{
          "data":  _gi_norm(t),
          "borderColor": col,
          "borderWidth": bw,
+         "borderDash":  bd,
          "pointRadius": 0,
          "tension": 0.2,
          "spanGaps": True}
-        for t, lbl, col, bw in gi_spec
+        for t, lbl, col, bw, bd in gi_spec
     ])
     js += f"""
 var gnCtx = document.getElementById('chart-global-norm');
