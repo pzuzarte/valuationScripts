@@ -181,16 +181,57 @@ SCRIPTS = {
                  required=False, default="30"),
         ],
     },
+    "Classifier": {
+        "path": os.path.join(ROOT, "10_classifier", "classifier.py"),
+        "desc": "Behavioural clustering — groups index constituents by return/risk/momentum similarity using K-Means, Hierarchical or DBSCAN, with interactive t-SNE / UMAP / PCA visualisation.",
+        "note": "💡 Set <b># Clusters</b> to <b>0</b> (default) to auto-select the optimal k via silhouette score scan (k = 2–15). Enter any other number to fix k manually. This setting is ignored for DBSCAN, which determines its own cluster count.",
+        "icon": "🧬",
+        "params": [
+            dict(id="index",      label="Index",          type="option", flag="--index",
+                 required=True,  default="SPX",
+                 values=["SPX", "NDX", "DOW", "RUT", "TSX"]),
+            dict(id="method",     label="Cluster method", type="option", flag="--method",
+                 required=True,  default="kmeans",
+                 values=["kmeans", "hierarchical", "dbscan"]),
+            dict(id="n_clusters", label="# Clusters",     type="entry",  flag="--n_clusters",
+                 required=False, default="0",
+                 hint="0 = auto (silhouette scan); ignored for DBSCAN"),
+            dict(id="viz",        label="2-D embedding",  type="option", flag="--viz",
+                 required=True,  default="tsne",
+                 values=["tsne", "umap", "pca"]),
+        ],
+    },
+    "Price Forecast": {
+        "path": os.path.join(ROOT, "11_priceForecast", "priceForecast.py"),
+        "desc": "ARIMA + ETS price forecasting with walk-forward backtest — compares model accuracy against a naive random-walk baseline and surfaces uncertainty cones over the forecast horizon.",
+        "note": "💡 ARIMA models log-returns (stationary). ETS models log-price levels with a damped trend. Both are benchmarked against the naive random-walk. Outputs include residual ACF diagnostics and a full backtest over the last 252 trading days.",
+        "icon": "🔮",
+        "params": [
+            dict(id="ticker",  label="Ticker",           type="entry",  flag="--ticker",
+                 required=True,  default="AAPL",
+                 hint="Any yfinance-supported ticker (e.g. AAPL, BTC-USD, ^GSPC)"),
+            dict(id="horizon", label="Forecast horizon", type="entry",  flag="--horizon",
+                 required=False, default="30",
+                 hint="Trading days ahead (5–252, default 30)"),
+            dict(id="model",   label="Model",            type="option", flag="--model",
+                 required=False, default="both",
+                 values=["both", "arima", "ets"]),
+            dict(id="period",  label="History",          type="option", flag="--period",
+                 required=False, default="5y",
+                 values=["2y", "5y", "10y"]),
+        ],
+    },
 }
 
 # Sidebar group layout — defines sections and order shown in the UI
 SIDEBAR_GROUPS = [
     {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener"]},
-    {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots"]},
+    {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
+                                               "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
     {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker"]},
-    {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer"]},
+    {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer", "Classifier"]},
 ]
 
 # ── Active runs ───────────────────────────────────────────────────────────────
@@ -662,6 +703,8 @@ HTML = r"""<!DOCTYPE html>
   .param-group { display: flex; align-items: center; gap: 8px; }
   .param-group label { font-size: 12px; color: var(--muted); white-space: nowrap; }
   .param-group label.req { color: var(--text); }
+  #params-note { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+                 font-size: 11px; color: var(--muted); line-height: 1.5; }
 
   input[type="text"] {
     background: #0d1117; border: 1px solid var(--border); color: var(--text);
@@ -742,6 +785,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="params-card">
         <h2 id="script-title">—</h2>
         <div class="params-grid" id="params-grid"></div>
+        <div id="params-note" style="display:none"></div>
       </div>
 
       <p class="desc" id="script-desc"></p>
@@ -896,6 +940,18 @@ function selectScript(name) {
 
     grid.appendChild(group);
   });
+
+  // Render optional script-level note below the params grid
+  const noteEl = document.getElementById("params-note");
+  if (noteEl) {
+    if (info.note) {
+      noteEl.innerHTML      = info.note;
+      noteEl.style.display  = "";
+    } else {
+      noteEl.innerHTML      = "";
+      noteEl.style.display  = "none";
+    }
+  }
 }
 
 // ── Build params dict from current form ───────────────────────────────────

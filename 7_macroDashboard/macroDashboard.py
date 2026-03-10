@@ -73,6 +73,27 @@ COMMODITIES = [
     ("DBA",  "Agriculture",  "agriculture"),
 ]
 
+# Spot / futures prices for actual commodity prices (not ETF proxies).
+# ticker, display name, category, unit label
+SPOT_COMMODITIES = [
+    ("CL=F",  "WTI Crude Oil",      "energy",      "$/bbl"),
+    ("BZ=F",  "Brent Crude",        "energy",      "$/bbl"),
+    ("NG=F",  "Natural Gas",        "energy",      "$/MMBtu"),
+    ("MTF=F", "Coal (Rotterdam)",   "energy",      "$/t"),
+    ("GC=F",  "Gold",               "precious",    "$/oz"),
+    ("SI=F",  "Silver",             "precious",    "$/oz"),
+    ("HG=F",  "Copper",             "industrial",  "$/lb"),
+    ("ALI=F", "Aluminum",           "industrial",  "$/lb"),
+    ("TIO=F", "Iron Ore 62% Fe",    "industrial",  "$/t"),
+    ("ZW=F",  "Wheat",              "agriculture", "¢/bu"),
+    ("ZC=F",  "Corn",               "agriculture", "¢/bu"),
+    ("ZS=F",  "Soybeans",           "agriculture", "¢/bu"),
+    ("KC=F",  "Coffee",             "agriculture", "¢/lb"),
+    ("CC=F",  "Cocoa",              "agriculture", "$/t"),
+    ("LBR=F", "Lumber",             "other",       "$/1000 bd ft"),
+    ("BDRY",  "Baltic Dry (proxy)", "freight",     "$/sh"),
+]
+
 CAP_SIZE = [
     ("SPY",  "S&P 500",         "large"),
     ("MDY",  "S&P MidCap 400",  "mid"),
@@ -1733,8 +1754,11 @@ def fetch_global_indices() -> dict:
 
 
 def fetch_commodities() -> dict:
-    """Commodity ETF price history for the Commodities tab."""
-    tickers = [t for t, _, _ in COMMODITIES]
+    """Commodity ETF + spot/futures price history for the Commodities tab."""
+    tickers = (
+        [t for t, _, _    in COMMODITIES] +
+        [t for t, _, _, _ in SPOT_COMMODITIES]
+    )
     result  = {}
 
     def _one(ticker):
@@ -2602,6 +2626,55 @@ def _tab_commodities(commodities: dict) -> str:
               f'{_live1d_cell(ticker, d.get("1D"))}'
               f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}{_hcell(d.get("3M"))}'
               f'{_hcell(d.get("6M"))}{_hcell(d.get("1Y"))}{_hcell(d.get("YTD"))}</tr>')
+    h += '</tbody></table></div>'
+
+    # ── Spot / Futures Prices table ────────────────────────────────────────────
+    h += f'<div class="sec-hdr" style="margin-top:28px">Spot &amp; Futures Prices {help_btn("commodity-spot")}</div>'
+    h += ('<p class="note" style="margin-bottom:10px">'
+          'Prices sourced from front-month futures contracts via Yahoo Finance. '
+          'Agriculture grains (Wheat, Corn, Soybeans, Coffee) quoted in <em>cents</em> per unit. '
+          'Lithium and Cobalt excluded — no liquid spot/futures available via this data source. '
+          'Baltic Dry represented by BDRY ETF (tracks Baltic Dry futures).'
+          '</p>')
+
+    spot_cat_colors = {
+        "precious":    "#f0a500",
+        "energy":      "#4f8ef7",
+        "industrial":  "#00c896",
+        "agriculture": "#a78bfa",
+        "other":       "#64748b",
+        "freight":     "#06b6d4",
+    }
+
+    h += '<div class="tbl-wrap"><table>'
+    h += ('<thead><tr>'
+          '<th>Contract</th><th>Commodity</th><th>Category</th><th>Unit</th>'
+          '<th class="num">Price</th>'
+          '<th class="num" style="color:#00c896">1D</th>'
+          '<th class="num">1W</th><th class="num">1M</th>'
+          '<th class="num">3M</th><th class="num">6M</th>'
+          '<th class="num">1Y</th><th class="num">YTD</th>'
+          '</tr></thead><tbody>')
+
+    for ticker, name, cat, unit in SPOT_COMMODITIES:
+        d     = commodities.get(ticker, {})
+        price = d.get("price")
+        c_col = spot_cat_colors.get(cat, "#6b7194")
+        # Format price with unit: grains are in cents so no $ prefix
+        if price is not None:
+            price_str = f"{price:,.2f} <span style='color:var(--muted);font-size:10px'>{unit}</span>"
+        else:
+            price_str = "—"
+        h += (f'<tr>'
+              f'<td class="sym">{ticker}</td>'
+              f'<td>{name}</td>'
+              f'<td><span class="pill" style="background:{c_col}22;color:{c_col}">{cat}</span></td>'
+              f'<td style="color:var(--muted);font-size:11px">{unit}</td>'
+              f'<td class="num">{price_str}</td>'
+              f'{_live1d_cell(ticker, d.get("1D"))}'
+              f'{_hcell(d.get("1W"))}{_hcell(d.get("1M"))}{_hcell(d.get("3M"))}'
+              f'{_hcell(d.get("6M"))}{_hcell(d.get("1Y"))}{_hcell(d.get("YTD"))}'
+              f'</tr>')
     h += '</tbody></table></div>'
 
     # ── Charts ─────────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@
     <key>CFBundleSignature</key>          <string>????</string>
     <key>NSHighResolutionCapable</key>    <true/>
     <key>LSMinimumSystemVersion</key>     <string>10.13</string>
-    <key>LSUIElement</key>                <true/>
+    <key>LSUIElement</key>                <false/>
     <key>CFBundleIconFile</key>           <string>AppIcon</string>
 </dict>
 </plist>
