@@ -773,6 +773,14 @@ _REDDIT_SUBS = ["wallstreetbets", "stocks", "investing"]
 _REDDIT_LOCK = threading.Lock()   # serialises all Reddit API calls across threads
 _REDDIT_DELAY = 0.6               # seconds between requests (≤1 req/s limit)
 
+# yfinance 1.2.0 uses a single shared global session + crumb across all Ticker
+# instances.  Concurrent threads that call quoteSummary simultaneously race on
+# that shared crumb and cause HTTP 500 "internal-error" responses.  Serialising
+# all fetch_yf calls (Semaphore(1)) eliminates the race; Reddit / SEC / Google
+# Trends / Wikipedia still run in parallel across threads after the lock is
+# released, so wall-clock time is only modestly affected.
+_YF_SEM = threading.Semaphore(1)
+
 def fetch_reddit_sentiment(ticker: str, days: int = 30) -> dict:
     """Fetch recent Reddit posts mentioning ticker from WSB/stocks/investing."""
     empty = {"bullish": 0, "bearish": 0, "neutral": 0, "total": 0, "messages": []}
@@ -1378,7 +1386,8 @@ def composite_score(scores: dict) -> float:
 
 # ── Per-ticker pipeline ────────────────────────────────────────────────────────
 def analyze_ticker(ticker: str, days: int, cik: str) -> dict:
-    yf_data     = fetch_yf(ticker, days)
+    with _YF_SEM:
+        yf_data = fetch_yf(ticker, days)
     reddit_data = fetch_reddit_sentiment(ticker, days)
     congress    = fetch_congressional(ticker, days=max(days, 365))
     sec_8k   = fetch_sec_filings(cik, form_type="8-K",  days=days)
@@ -2860,6 +2869,18 @@ if(ctx_pc){{
     # Sort oldest→newest (left→right on chart); keep last 8 quarters
     earn_all_qtrs = sorted(set(earn_all_qtrs))[-8:]
 
+    def _qtr_label(date_str: str) -> str:
+        """Convert raw quarter-end date '2025-07-31' → 'Q3 '25'."""
+        try:
+            month = int(date_str[5:7])
+            year  = int(date_str[2:4])
+            q     = (month - 1) // 3 + 1
+            return f"Q{q} '{year:02d}"
+        except (ValueError, IndexError):
+            return date_str
+
+    earn_labels = [_qtr_label(q) for q in earn_all_qtrs]
+
     CHART_COLORS = ["#4f8ef7","#00c896","#f0a500","#e05c5c","#9b59b6",
                     "#1abc9c","#e67e22","#3498db","#e91e63","#cddc39"]
     for i, t in enumerate(tickers):
@@ -2890,7 +2911,7 @@ if(ctx_earn){{
   new Chart(ctx_earn, {{
     type: 'bar',
     data: {{
-      labels: {json.dumps(earn_all_qtrs)},
+      labels: {json.dumps(earn_labels)},
       datasets: {json.dumps(earn_datasets)}
     }},
     options: {{
@@ -3222,11 +3243,25 @@ def main():
 
     # Resolve tickers
     portfolio_arg = args.portfolio.strip()
+    _looks_like_path = (
+        portfolio_arg.lower().endswith(".csv")
+        or os.sep in portfolio_arg
+        or "/" in portfolio_arg
+    )
     if os.path.isfile(portfolio_arg):
         tickers = load_portfolio(portfolio_arg)
         if not tickers:
             sys.exit(f"ERROR: No tickers found in {portfolio_arg}")
         print(f"\n  Portfolio: {portfolio_arg}")
+    elif _looks_like_path:
+        # Argument looks like a file path but wasn't found — abort instead of
+        # passing the path to Yahoo Finance as a ticker symbol.
+        abs_path = os.path.abspath(portfolio_arg)
+        sys.exit(
+            f"ERROR: Portfolio file not found: {portfolio_arg}\n"
+            f"       Resolved to: {abs_path}\n"
+            f"       Check the path and working directory."
+        )
     else:
         tickers = [t.strip().upper() for t in portfolio_arg.split(",") if t.strip()]
         if not tickers:
@@ -3284,8 +3319,8 @@ def main():
                 t = futures[future]
                 print(f"  ERROR {t}: {exc}")
 
-    # Restore ticker order
-    all_data = {t: all_data[t] for t in tickers if t in all_data}
+    # Sort alphabetically by ticker (affects all tables and charts)
+    all_data = {t: all_data[t] for t in sorted(tickers) if t in all_data}
 
     if not all_data:
         sys.exit("ERROR: No data retrieved for any ticker.")

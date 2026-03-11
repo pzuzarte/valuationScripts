@@ -12,6 +12,7 @@ Usage
 """
 
 import argparse
+import csv
 import json
 import os
 import queue
@@ -28,6 +29,14 @@ from flask import Flask, Response, jsonify, make_response, request
 ROOT = os.path.dirname(os.path.abspath(__file__))
 app  = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
+
+# ── Deep Dive Tickers ─────────────────────────────────────────────────────────
+DEEPDIVE_DIR = os.path.join(ROOT, "deepDiveTickers")
+DEEPDIVE_CSV = os.path.join(DEEPDIVE_DIR, "deepDiveTickers.csv")
+os.makedirs(DEEPDIVE_DIR, exist_ok=True)
+
+# ── Server port (set in __main__, passed to child processes) ──────────────────
+_SERVER_PORT: int = 5050
 
 # ── Script catalogue ──────────────────────────────────────────────────────────
 
@@ -129,7 +138,7 @@ SCRIPTS = {
         "params": [
             dict(id="csvfile", label="Portfolio CSV", type="file",  positional=True,
                  required=True,
-                 default=os.path.join(ROOT, "4_portfolioAnalyzer", "FilPortfolio.csv")),
+                 default=os.path.join(ROOT, "4_portfolioAnalyzer", "deepDiveTickers.csv")),
             dict(id="days",    label="Lookback days", type="entry", flag="--days",
                  required=False, default="30"),
         ],
@@ -141,7 +150,7 @@ SCRIPTS = {
         "params": [
             dict(id="csvfile",  label="Portfolio CSV", type="file",  positional=True,
                  required=True,
-                 default=os.path.join(ROOT, "4_portfolioAnalyzer", "FilPortfolio.csv")),
+                 default=os.path.join(ROOT, "4_portfolioAnalyzer", "currentlyOwnded.csv")),
             dict(id="backtest", label="Backtest days", type="entry", flag="--backtest",
                  required=False, default="500"),
         ],
@@ -162,6 +171,12 @@ SCRIPTS = {
             dict(id="history", label="History for",   type="entry", flag="--history",
                  required=False, default=""),
         ],
+    },
+    "Deep Dive List": {
+        "url":  "/deep-dive",
+        "desc": "Edit the deep dive tickers list — add or remove stocks flagged for deeper analysis.",
+        "icon": "🔬",
+        "params": [],
     },
     "Research Scanner": {
         "path": os.path.join(ROOT, "9_researchScanner", "researchScanner.py"),
@@ -230,7 +245,7 @@ SIDEBAR_GROUPS = [
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
-    {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker"]},
+    {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker", "Deep Dive List"]},
     {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer", "Classifier"]},
 ]
 
@@ -413,7 +428,9 @@ def api_run():
     # produces nothing.  Setting it here is more reliable than calling
     # matplotlib.use("Agg") inside the script because it takes effect before
     # any import can touch the backend.
-    child_env = {**os.environ, "VALUATION_SUITE_LAUNCHED": "1", "MPLBACKEND": "Agg"}
+    child_env = {**os.environ, "VALUATION_SUITE_LAUNCHED": "1",
+                 "MPLBACKEND": "Agg",
+                 "VALUATION_SUITE_PORT": str(_SERVER_PORT)}
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd,
@@ -479,6 +496,278 @@ def api_exit():
     # alive, so the port stays occupied and macOS keeps the app registered.
     threading.Timer(0.3, lambda: os._exit(0)).start()
     return jsonify({"ok": True})
+
+
+@app.route("/api/watchlist/add", methods=["POST", "OPTIONS"])
+def api_watchlist_add():
+    """Append checked tickers to deepDiveTickers/deepDiveTickers.csv (append-only, deduped).
+    Supports CORS so the endpoint is reachable from file:// HTML reports."""
+    # Pre-flight for browsers calling from file:// origin
+    if request.method == "OPTIONS":
+        resp = make_response("", 204)
+        resp.headers["Access-Control-Allow-Origin"]  = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        return resp
+
+    data        = request.get_json(force=True, silent=True) or {}
+    new_tickers = [t.upper().strip() for t in data.get("tickers", []) if str(t).strip()]
+
+    # Load existing tickers so we can deduplicate
+    existing: set[str] = set()
+    if os.path.exists(DEEPDIVE_CSV):
+        with open(DEEPDIVE_CSV, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                t = (row.get("ticker") or row.get("symbol") or "").upper().strip()
+                if t:
+                    existing.add(t)
+
+    to_add  = [t for t in new_tickers if t and t not in existing]
+    skipped = len(new_tickers) - len(to_add)
+    today   = datetime.now().strftime("%Y-%m-%d")
+
+    if to_add:
+        write_header = not os.path.exists(DEEPDIVE_CSV)
+        with open(DEEPDIVE_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            if write_header:
+                w.writerow(["ticker", "shares", "added_date"])
+            for t in to_add:
+                w.writerow([t, 0, today])
+
+    resp = jsonify({"added": len(to_add), "skipped": skipped,
+                    "total": len(existing) + len(to_add)})
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
+
+
+@app.route("/api/deep-dive/list")
+def api_deep_dive_list():
+    """Return current deep dive tickers as JSON list."""
+    tickers = []
+    if os.path.exists(DEEPDIVE_CSV):
+        with open(DEEPDIVE_CSV, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                t = (row.get("ticker") or row.get("symbol") or "").upper().strip()
+                d = row.get("added_date", "")
+                if t:
+                    tickers.append({"ticker": t, "added_date": d})
+    return jsonify(tickers)
+
+
+@app.route("/api/deep-dive/remove", methods=["POST"])
+def api_deep_dive_remove():
+    """Remove a single ticker from the deep dive CSV."""
+    data   = request.get_json(force=True, silent=True) or {}
+    target = (data.get("ticker") or "").upper().strip()
+    if not target:
+        return jsonify({"error": "No ticker provided"}), 400
+
+    rows = []
+    if os.path.exists(DEEPDIVE_CSV):
+        with open(DEEPDIVE_CSV, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+
+    kept    = [r for r in rows if (r.get("ticker") or "").upper().strip() != target]
+    removed = len(rows) - len(kept)
+
+    with open(DEEPDIVE_CSV, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=["ticker", "shares", "added_date"])
+        w.writeheader()
+        w.writerows(kept)
+
+    return jsonify({"removed": removed, "total": len(kept)})
+
+
+@app.route("/deep-dive")
+def deep_dive_page():
+    """Interactive editor for deepDiveTickers.csv."""
+    return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Deep Dive List</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #161b2e; color: #e8eaf0;
+         font-family: 'Inter', system-ui, sans-serif; font-size: 13px;
+         padding: 32px; min-height: 100vh; }
+  h1   { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+  .sub { color: #6b7194; font-size: 12px; margin-bottom: 28px; }
+  .card { background: #1e2538; border: 1px solid #252a3a;
+          border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  /* Add bar */
+  .add-row { display: flex; gap: 10px; align-items: center; }
+  .add-row input { flex: 1; background: #252a3a; border: 1px solid #2e3550;
+                   border-radius: 6px; padding: 8px 12px; color: #e8eaf0;
+                   font-size: 13px; outline: none; }
+  .add-row input:focus { border-color: #4f8ef7; }
+  .btn-add { background: #4f8ef7; color: #fff; border: none; border-radius: 6px;
+             padding: 8px 18px; font-size: 12px; font-weight: 600; cursor: pointer;
+             white-space: nowrap; }
+  .btn-add:hover { background: #6ba3ff; }
+  .hint { color: #6b7194; font-size: 11px; margin-top: 8px; }
+  /* Ticker list */
+  .ticker-grid { display: flex; flex-wrap: wrap; gap: 8px; min-height: 48px; }
+  .ticker-chip { display: inline-flex; align-items: center; gap: 6px;
+                 background: #252a3a; border: 1px solid #2e3550;
+                 border-radius: 20px; padding: 5px 12px 5px 14px;
+                 font-size: 12px; font-weight: 600; }
+  .ticker-chip .date { color: #6b7194; font-size: 10px; font-weight: 400; margin-left: 2px; }
+  .btn-rm { background: none; border: none; color: #6b7194; cursor: pointer;
+            font-size: 14px; line-height: 1; padding: 0 2px; border-radius: 50%; }
+  .btn-rm:hover { color: #e05c5c; background: #3a2020; }
+  .empty { color: #6b7194; font-style: italic; font-size: 12px; padding: 8px 0; }
+  /* Stats bar */
+  .stats { display: flex; gap: 24px; padding: 14px 20px;
+           background: #1a1f35; border: 1px solid #252a3a;
+           border-radius: 8px; margin-bottom: 16px; }
+  .stat-val { font-size: 20px; font-weight: 700; }
+  .stat-lbl { font-size: 11px; color: #6b7194; margin-top: 2px; }
+  /* Toast */
+  #toast { position: fixed; bottom: 24px; right: 24px; background: #1e2538;
+           border: 1px solid #252a3a; color: #e8eaf0; padding: 10px 16px;
+           border-radius: 6px; font-size: 12px; opacity: 0; transition: opacity .3s;
+           z-index: 999; max-width: 300px; }
+  #toast.show { opacity: 1; }
+  #toast.warn { border-color: #f0a500; color: #f0a500; }
+  #toast.err  { border-color: #e05c5c; color: #e05c5c; }
+  .section-label { font-size: 11px; font-weight: 700; color: #6b7194;
+                   text-transform: uppercase; letter-spacing: .06em;
+                   margin-bottom: 12px; }
+  .copy-btn { background: transparent; border: 1px solid #2e3550; color: #6b7194;
+              border-radius: 5px; padding: 4px 10px; font-size: 11px; cursor: pointer;
+              margin-left: auto; }
+  .copy-btn:hover { color: #e8eaf0; border-color: #4f8ef7; }
+  .card-header { display: flex; align-items: center; margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<h1>🔬  Deep Dive List</h1>
+<p class="sub">Tickers flagged from screeners for deeper analysis. Saved to <code>deepDiveTickers/deepDiveTickers.csv</code>.</p>
+
+<div class="stats">
+  <div><div class="stat-val" id="stat-count">—</div><div class="stat-lbl">Tickers</div></div>
+  <div><div class="stat-val" id="stat-latest">—</div><div class="stat-lbl">Last Added</div></div>
+</div>
+
+<div class="card">
+  <div class="section-label">Add Tickers</div>
+  <div class="add-row">
+    <input id="add-input" type="text" placeholder="AAPL, MSFT, NVDA  (comma-separated)" autocomplete="off">
+    <button class="btn-add" id="add-btn">+ Add</button>
+  </div>
+  <p class="hint">Press Enter or click Add. Duplicates are ignored.</p>
+</div>
+
+<div class="card">
+  <div class="card-header">
+    <span class="section-label" style="margin-bottom:0">Current List</span>
+    <button class="copy-btn" id="copy-btn" title="Copy all tickers as comma-separated list">Copy tickers</button>
+  </div>
+  <div class="ticker-grid" id="ticker-grid">
+    <span class="empty">Loading…</span>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const BASE = window.location.origin;
+
+function toast(msg, type) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className   = 'show' + (type ? ' ' + type : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.className = '', 3200);
+}
+
+async function loadList() {
+  const res  = await fetch(BASE + '/api/deep-dive/list');
+  const data = await res.json();
+  const grid = document.getElementById('ticker-grid');
+
+  document.getElementById('stat-count').textContent = data.length;
+  document.getElementById('stat-latest').textContent =
+    data.length ? data[data.length - 1].added_date || '—' : '—';
+
+  if (!data.length) {
+    grid.innerHTML = '<span class="empty">No tickers yet — add some above.</span>';
+    return;
+  }
+
+  grid.innerHTML = '';
+  data.forEach(({ticker, added_date}) => {
+    const chip = document.createElement('div');
+    chip.className = 'ticker-chip';
+    chip.id = 'chip-' + ticker;
+    chip.innerHTML =
+      ticker +
+      (added_date ? '<span class="date">' + added_date + '</span>' : '') +
+      '<button class="btn-rm" data-ticker="' + ticker + '" title="Remove ' + ticker + '">&times;</button>';
+    grid.appendChild(chip);
+  });
+}
+
+async function removeTicker(ticker) {
+  const chip = document.getElementById('chip-' + ticker);
+  if (chip) chip.style.opacity = '0.4';
+  const res  = await fetch(BASE + '/api/deep-dive/remove', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ticker})
+  });
+  const data = await res.json();
+  if (data.removed) {
+    toast('\u2713 ' + ticker + ' removed  (' + data.total + ' remaining)');
+    loadList();
+  } else {
+    if (chip) chip.style.opacity = '1';
+    toast('Could not remove ' + ticker, 'err');
+  }
+}
+
+async function addTickers() {
+  const raw     = document.getElementById('add-input').value.trim();
+  if (!raw) return;
+  const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean);
+  if (!tickers.length) return;
+
+  const res  = await fetch(BASE + '/api/watchlist/add', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({tickers})
+  });
+  const data = await res.json();
+  document.getElementById('add-input').value = '';
+  toast('\u2713 ' + data.added + ' added' +
+        (data.skipped ? '  \u00b7  ' + data.skipped + ' already present' : '') +
+        '  (' + data.total + ' total)');
+  loadList();
+}
+
+// Events
+document.getElementById('add-btn').addEventListener('click', addTickers);
+document.getElementById('add-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addTickers();
+});
+document.getElementById('ticker-grid').addEventListener('click', e => {
+  const btn = e.target.closest('.btn-rm');
+  if (btn) removeTicker(btn.dataset.ticker);
+});
+document.getElementById('copy-btn').addEventListener('click', () => {
+  const chips = [...document.querySelectorAll('.ticker-chip')];
+  const text  = chips.map(c => c.id.replace('chip-', '')).join(', ');
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => toast('\u2713 Copied to clipboard'));
+});
+
+loadList();
+</script>
+</body>
+</html>"""
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -833,8 +1122,12 @@ Promise.all([
       const b = document.createElement("button");
       b.className   = "sbtn";
       b.textContent = SCRIPTS[name].icon + "  " + name;
-      b.onclick     = () => selectScript(name);
       b.id          = "sbtn-" + name;
+      if (SCRIPTS[name].url) {
+        b.onclick = () => window.open(SCRIPTS[name].url, "_blank");
+      } else {
+        b.onclick = () => selectScript(name);
+      }
       sidebar.appendChild(b);
     });
   });
@@ -1204,6 +1497,7 @@ if __name__ == "__main__":
 
     port = args.port
     url  = f"http://127.0.0.1:{port}"
+    _SERVER_PORT = port  # propagated to child processes via VALUATION_SUITE_PORT
 
     # ── Already running? Just reopen the browser ─────────────────────────────
     if _port_open(port) and _our_server_alive(url):
@@ -1229,6 +1523,7 @@ if __name__ == "__main__":
         sys.exit(1)
     port = chosen
     url  = f"http://127.0.0.1:{port}"
+    _SERVER_PORT = port
 
     # ── Clean SIGTERM handler (macOS Dock → Quit sends SIGTERM) ──────────────
     def _on_sigterm(sig, frame):

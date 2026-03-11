@@ -4896,8 +4896,8 @@ def main():
                 "sentiment":  sentiment,
             }
 
-    # Restore original ticker order (as_completed is non-deterministic)
-    stocks_data = {t: stocks_data[t] for t in tickers if t in stocks_data}
+    # Sort alphabetically by ticker (affects all tables and charts)
+    stocks_data = {t: stocks_data[t] for t in sorted(tickers) if t in stocks_data}
 
     # 3. Compute technicals, classification, valuation, backtest
     print("\n[3/5] Computing technicals & signals...")

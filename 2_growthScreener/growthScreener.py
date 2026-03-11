@@ -2307,8 +2307,95 @@ def _build_best3_cell(r):
     )
 
 
+# ── Watchlist helpers ─────────────────────────────────────────────────────────
+_WL_CSS = """
+#wl-bar{position:fixed;bottom:0;left:0;right:0;background:#1a1f35;
+  border-top:1px solid #252a3a;padding:10px 20px;display:flex;
+  align-items:center;gap:12px;z-index:9999;transition:opacity .2s;}
+#wl-count{color:#6b7194;font-size:12px;min-width:90px;}
+#wl-add-btn{background:#4f8ef7;color:#fff;border:none;border-radius:5px;
+  padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;}
+#wl-add-btn:hover{background:#6ba3ff;}
+#wl-clear-btn{background:transparent;color:#6b7194;border:1px solid #252a3a;
+  border-radius:5px;padding:6px 12px;font-size:12px;cursor:pointer;}
+#wl-clear-btn:hover{color:#e8eaf0;}
+.cb-cell{width:28px;text-align:center;padding:4px 2px;}
+.cb-th{width:28px;text-align:center;}
+input.row-check{cursor:pointer;width:14px;height:14px;accent-color:#4f8ef7;}
+.wl-toast{position:fixed;bottom:58px;right:20px;background:#1e2538;
+  border:1px solid #252a3a;color:#e8eaf0;padding:10px 16px;border-radius:6px;
+  font-size:12px;opacity:0;transition:opacity .3s;z-index:10000;max-width:340px;}
+.wl-toast.show{opacity:1;}
+.wl-toast.warn{border-color:#f0a500;color:#f0a500;}
+"""
+
+_WL_BAR = (
+    '<div id="wl-bar" style="opacity:.5;pointer-events:none;">'
+    '<span id="wl-count">0 selected</span>'
+    '<button id="wl-add-btn">+ Add to Deep Dive</button>'
+    '<button id="wl-clear-btn">Clear</button>'
+    '</div>'
+)
+
+_WL_JS_TMPL = r"""
+(function(){
+var WL_PORT=__PORT__;
+function wlTickers(){return[...document.querySelectorAll('input.row-check:checked')].map(function(c){return c.value;});}
+function wlUpdate(){
+  var n=wlTickers().length,cnt=document.getElementById('wl-count'),bar=document.getElementById('wl-bar');
+  if(cnt)cnt.textContent=n+' selected';
+  if(bar){bar.style.opacity=n>0?'1':'0.5';bar.style.pointerEvents=n>0?'auto':'none';}
+}
+function wlToast(msg,warn){
+  var t=document.createElement('div');
+  t.className='wl-toast'+(warn?' warn':'');
+  t.textContent=msg;document.body.appendChild(t);
+  setTimeout(function(){t.classList.add('show');},10);
+  setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},400);},3500);
+}
+document.addEventListener('DOMContentLoaded',function(){
+  var allCb=document.getElementById('cb-all');
+  if(allCb)allCb.addEventListener('change',function(){
+    document.querySelectorAll('input.row-check').forEach(function(c){c.checked=allCb.checked;});
+    wlUpdate();
+  });
+  document.addEventListener('change',function(e){if(e.target.classList.contains('row-check'))wlUpdate();});
+  var addBtn=document.getElementById('wl-add-btn');
+  if(addBtn)addBtn.addEventListener('click',function(){
+    var tickers=wlTickers();if(!tickers.length)return;
+    fetch('http://localhost:'+WL_PORT+'/api/watchlist/add',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tickers:tickers})
+    }).then(function(r){return r.ok?r.json():Promise.reject('HTTP '+r.status);})
+    .then(function(d){
+      wlToast('\u2713 '+d.added+' added to deep dive list'+(d.skipped?' \u00b7 '+d.skipped+' already present':'')+'  ('+d.total+' total)');
+      document.querySelectorAll('input.row-check,#cb-all').forEach(function(c){c.checked=false;});
+      wlUpdate();
+    }).catch(function(){
+      var csv='ticker,shares\n'+tickers.map(function(t){return t+',0';}).join('\n');
+      var a=document.createElement('a');
+      a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+      a.download='deepDiveTickers_export.csv';document.body.appendChild(a);a.click();a.remove();
+      wlToast('Suite offline \u2014 downloaded as CSV',true);
+    });
+  });
+  var clrBtn=document.getElementById('wl-clear-btn');
+  if(clrBtn)clrBtn.addEventListener('click',function(){
+    document.querySelectorAll('input.row-check,#cb-all').forEach(function(c){c.checked=false;});
+    wlUpdate();
+  });
+  wlUpdate();
+});
+})();
+"""
+
+def _wl_js(port: int) -> str:
+    return _WL_JS_TMPL.replace("__PORT__", str(port))
+
+
 def build_html(results, ts, total, index_name="S&P 500",
-               best3_label="CONSENSUS TOP-3", best3_tooltip=""):
+               best3_label="CONSENSUS TOP-3", best3_tooltip="",
+               suite_port: int = 5050):
     tier_map = {t[0]: [] for t in TIERS}
     for r in results:
         if r["tier"] in tier_map:
@@ -2415,6 +2502,7 @@ def build_html(results, ts, total, index_name="S&P 500",
 
             rows += (
                 f'<tr class="sr" data-sector="{r["sector"]}" data-index="{r.get("index_label","")}" data-flags="{flag_data}" data-score="{gs}" data-ema13="{ema13_v}" data-ema50="{ema50_v}" data-ema200="{ema200_v}" data-rsi="{rsi_data}" data-accum="{accum_data}" data-revgrowth="{revg_data}">'
+                f'<td class="cb-cell"><input type="checkbox" class="row-check" value="{r["ticker"]}"></td>'
                 f'<td><span class="gs {gs_cls}">{fsc(gs)}</span></td>'
                 f'<td><span class="tk">{r["ticker"]}</span></td>'
                 f'<td class="sec">{r["sector"]}</td>'
@@ -2470,6 +2558,7 @@ def build_html(results, ts, total, index_name="S&P 500",
             f'</div>'
             f'<div class="tbl-wrap"><table class="sr-table">'
             f'<thead><tr>'
+            f'<th class="cb-th"><input type="checkbox" id="cb-all" title="Select all"></th>'
             f'<th>Score</th><th>Ticker</th><th>Sector</th><th>Price</th>'
             f'<th>Bear Target</th><th>Base Target</th><th>Bull Target</th>'
             f'<th title="{best3_tooltip}">{best3_label}</th>'
@@ -2514,7 +2603,7 @@ def build_html(results, ts, total, index_name="S&P 500",
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>{index_name} Growth &amp; Momentum Screener</title>
-<style>{CSS}</style>
+<style>{CSS}__WL_CSS__</style>
 </head>
 <body>
 
@@ -2865,10 +2954,14 @@ def build_html(results, ts, total, index_name="S&P 500",
   </div>
 </div>
 
-<script>{JS}</script>
+__WL_BAR__<script>{JS}__WL_JS__</script>
 </body>
 </html>"""
 
+    page = (page
+            .replace("__WL_CSS__", _WL_CSS)
+            .replace("__WL_BAR__", _WL_BAR)
+            .replace("__WL_JS__",  _wl_js(suite_port)))
     return page
 
 
@@ -3094,8 +3187,10 @@ def main():
     ts = datetime.datetime.now().strftime("%b %d, %Y  %H:%M")
     if use_pit_backtest and _BT_ENGINE_AVAIL:
         ts += f" · Backtest {backtest_days}d"
+    suite_port = int(os.environ.get("VALUATION_SUITE_PORT", "5050"))
     html = build_html(results, ts, len(results), index_name,
-                      best3_label=best3_label, best3_tooltip=best3_tooltip)
+                      best3_label=best3_label, best3_tooltip=best3_tooltip,
+                      suite_port=suite_port)
 
     index_slug = index_code.lower()  # e.g. "spx", "ndx", "tsx"
     date_str   = datetime.datetime.now().strftime("%Y_%m_%d")
