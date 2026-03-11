@@ -1015,6 +1015,9 @@ def fetch_all_yfinance(ticker: str) -> tuple:
         "hist_pfcf_5y":              None,
         "hist_eveb_5y":              None,
         "earnings_surprise_pct":     None,
+        "revenue_yf":                None,
+        "fcf_yf":                    None,
+        "ebitda_yf":                 None,
     }
 
     if not _YF_AVAILABLE:
@@ -1108,6 +1111,46 @@ def fetch_all_yfinance(ticker: str) -> tuple:
             dbt  = "{:,.0f}".format(wacc["total_debt_yf"]) if wacc["total_debt_yf"] is not None else "N/A",
             beta = "{:.3f}".format(beta_yf)              if beta_yf  is not None else "N/A",
         ))
+
+        # ── Revenue / FCF / EBITDA (yfinance canonical) ──────────────────────
+        try:
+            REV_NAMES   = ["Total Revenue", "Revenue", "Revenues", "Net Revenue",
+                           "Operating Revenue", "TotalRevenue"]
+            FCF_NAMES   = ["Free Cash Flow", "FreeCashFlow"]
+            EBIT_NAMES  = ["EBITDA", "Normalized EBITDA"]
+            EBIT2_NAMES = ["Operating Income", "EBIT", "OperatingIncome"]
+            DA_NAMES    = ["Depreciation Amortization Depletion",
+                           "Depreciation And Amortization", "Reconciled Depreciation"]
+
+            q_cf     = tk.quarterly_cashflow
+            use_q_cf = q_cf is not None and not q_cf.empty and q_cf.shape[1] >= 4
+
+            if use_q:
+                rev_yf    = _ttm(q_inc, REV_NAMES)
+                fcf_yf    = _ttm(q_cf, FCF_NAMES) if use_q_cf else None
+                ebitda_yf = _ttm(q_inc, EBIT_NAMES)
+                if ebitda_yf is None:
+                    oi = _ttm(q_inc, EBIT2_NAMES)
+                    da = _ttm(q_cf, DA_NAMES) if use_q_cf else None
+                    if oi is not None and da is not None:
+                        ebitda_yf = oi + abs(da)
+            else:
+                _a_inc2 = tk.income_stmt   # cached by yfinance
+                _a_cf2  = tk.cashflow      # cached by yfinance
+                rev_yf    = _annual(_a_inc2, REV_NAMES)
+                fcf_yf    = _annual(_a_cf2,  FCF_NAMES)
+                ebitda_yf = _annual(_a_inc2, EBIT_NAMES)
+                if ebitda_yf is None:
+                    oi = _annual(_a_inc2, EBIT2_NAMES)
+                    da = _annual(_a_cf2, DA_NAMES)
+                    if oi is not None and da is not None:
+                        ebitda_yf = oi + abs(da)
+
+            if rev_yf    is not None: ext["revenue_yf"] = rev_yf
+            if fcf_yf    is not None: ext["fcf_yf"]     = fcf_yf
+            if ebitda_yf is not None: ext["ebitda_yf"]  = ebitda_yf
+        except Exception:
+            pass
 
         # ── Balance sheet extended data ───────────────────────────────────────
         try:
@@ -6272,6 +6315,19 @@ def main():
     wacc_raw, ext = fetch_all_yfinance(ticker)
     d["wacc_raw"] = wacc_raw   # populate before calculate_wacc
     d["ext"]      = ext
+
+    # Override revenue/FCF/EBITDA with yfinance TTM values when available
+    if ext.get("revenue_yf") is not None:
+        d["revenue"] = ext["revenue_yf"]
+    if ext.get("fcf_yf") is not None:
+        d["fcf"]           = ext["fcf_yf"]
+        d["fcf_per_share"] = (ext["fcf_yf"] / d["shares"]) if d.get("shares") else None
+        d["fcf_margin"]    = (ext["fcf_yf"] / d["revenue"]) if d.get("revenue") and d["revenue"] > 0 else None
+        d["current_pfcf"]  = (d["market_cap"] / ext["fcf_yf"]) if d.get("market_cap") and ext["fcf_yf"] > 0 else None
+    if ext.get("ebitda_yf") is not None:
+        d["ebitda"]            = ext["ebitda_yf"]
+        d["ebitda_method"]     = "yfinance (TTM)"
+        d["current_ev_ebitda"] = (d["ev_approx"] / ext["ebitda_yf"]) if d.get("ev_approx") and ext["ebitda_yf"] > 0 else None
 
     if args.wacc:
         d["wacc_override"] = args.wacc

@@ -36,6 +36,7 @@ import sys
 import time
 import datetime
 import threading
+import warnings
 import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import urlopen, Request
@@ -654,7 +655,9 @@ def fetch_google_trends(ticker: str, company_name: str = "") -> dict:
         kw = ticker + " stock"
         pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25))
         pt.build_payload([kw], cat=7, timeframe="today 3-m", geo="US")
-        df = pt.interest_over_time()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning, module="pytrends")
+            df = pt.interest_over_time()
         if df is None or df.empty or kw not in df.columns:
             return empty
         vals = list(df[kw].values)

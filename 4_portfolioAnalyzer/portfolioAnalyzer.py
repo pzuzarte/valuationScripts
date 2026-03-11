@@ -441,6 +441,43 @@ def fetch_wacc_inputs(ticker: str) -> dict:
             if bvps and float(bvps) > 0:
                 result["book_value_ps"] = round(float(bvps), 2)
         except Exception: pass
+        # Revenue / FCF / EBITDA — yfinance canonical values
+        try:
+            REV_NAMES   = ["Total Revenue", "Revenue", "Revenues", "Net Revenue",
+                           "Operating Revenue", "TotalRevenue"]
+            FCF_NAMES   = ["Free Cash Flow", "FreeCashFlow"]
+            EBIT_NAMES  = ["EBITDA", "Normalized EBITDA"]
+            EBIT2_NAMES = ["Operating Income", "EBIT", "OperatingIncome"]
+            DA_NAMES    = ["Depreciation Amortization Depletion",
+                           "Depreciation And Amortization", "Reconciled Depreciation"]
+
+            q_cf     = tk.quarterly_cashflow
+            use_q_cf = q_cf is not None and not q_cf.empty and q_cf.shape[1] >= 4
+
+            if use_q:
+                rev_yf    = _ttm(q, REV_NAMES)
+                fcf_yf    = _ttm(q_cf, FCF_NAMES) if use_q_cf else None
+                ebitda_yf = _ttm(q, EBIT_NAMES)
+                if ebitda_yf is None:
+                    oi = _ttm(q, EBIT2_NAMES)
+                    da = _ttm(q_cf, DA_NAMES) if use_q_cf else None
+                    if oi is not None and da is not None:
+                        ebitda_yf = oi + abs(da)
+            else:
+                _a_cf2  = tk.cashflow   # cached by yfinance
+                rev_yf    = _annual(a, REV_NAMES)
+                fcf_yf    = _annual(_a_cf2, FCF_NAMES)
+                ebitda_yf = _annual(a, EBIT_NAMES)
+                if ebitda_yf is None:
+                    oi = _annual(a, EBIT2_NAMES)
+                    da = _annual(_a_cf2, DA_NAMES)
+                    if oi is not None and da is not None:
+                        ebitda_yf = oi + abs(da)
+
+            if rev_yf    is not None: result["revenue_yf"] = rev_yf
+            if fcf_yf    is not None: result["fcf_yf"]     = fcf_yf
+            if ebitda_yf is not None: result["ebitda_yf"]  = ebitda_yf
+        except Exception: pass
     except Exception as e:
         print("  [WACC yf] {}: {}".format(ticker, e))
     return result
@@ -4841,6 +4878,21 @@ def main():
 
         wacc_raw = fetch_wacc_inputs(ticker)
         fund["wacc_raw"] = wacc_raw
+
+        # Override revenue/FCF/EBITDA with yfinance TTM values when available
+        if wacc_raw.get("revenue_yf") is not None:
+            fund["revenue"] = wacc_raw["revenue_yf"]
+        if wacc_raw.get("fcf_yf") is not None:
+            fcf_yf = wacc_raw["fcf_yf"]
+            fund["fcf"]          = fcf_yf
+            shares_v = fund.get("shares")
+            rev_v    = fund.get("revenue")
+            mktcap_v = fund.get("market_cap")
+            fund["fcf_per_share"] = (fcf_yf / shares_v) if shares_v else None
+            fund["fcf_margin"]    = (fcf_yf / rev_v * 100) if rev_v and rev_v > 0 else None
+            fund["current_pfcf"]  = (mktcap_v / fcf_yf) if mktcap_v and fcf_yf > 0 else None
+        if wacc_raw.get("ebitda_yf") is not None:
+            fund["ebitda"] = wacc_raw["ebitda_yf"]
 
         bars      = fetch_price_history(ticker, backtest_days + 50)
         analyst   = fetch_analyst_forecasts(ticker)
