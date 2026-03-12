@@ -1146,13 +1146,75 @@ def fetch_yf(ticker: str, days: int = 30) -> dict:
                 except Exception:
                     pass
 
-                # ── 30-day realized volatility (for IV vs HV comparison) ────
+                # ── 30-day realized volatility + IV comparison label ────────
                 try:
                     hist = tk.history(period="35d")
                     if not hist.empty and len(hist) > 10:
                         rets  = hist["Close"].pct_change().dropna()
                         hv_30 = round(rets.std() * (252 ** 0.5) * 100, 1)
                         result["options"]["hv_30d"] = hv_30
+                        # IV vs HV comparison label
+                        _atm_iv_pct = iv * 100 if iv else None
+                        if _atm_iv_pct and hv_30 and hv_30 > 0:
+                            _ratio = _atm_iv_pct / hv_30
+                            if   _ratio >= 1.5:  result["options"]["iv_label"] = "elevated"
+                            elif _ratio <= 0.7:  result["options"]["iv_label"] = "depressed"
+                            else:                result["options"]["iv_label"] = "normal"
+                            result["options"]["iv_hv_ratio"] = round(_ratio, 2)
+                except Exception:
+                    pass
+
+                # ── Max pain (nearest expiry) ────────────────────────────────
+                try:
+                    mp_chain = tk.option_chain(exp_dates[0])
+                    if (not mp_chain.calls.empty and not mp_chain.puts.empty
+                            and "strike" in mp_chain.calls.columns):
+                        all_strikes = sorted(set(
+                            mp_chain.calls["strike"].tolist()
+                            + mp_chain.puts["strike"].tolist()
+                        ))
+                        min_pain_val = None
+                        max_pain_strike = None
+                        for _k in all_strikes:
+                            # Total intrinsic payout to option buyers at price = _k
+                            c_pain = (mp_chain.calls[mp_chain.calls["strike"] <= _k]
+                                      .apply(lambda row: (row.get("openInterest", 0) or 0)
+                                             * max(0, _k - row["strike"]), axis=1).sum())
+                            p_pain = (mp_chain.puts[mp_chain.puts["strike"] >= _k]
+                                      .apply(lambda row: (row.get("openInterest", 0) or 0)
+                                             * max(0, row["strike"] - _k), axis=1).sum())
+                            total_pain = c_pain + p_pain
+                            if min_pain_val is None or total_pain < min_pain_val:
+                                min_pain_val  = total_pain
+                                max_pain_strike = _k
+                        if max_pain_strike is not None:
+                            result["options"]["max_pain"] = round(float(max_pain_strike), 2)
+                            if spot:
+                                result["options"]["max_pain_vs_spot"] = round(
+                                    (max_pain_strike - float(spot)) / float(spot) * 100, 1)
+                except Exception:
+                    pass
+
+                # ── Unusual volume flags ─────────────────────────────────────
+                try:
+                    unusual = []
+                    for side, df_chain in [("CALL", chain.calls), ("PUT", chain.puts)]:
+                        if ("volume" in df_chain.columns
+                                and "openInterest" in df_chain.columns
+                                and "strike" in df_chain.columns):
+                            for _, row_opt in df_chain.iterrows():
+                                vol_opt = float(row_opt.get("volume") or 0)
+                                oi_opt  = float(row_opt.get("openInterest") or 0)
+                                if vol_opt >= 500 and oi_opt > 0 and vol_opt >= 3 * oi_opt:
+                                    unusual.append({
+                                        "side":   side,
+                                        "strike": round(float(row_opt["strike"]), 2),
+                                        "volume": int(vol_opt),
+                                        "oi":     int(oi_opt),
+                                    })
+                    if unusual:
+                        unusual.sort(key=lambda x: -x["volume"])
+                        result["options"]["unusual_volume"] = unusual[:10]
                 except Exception:
                     pass
 
@@ -2226,6 +2288,44 @@ def _tab_options_analyst(all_data: dict) -> str:
         else:
             h += (f'<tr><td class="ticker-cell">{ticker}</td>'
                   f'<td colspan="6" class="muted note">No IV skew data available</td></tr>')
+    h += '</tbody></table></div></div>'
+
+    # ── Options Flow Depth: Max Pain + IV Regime + Unusual Volume ────────────────
+    h += '<div class="sec-hdr">Options Flow Depth</div>'
+    h += '<div class="card">'
+    h += ('<p class="note" style="margin-bottom:14px">'
+          '<b>Max Pain</b> = strike where total intrinsic value payout to option buyers is minimized '
+          '(options sellers profit most). <b>IV Regime</b> = ATM IV vs 30-day realized volatility. '
+          '<b>Unusual Volume</b> = strikes where volume &gt;3× open interest and &gt;500 contracts.</p>')
+    h += '<div class="tbl-wrap"><table>'
+    h += ('<thead><tr><th>Ticker</th><th>Max Pain</th><th>vs Spot</th>'
+          '<th>IV Regime</th><th>IV/HV Ratio</th>'
+          '<th>Unusual Strikes</th></tr></thead><tbody>')
+    for ticker, d in all_data.items():
+        opts = d.get("options", {})
+        _mp  = opts.get("max_pain")
+        _mpvs = opts.get("max_pain_vs_spot")
+        _ivl  = opts.get("iv_label")
+        _ivhr = opts.get("iv_hv_ratio")
+        _unusual = opts.get("unusual_volume", [])
+        _mp_str  = f"${_mp:,.2f}"  if _mp  else "—"
+        _mpvs_str = (f'<span style="color:{"#f0a500" if abs(_mpvs) > 3 else "#6b7194"}">'
+                     f'{"+" if _mpvs > 0 else ""}{_mpvs:.1f}%</span>'
+                     if _mpvs is not None else "—")
+        _ivl_color = {"elevated": "#e05c5c", "normal": "#6b7194", "depressed": "#00c896"}.get(_ivl, "#6b7194")
+        _ivl_str   = f'<span style="color:{_ivl_color};font-weight:700">{_ivl.upper()}</span>' if _ivl else "—"
+        _ivhr_str  = f"{_ivhr:.2f}x" if _ivhr else "—"
+        if _unusual:
+            _uv_parts = [f'{u["side"]} ${u["strike"]} (vol {u["volume"]:,})' for u in _unusual[:3]]
+            _uv_str   = '<br>'.join(_uv_parts)
+        else:
+            _uv_str = '<span class="muted">None detected</span>'
+        h += (f'<tr><td class="ticker-cell">{ticker}</td>'
+              f'<td class="num">{_mp_str}</td>'
+              f'<td class="num">{_mpvs_str}</td>'
+              f'<td>{_ivl_str}</td>'
+              f'<td class="num">{_ivhr_str}</td>'
+              f'<td style="font-size:11px;line-height:1.6">{_uv_str}</td></tr>')
     h += '</tbody></table></div></div>'
 
     # Expected move % chart

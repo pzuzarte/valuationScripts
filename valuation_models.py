@@ -47,6 +47,13 @@ except ImportError:
     np = None
     _NUMPY_AVAIL = False
 
+try:
+    import pandas as pd
+    _PANDAS_AVAIL = True
+except ImportError:
+    pd = None
+    _PANDAS_AVAIL = False
+
 # ── § 1  MODULE CONSTANTS ─────────────────────────────────────────────────────
 
 PROJECTION_YEARS       = 5
@@ -339,7 +346,7 @@ def run_ev_ebitda(d: dict, benchmarks: dict) -> dict:
         "target_mult":   mults["target_eveb"],
         "conserv_mult":  mults["conserv_eveb"],
         "ebitda":        ebitda,
-        "ebitda_method": d["ebitda_method"],
+        "ebitda_method": d.get("ebitda_method", "N/A"),
         "peer_label":    peer_label,
     }
 
@@ -1280,6 +1287,10 @@ def get_value_trap_flags(d):
         flags.append("REV DECLINE")
     if d["eps"] is not None and d["eps"] < 0:
         flags.append("LOSING $")
+    # Capital dilution trap: consistent net share issuance erodes per-share value
+    net_iss = d.get("net_issuance_annual")
+    if net_iss is not None and net_iss > 0.03:   # >3%/yr net dilution
+        flags.append("DILUTER")
     return flags
 
 
@@ -1647,6 +1658,13 @@ def calc_quality_score(d):
         elif cr >= 1.5: score += 2
         elif cr >= 1.0: score += 1
         else:           score -= 2   # below 1 = potential liquidity risk
+
+    # Capital allocation bonus (0–3 pts) — shareholder-friendly capital deployment
+    try:
+        _ca = calc_capital_allocation_score(d)
+        score += min(3.0, _ca * 0.3)   # 0-10 → 0-3 pts
+    except Exception:
+        pass
 
     return min(35.0, score)
 
@@ -3142,3 +3160,317 @@ def score_model_applicability(
 
     score = base + data_q + fit - penalty
     return round(max(0.0, min(100.0, score)), 1)
+
+
+# ── § 12  EARNINGS QUALITY, REVISION MOMENTUM & CAPITAL ALLOCATION ───────────
+
+def calc_earnings_quality(d: dict) -> dict:
+    """
+    Sloan accruals-based earnings quality assessment.
+
+    Returns dict with:
+      accruals_ratio  : (NI - OCF) / avg_total_assets  (Sloan ratio)
+                        <0 = cash earnings exceed reported (best)
+                        0–0.05 = neutral
+                        >0.10 = red flag (accruals inflation)
+      fcf_ni_ratio    : FCF / net_income  (>1.0 = high cash quality; <0.5 = warning)
+      ar_flag         : bool — A/R growing >10pp faster than revenue (recognition risk)
+      quality_grade   : "A" through "F"
+    """
+    result = {
+        "accruals_ratio":  None,
+        "fcf_ni_ratio":    None,
+        "ar_flag":         None,
+        "quality_grade":   "N/A",
+    }
+
+    ni      = d.get("net_income")
+    ocf     = d.get("operating_cash_flow")
+    ta      = d.get("total_assets")
+    ta_prior = d.get("total_assets_prior")
+    fcf     = d.get("fcf")
+    ar      = d.get("accounts_receivable")
+    ar_prior = d.get("accounts_receivable_prior")
+    rev     = d.get("revenue")
+
+    # ── Sloan accruals ratio ──────────────────────────────────────────────────
+    if ni is not None and ocf is not None and ta is not None and ta > 0:
+        avg_assets = ((ta + ta_prior) / 2.0) if ta_prior and ta_prior > 0 else ta
+        result["accruals_ratio"] = round((ni - ocf) / avg_assets, 4)
+
+    # ── FCF / NI ratio ────────────────────────────────────────────────────────
+    if fcf is not None and ni is not None and abs(ni) > 1_000:
+        result["fcf_ni_ratio"] = round(fcf / ni, 2)
+
+    # ── A/R growth vs revenue growth ─────────────────────────────────────────
+    if ar is not None and ar_prior is not None and ar_prior > 0:
+        ar_growth = (ar - ar_prior) / ar_prior
+        if rev is not None and rev > 0 and ar_prior > 0:
+            # A/R as % of revenue: if it widened >5pp year-over-year → flag
+            ar_rev_ratio_now   = ar / rev
+            ar_rev_ratio_prior = ar_prior / rev   # approximate (same rev denominator)
+            result["ar_flag"]  = (ar_growth > 0.20 and ar_rev_ratio_now > ar_rev_ratio_prior * 1.10)
+        else:
+            result["ar_flag"] = ar_growth > 0.25
+
+    # ── Grade: A–F ────────────────────────────────────────────────────────────
+    pts = 0
+    acr = result["accruals_ratio"]
+    if acr is not None:
+        if   acr < -0.02: pts += 3   # A: cash earnings well exceed reported
+        elif acr <  0.02: pts += 2   # B: neutral
+        elif acr <  0.05: pts += 1   # C: mild accruals
+        elif acr <  0.10: pts += 0   # D: notable accruals
+        else:             pts -= 1   # F: red flag
+
+    fcf_ni = result["fcf_ni_ratio"]
+    if fcf_ni is not None:
+        if   fcf_ni >= 1.2: pts += 2
+        elif fcf_ni >= 0.8: pts += 1
+        elif fcf_ni >= 0.5: pts += 0
+        elif fcf_ni >= 0.0: pts -= 1
+        else:               pts -= 2   # Negative FCF + positive NI = serious flag
+
+    if result["ar_flag"] is True:
+        pts -= 1
+
+    grade_map = {5: "A", 4: "A", 3: "A", 2: "B", 1: "C", 0: "D", -1: "F", -2: "F", -3: "F"}
+    result["quality_grade"] = grade_map.get(pts, "D" if pts >= 0 else "F")
+
+    return result
+
+
+def calc_revision_score(d: dict) -> float:
+    """
+    EPS estimate revision momentum score: -5 to +10.
+    Rewards upward revisions, penalizes downward ones.
+    Scaled by analyst count credibility.
+    """
+    direction  = d.get("revision_direction")      # "UP" | "FLAT" | "DOWN" | None
+    magnitude  = d.get("revision_magnitude")      # fractional delta, e.g. 0.05 = +5%
+    n_analysts = d.get("revision_num_analysts") or 0
+
+    if direction is None:
+        return 0.0
+
+    # Credibility weight (full weight at 5+ analysts)
+    analyst_w = min(1.0, max(0.2, (n_analysts or 1) / 5.0))
+
+    if direction == "UP":
+        mag = magnitude if magnitude is not None else 0.03
+        if   mag >= 0.10: pts = 10.0
+        elif mag >= 0.05: pts =  7.0
+        elif mag >= 0.02: pts =  5.0
+        else:             pts =  3.0
+    elif direction == "DOWN":
+        mag = abs(magnitude) if magnitude is not None else 0.03
+        if   mag >= 0.10: pts = -5.0
+        elif mag >= 0.05: pts = -3.0
+        elif mag >= 0.02: pts = -2.0
+        else:             pts = -1.0
+    else:
+        pts = 0.0
+
+    return round(pts * analyst_w, 1)
+
+
+def calc_capital_allocation_score(d: dict) -> float:
+    """
+    Capital allocation quality: 0–10 points.
+    Rewards buybacks, dividend growth, and capex efficiency.
+    Penalizes net dilution.
+    """
+    buyback_yield = d.get("buyback_yield_3y")      # decimal, positive = net reduction
+    net_issuance  = d.get("net_issuance_annual")   # positive = net issuer; negative = net repurchaser
+    div_growth_3y = d.get("div_growth_3y_pct")     # % CAGR over 3 years
+    capex_eff     = d.get("capex_efficiency")      # rev_growth / capex_growth ratio
+
+    score = 0.0
+
+    # ── Buyback yield / net share reduction (4 pts) ──────────────────────────
+    if buyback_yield is not None:
+        if   buyback_yield >= 0.05: score += 4.0   # >5% net share reduction
+        elif buyback_yield >= 0.03: score += 3.0
+        elif buyback_yield >= 0.01: score += 2.0
+        elif buyback_yield >= 0.00: score += 1.0
+    elif net_issuance is not None:
+        if   net_issuance < -0.02:  score += 2.0   # net repurchaser
+        elif net_issuance >  0.03:  score -= 2.0   # dilutive (>3%/yr)
+
+    # ── Dividend growth track record (3 pts) ─────────────────────────────────
+    if div_growth_3y is not None and div_growth_3y > 0:
+        if   div_growth_3y >= 10: score += 3.0
+        elif div_growth_3y >= 5:  score += 2.0
+        elif div_growth_3y >= 2:  score += 1.0
+
+    # ── Capex efficiency — revenue growth per dollar of capex (3 pts) ────────
+    if capex_eff is not None:
+        if   capex_eff >= 2.0: score += 3.0
+        elif capex_eff >= 1.0: score += 2.0
+        elif capex_eff >= 0.5: score += 1.0
+        elif capex_eff <  0.0: score -= 1.0   # capex rising, revenue shrinking
+
+    return round(max(0.0, min(10.0, score)), 1)
+
+
+def calc_portfolio_risk(weights: dict, price_histories: dict,
+                        rf_annual: float = 0.043) -> dict:
+    """
+    Historical-simulation portfolio risk metrics.
+
+    Parameters
+    ----------
+    weights        : {ticker: portfolio_weight}  (sum should ≈ 1.0)
+    price_histories: {ticker: pd.Series of daily close prices}
+    rf_annual      : annual risk-free rate (default 4.3%)
+
+    Returns dict with:
+      var_95, var_99         : 1-day portfolio VaR (as % of portfolio)
+      cvar_95                : Expected Shortfall at 95%
+      max_drawdown           : peak-to-trough drawdown (negative %)
+      calmar_ratio           : annualised return / abs(max_drawdown)
+      hhi                    : Herfindahl-Hirschman Index (0–1 concentration)
+      contribution_var       : {ticker: % contribution to portfolio 1-day VaR 95%}
+      annual_return          : portfolio annualised return (approx)
+    """
+    result = {
+        "var_95": None, "var_99": None, "cvar_95": None,
+        "max_drawdown": None, "calmar_ratio": None,
+        "hhi": None, "contribution_var": {}, "annual_return": None,
+    }
+    if not _PANDAS_AVAIL or not _NUMPY_AVAIL:
+        return result
+    try:
+        # Align price series to common date index
+        frames = {}
+        for t, w in weights.items():
+            if t in price_histories and price_histories[t] is not None and len(price_histories[t]) > 20:
+                frames[t] = price_histories[t]
+        if not frames:
+            return result
+
+        prices = pd.DataFrame(frames).dropna(how="all").ffill().dropna()
+        if len(prices) < 30:
+            return result
+
+        rets = prices.pct_change().dropna()
+
+        # Portfolio daily returns
+        tickers_in = [t for t in weights if t in rets.columns]
+        w_arr = np.array([weights[t] for t in tickers_in])
+        w_arr = w_arr / w_arr.sum()  # normalise
+        port_rets = rets[tickers_in].values @ w_arr   # 1-D array
+
+        # VaR / CVaR (historical simulation)
+        sorted_r = np.sort(port_rets)
+        n = len(sorted_r)
+        idx_95 = int(n * 0.05)
+        idx_99 = int(n * 0.01)
+        result["var_95"]  = round(float(np.percentile(port_rets, 5))  * 100, 3)
+        result["var_99"]  = round(float(np.percentile(port_rets, 1))  * 100, 3)
+        result["cvar_95"] = round(float(sorted_r[:max(idx_95, 1)].mean()) * 100, 3)
+
+        # Max drawdown
+        cum = (1 + port_rets).cumprod()
+        roll_max = np.maximum.accumulate(cum)
+        dd = (cum - roll_max) / roll_max
+        result["max_drawdown"] = round(float(dd.min()) * 100, 2)
+
+        # Calmar ratio
+        ann_ret = (1 + port_rets.mean()) ** 252 - 1
+        result["annual_return"] = round(ann_ret * 100, 2)
+        if result["max_drawdown"] and result["max_drawdown"] < 0:
+            result["calmar_ratio"] = round(ann_ret / abs(result["max_drawdown"] / 100), 2)
+
+        # HHI (position concentration)
+        result["hhi"] = round(float((w_arr ** 2).sum()), 4)
+
+        # Per-ticker VaR contribution (marginal VaR approach)
+        port_vol = port_rets.std()
+        if port_vol > 0:
+            for i, t in enumerate(tickers_in):
+                cov_i = np.cov(rets[t].values, port_rets)[0, 1]
+                mvr   = cov_i / port_vol * 1.645  # 95% z
+                result["contribution_var"][t] = round(float(w_arr[i] * mvr / (port_vol * 1.645)) * 100, 1)
+    except Exception:
+        pass
+    return result
+
+
+def calc_factor_exposure(portfolio_returns, start_date: str) -> dict:
+    """
+    Fama-French 5-factor exposure via OLS regression.
+
+    Parameters
+    ----------
+    portfolio_returns : pd.Series of daily portfolio returns (index = DatetimeIndex)
+    start_date        : 'YYYY-MM-DD' string for FF data fetch window
+
+    Returns dict with:
+      alpha_annualized : Jensen's alpha (annualised %)
+      r_squared        : regression R²
+      loadings         : {factor: loading}  (Mkt-RF, SMB, HML, RMW, CMA)
+      t_stats          : {factor: t-statistic}
+      significant      : {factor: bool}  (|t| > 2.0)
+      error            : str | None
+    """
+    result = {
+        "alpha_annualized": None, "r_squared": None,
+        "loadings": {}, "t_stats": {}, "significant": {}, "error": None,
+    }
+    if not _PANDAS_AVAIL or not _NUMPY_AVAIL:
+        result["error"] = "pandas/numpy unavailable"
+        return result
+    try:
+        import pandas_datareader.data as web
+        from scipy import stats as _stats
+
+        ff = web.DataReader(
+            "F-F_Research_Data_5_Factors_2x3_daily", "famafrench",
+            start=start_date
+        )[0]
+        ff.columns = [c.strip() for c in ff.columns]
+        ff.index   = pd.to_datetime(ff.index)
+        ff         = ff / 100.0   # percentages → decimals
+
+        port = portfolio_returns.copy()
+        if not isinstance(port.index, pd.DatetimeIndex):
+            port.index = pd.to_datetime(port.index)
+
+        factors = ["Mkt-RF", "SMB", "HML", "RMW", "CMA"]
+        merged  = pd.concat([port.rename("port"), ff[factors + ["RF"]]], axis=1).dropna()
+        if len(merged) < 60:
+            result["error"] = f"Insufficient overlapping data ({len(merged)} days)"
+            return result
+
+        excess = merged["port"] - merged["RF"]
+        X      = merged[factors].values
+        y      = excess.values
+        X_b    = np.column_stack([np.ones(len(X)), X])
+        coefs, resid, _, _ = np.linalg.lstsq(X_b, y, rcond=None)
+        alpha_daily = coefs[0]
+        factor_betas = coefs[1:]
+
+        # Standard errors
+        n, k = len(y), X_b.shape[1]
+        sse  = float(np.sum((y - X_b @ coefs) ** 2))
+        mse  = sse / (n - k)
+        cov  = mse * np.linalg.pinv(X_b.T @ X_b)
+        se   = np.sqrt(np.diag(cov))
+
+        result["alpha_annualized"] = round(float(alpha_daily) * 252 * 100, 2)
+        ss_tot = float(np.sum((y - y.mean()) ** 2))
+        result["r_squared"] = round(1 - sse / ss_tot, 3) if ss_tot > 0 else None
+
+        for i, f in enumerate(factors):
+            b = float(factor_betas[i])
+            t = float(b / se[i + 1]) if se[i + 1] > 0 else 0.0
+            result["loadings"][f]    = round(b, 3)
+            result["t_stats"][f]     = round(t, 2)
+            result["significant"][f] = abs(t) >= 2.0
+
+    except ImportError:
+        result["error"] = "pandas_datareader or scipy not installed"
+    except Exception as e:
+        result["error"] = str(e)
+    return result

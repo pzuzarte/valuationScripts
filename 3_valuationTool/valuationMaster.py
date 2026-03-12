@@ -109,6 +109,7 @@ from valuation_models import (
     run_ncav, run_scurve_tam, run_pie, run_mean_reversion,
     run_bayesian_ensemble, run_multifactor_price_target,
     score_model_applicability,
+    calc_earnings_quality, calc_revision_score, calc_capital_allocation_score,
 )
 try:
     import yfinance as yf
@@ -602,6 +603,59 @@ def fetch_peer_erg_data(sector: str = None, industry: str = None) -> dict:
     return DEFAULTS
 
 
+def fetch_peer_group(sector: str, industry: str, market_cap: float, n: int = 12) -> list:
+    """
+    Fetch individual peer company fundamentals for radar chart + table.
+    Same industry, market cap between 0.25× and 4× the subject, up to n results.
+    Returns list of dicts: ticker, name, pe, pfcf, ev_ebitda, ev_s,
+                           gross_margin, rev_growth.
+    """
+    PEER_FIELDS = [
+        "name", "description", "market_cap_basic",
+        "price_earnings_ttm", "enterprise_value_ebitda_ttm",
+        "enterprise_value_revenue_ttm",
+        "free_cash_flow", "gross_profit_margin",
+        "revenue_growth_ttm_yoy", "revenue",
+    ]
+    try:
+        mc_lo = market_cap * 0.25 if market_cap else 500e6
+        mc_hi = market_cap * 4.0  if market_cap else 2000e9
+        _, df = (
+            Query()
+            .select(*PEER_FIELDS)
+            .where(
+                col("industry") == industry,
+                col("market_cap_basic").between(mc_lo, mc_hi),
+                col("is_primary") == True,
+            )
+            .order_by("market_cap_basic", ascending=False)
+            .limit(n + 20)
+            .get_scanner_data()
+        )
+        peers = []
+        for _, row in df.iterrows():
+            tkr = str(row.get("name", ""))
+            mc  = row.get("market_cap_basic")
+            fcf = row.get("free_cash_flow")
+            rev = row.get("revenue")
+            pfcf_v = round(mc / fcf, 1) if (mc and fcf and fcf > 0) else None
+            ev_s_v = row.get("enterprise_value_revenue_ttm")
+            peers.append({
+                "ticker":      tkr,
+                "name":        str(row.get("description", tkr))[:30],
+                "market_cap":  mc,
+                "pe":          row.get("price_earnings_ttm"),
+                "pfcf":        pfcf_v,
+                "ev_ebitda":   row.get("enterprise_value_ebitda_ttm"),
+                "ev_s":        ev_s_v,
+                "gross_margin": row.get("gross_profit_margin"),
+                "rev_growth":  row.get("revenue_growth_ttm_yoy"),
+            })
+        return peers[:n]
+    except Exception:
+        return []
+
+
 def fetch_wacc_inputs(ticker: str) -> dict:
     """
     Fetch WACC inputs from yfinance:
@@ -1018,6 +1072,21 @@ def fetch_all_yfinance(ticker: str) -> tuple:
         "revenue_yf":                None,
         "fcf_yf":                    None,
         "ebitda_yf":                 None,
+        # Earnings quality (Feature 1)
+        "operating_cash_flow":       None,
+        "total_assets":              None,
+        "total_assets_prior":        None,
+        "accounts_receivable":       None,
+        "accounts_receivable_prior": None,
+        # Estimate revision momentum (Feature 2)
+        "revision_direction":        None,
+        "revision_magnitude":        None,
+        "revision_num_analysts":     None,
+        # Capital allocation (Feature 3)
+        "buyback_yield_3y":          None,
+        "net_issuance_annual":       None,
+        "capex_efficiency":          None,
+        "div_growth_3y_pct":         None,
     }
 
     if not _YF_AVAILABLE:
@@ -1149,6 +1218,121 @@ def fetch_all_yfinance(ticker: str) -> tuple:
             if rev_yf    is not None: ext["revenue_yf"] = rev_yf
             if fcf_yf    is not None: ext["fcf_yf"]     = fcf_yf
             if ebitda_yf is not None: ext["ebitda_yf"]  = ebitda_yf
+        except Exception:
+            pass
+
+        # ── Earnings quality data (OCF, total assets, A/R) ───────────────────
+        try:
+            OCF_NAMES = ["Operating Cash Flow", "Cash Flow From Operations",
+                         "Total Cash From Operating Activities",
+                         "Net Cash Provided By Operating Activities"]
+            if use_q_cf:
+                ocf = _ttm(q_cf, OCF_NAMES)
+            else:
+                ocf = _annual(tk.cashflow, OCF_NAMES)
+            if ocf is not None:
+                ext["operating_cash_flow"] = ocf
+
+            if bs is not None and not bs.empty:
+                ta_key = _first(bs, ["Total Assets", "Assets"])
+                if ta_key:
+                    ta_row = bs.loc[ta_key].dropna()
+                    if len(ta_row) >= 1: ext["total_assets"]       = float(ta_row.iloc[0])
+                    if len(ta_row) >= 2: ext["total_assets_prior"] = float(ta_row.iloc[1])
+                ar_key = _first(bs, ["Accounts Receivable", "Net Receivables",
+                                     "Receivables", "AccountsReceivable"])
+                if ar_key:
+                    ar_row = bs.loc[ar_key].dropna()
+                    if len(ar_row) >= 1: ext["accounts_receivable"]       = float(ar_row.iloc[0])
+                    if len(ar_row) >= 2: ext["accounts_receivable_prior"] = float(ar_row.iloc[1])
+        except Exception:
+            pass
+
+        # ── EPS estimate revision momentum ────────────────────────────────────
+        try:
+            trend = tk.eps_trend
+            if trend is not None and not trend.empty and "0y" in trend.index:
+                row_0y  = trend.loc["0y"]
+                cur_est = row_0y.get("current")
+                ago30   = row_0y.get("30daysAgo")
+                n_anal  = 0
+                try:
+                    ee = tk.earnings_estimate
+                    if ee is not None and not ee.empty and "0y" in ee.index:
+                        n_anal = int(ee.loc["0y"].get("numberOfAnalysts") or 0)
+                except Exception:
+                    pass
+                if (cur_est is not None and ago30 is not None
+                        and abs(float(ago30)) > 0.001):
+                    delta = (float(cur_est) - float(ago30)) / abs(float(ago30))
+                    ext["revision_magnitude"]    = round(delta, 4)
+                    ext["revision_num_analysts"] = n_anal
+                    if   delta >  0.02: ext["revision_direction"] = "UP"
+                    elif delta < -0.02: ext["revision_direction"] = "DOWN"
+                    else:               ext["revision_direction"] = "FLAT"
+        except Exception:
+            pass
+
+        # ── Capital allocation (buybacks, net issuance, capex efficiency) ────
+        try:
+            a_cf = tk.cashflow   # annual, cached
+            if a_cf is not None and not a_cf.empty:
+                BUYB = ["Repurchase Of Common Stock", "Purchase Of Common Stock",
+                        "Common Stock Repurchase", "RepurchaseOfCapitalStock"]
+                ISS  = ["Issuance Of Common Stock", "Common Stock Issuance",
+                        "ProceedsFromIssuanceOfCommonStock"]
+                CAPX = ["Capital Expenditure", "Purchase Of Plant Property Equipment",
+                        "CapitalExpenditure", "Purchases Of Property Plant And Equipment"]
+
+                mktcap_v = info.get("marketCap") or 0
+
+                buyb_key = _first(a_cf, BUYB)
+                iss_key  = _first(a_cf, ISS)
+
+                # Buyback yield over 3 years (total buybacks / 3yr avg mktcap)
+                if buyb_key and mktcap_v > 0:
+                    buyb_3y = sum(
+                        abs(float(a_cf.loc[buyb_key].dropna().iloc[i] or 0))
+                        for i in range(min(3, len(a_cf.loc[buyb_key].dropna())))
+                    )
+                    ext["buyback_yield_3y"] = round(buyb_3y / (mktcap_v * 3), 4)
+
+                # Net issuance (avg annual as fraction of mktcap)
+                if mktcap_v > 0:
+                    net_iss_vals = []
+                    ncols = min(3, a_cf.shape[1])
+                    for i in range(ncols):
+                        buyb_v = abs(float(a_cf.loc[buyb_key].iloc[i] or 0)) if buyb_key else 0
+                        iss_v  = abs(float(a_cf.loc[iss_key].iloc[i] or 0))  if iss_key  else 0
+                        net_iss_vals.append((iss_v - buyb_v) / mktcap_v)
+                    if net_iss_vals:
+                        ext["net_issuance_annual"] = round(
+                            sum(net_iss_vals) / len(net_iss_vals), 4)
+
+                # Capex efficiency: 3yr revenue CAGR / 3yr capex CAGR
+                capx_key  = _first(a_cf, CAPX)
+                a_inc_cap = tk.income_stmt   # cached
+                rev_key2  = _first(a_inc_cap, ["Total Revenue", "Revenue", "Revenues"]) \
+                            if a_inc_cap is not None and not a_inc_cap.empty else None
+                if capx_key and rev_key2 and a_inc_cap.shape[1] >= 3 and a_cf.shape[1] >= 3:
+                    try:
+                        rev_new   = float(a_inc_cap.loc[rev_key2].dropna().iloc[0])
+                        rev_old   = float(a_inc_cap.loc[rev_key2].dropna().iloc[2])
+                        capx_new  = abs(float(a_cf.loc[capx_key].dropna().iloc[0] or 1))
+                        capx_old  = abs(float(a_cf.loc[capx_key].dropna().iloc[2] or 1))
+                        if rev_old > 0 and capx_old > 0 and capx_new > 0:
+                            rev_cagr  = (rev_new / rev_old) ** (1/3) - 1
+                            capx_cagr = (capx_new / capx_old) ** (1/3) - 1
+                            if abs(capx_cagr) > 0.005:
+                                ext["capex_efficiency"] = round(rev_cagr / capx_cagr, 2)
+                            elif rev_cagr > 0:
+                                ext["capex_efficiency"] = 3.0
+                    except Exception:
+                        pass
+
+            # Div growth 3Y % (from already-computed dividend_growth_rate decimal)
+            if ext.get("dividend_growth_rate") is not None:
+                ext["div_growth_3y_pct"] = round(ext["dividend_growth_rate"] * 100, 1)
         except Exception:
             pass
 
@@ -4884,7 +5068,7 @@ def _build_seasonality_html(d: dict, seas: dict) -> str:
     )
 
 
-def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict = None, reliability: dict = None, bt: dict = None, applicability_scores: dict = None, top_8: list = None, remainder: list = None, seas: dict = None) -> str:
+def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict = None, reliability: dict = None, bt: dict = None, applicability_scores: dict = None, top_8: list = None, remainder: list = None, seas: dict = None, peer_group: list = None) -> str:
     gr = gr or {}
     reliability = reliability or {}
     price        = d["price"]
@@ -5198,6 +5382,206 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
     }
     verdict_color = verdict_colors.get(conv["verdict"], "#f0a500")
     upside_sign = "+" if conv["upside"] >= 0 else ""
+
+    # ── Earnings Quality + Capital Allocation card ─────────────────────────
+    _ext = d.get("ext", {})
+    _eq  = calc_earnings_quality({
+        "net_income":                d.get("net_income"),
+        "operating_cash_flow":       _ext.get("operating_cash_flow"),
+        "total_assets":              _ext.get("total_assets"),
+        "total_assets_prior":        _ext.get("total_assets_prior"),
+        "fcf":                       d.get("fcf"),
+        "revenue":                   d.get("revenue"),
+        "accounts_receivable":       _ext.get("accounts_receivable"),
+        "accounts_receivable_prior": _ext.get("accounts_receivable_prior"),
+    })
+    _ca_score = calc_capital_allocation_score({
+        "buyback_yield_3y":  _ext.get("buyback_yield_3y"),
+        "net_issuance_annual": _ext.get("net_issuance_annual"),
+        "div_growth_3y_pct": _ext.get("div_growth_3y_pct"),
+        "capex_efficiency":  _ext.get("capex_efficiency"),
+    })
+    _rev_dir = _ext.get("revision_direction")
+    _rev_mag = _ext.get("revision_magnitude")
+    _rev_n   = _ext.get("revision_num_analysts") or 0
+    _grade_colors = {"A": "#00c896", "B": "#7ecfb3", "C": "#f0a500",
+                     "D": "#e87c3e", "F": "#e05c5c", "N/A": "#666"}
+    _eq_grade = _eq.get("quality_grade", "N/A")
+    def _fmt_ratio(v, decimals=2):
+        return format(v, "." + str(decimals) + "f") if v is not None else "N/A"
+    _acr = _eq.get("accruals_ratio")
+    _acr_color = "#00c896" if (_acr is not None and _acr < 0.05) else ("#f0a500" if (_acr is not None and _acr < 0.10) else "#e05c5c")
+    _fcfni = _eq.get("fcf_ni_ratio")
+    _fcfni_color = "#00c896" if (_fcfni is not None and _fcfni >= 0.8) else ("#f0a500" if (_fcfni is not None and _fcfni >= 0.5) else "#e05c5c")
+    _rev_arrow = {"UP": "↑", "DOWN": "↓", "FLAT": "→"}.get(_rev_dir, "—")
+    _rev_color = {"UP": "#00c896", "DOWN": "#e05c5c", "FLAT": "#aaa"}.get(_rev_dir, "#666")
+    _bby = _ext.get("buyback_yield_3y")
+    _nis = _ext.get("net_issuance_annual")
+    _ceff = _ext.get("capex_efficiency")
+    eq_alloc_html = (
+        '<div class="fund-table">'
+        '<div class="fund-table-title">Earnings Quality &amp; Capital Allocation</div>'
+        '<div class="fund-row"><span class="fund-key">EQ Grade</span>'
+        '<span class="fund-val" style="color:{gc};font-weight:700;">{grade}</span></div>'
+        '<div class="fund-row"><span class="fund-key">Accruals Ratio</span>'
+        '<span class="fund-val" style="color:{ac};">{acr}</span></div>'
+        '<div class="fund-row"><span class="fund-key">FCF / Net Income</span>'
+        '<span class="fund-val" style="color:{fc};">{fcfni}</span></div>'
+        '<div class="fund-row"><span class="fund-key">Est. Revision (30d)</span>'
+        '<span class="fund-val" style="color:{rc};">{arr} {rmag} ({rn} analysts)</span></div>'
+        '<div class="fund-row"><span class="fund-key">Capital Alloc. Score</span>'
+        '<span class="fund-val">{cas}/10</span></div>'
+        '<div class="fund-row"><span class="fund-key">Buyback Yield (3yr)</span>'
+        '<span class="fund-val">{bby}</span></div>'
+        '<div class="fund-row"><span class="fund-key">Net Issuance (annual)</span>'
+        '<span class="fund-val">{nis}</span></div>'
+        '<div class="fund-row"><span class="fund-key">Capex Efficiency</span>'
+        '<span class="fund-val">{ceff}</span></div>'
+        '</div>'
+    ).format(
+        gc=_grade_colors.get(_eq_grade, "#666"), grade=_eq_grade,
+        ac=_acr_color,
+        acr=(_fmt_ratio(_acr, 3) + (" ✓" if _acr is not None and _acr < 0.05 else " ⚠" if _acr is not None and _acr < 0.10 else " ✗" if _acr is not None else "")),
+        fc=_fcfni_color, fcfni=_fmt_ratio(_fcfni),
+        rc=_rev_color, arr=_rev_arrow,
+        rmag=("({:+.0f}%)".format(_rev_mag * 100) if _rev_mag is not None else ""),
+        rn=_rev_n,
+        cas=_ca_score,
+        bby=("{:.1f}%".format(_bby * 100) if _bby is not None else "N/A"),
+        nis=("{:+.1f}% net".format(_nis * 100) if _nis is not None else "N/A"),
+        ceff=(_fmt_ratio(_ceff) + "x" if _ceff is not None else "N/A"),
+    )
+
+    # ── Peer Comparison section ──────────────────────────────────────────────
+    peer_html = ""
+    if peer_group:
+        _peers = peer_group or []
+        # Compute medians for each dimension
+        def _med(key):
+            vals = [p[key] for p in _peers if p.get(key) is not None and p[key] > 0]
+            if not vals: return None
+            vals.sort()
+            mid = len(vals) // 2
+            return round(vals[mid] if len(vals) % 2 else (vals[mid-1]+vals[mid])/2, 1)
+        _p_pe     = _med("pe")
+        _p_pfcf   = _med("pfcf")
+        _p_evebitda = _med("ev_ebitda")
+        _p_evs    = _med("ev_s")
+        _p_gm     = _med("gross_margin")
+        _p_rg     = _med("rev_growth")
+
+        def _fv(v, fmt="{:.1f}"):
+            return fmt.format(v) if v is not None else "—"
+        def _pct_vs(subject, peer_med, invert=False):
+            """Return colored 'vs median' delta string."""
+            if subject is None or peer_med is None or peer_med == 0:
+                return "—"
+            delta = (subject - peer_med) / peer_med * 100
+            # For multiples, lower is "better" for subject (cheaper), invert=True
+            if invert:
+                color = "#00c896" if delta < -5 else "#f0a500" if delta < 10 else "#e05c5c"
+            else:
+                color = "#00c896" if delta > 5 else "#f0a500" if delta > -10 else "#e05c5c"
+            return '<span style="color:{};font-size:11px;">{:+.0f}%</span>'.format(color, delta)
+
+        # Subject's values
+        _s_pe    = d.get("pe_ttm") or (d["price"] / d["eps"] if d.get("eps") and d["eps"] > 0 else None)
+        _s_pfcf  = (d["price"] / (d["fcf"] / d["shares"]) if d.get("fcf") and d.get("shares") and d["fcf"] > 0 and d["shares"] > 0 else None)
+        _s_evebitda = d.get("ev_ebitda")
+        _s_evs   = d.get("ev_rev")
+        _s_gm    = d.get("gross_margin")
+        _s_rg    = d.get("rev_growth")
+
+        # Peer table rows
+        peer_rows = ""
+        for _p in _peers[:10]:
+            _ptk = _p["ticker"]
+            _is_subj = (_ptk == ticker)
+            _row_style = "border-left:3px solid var(--accent);" if _is_subj else ""
+            peer_rows += (
+                "<tr style='{rs}'>"
+                "<td style='padding:7px 12px;font-weight:{fw};'>{t}</td>"
+                "<td style='padding:7px 12px;font-size:11px;color:var(--muted);'>{n}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{pe}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{pfcf}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{eveb}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{evs}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{gm}</td>"
+                "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;'>{rg}</td>"
+                "</tr>"
+            ).format(
+                rs=_row_style, fw="700" if _is_subj else "400",
+                t=_ptk, n=_p.get("name", _ptk)[:22],
+                pe=_fv(_p.get("pe"), "{:.1f}x"),
+                pfcf=_fv(_p.get("pfcf"), "{:.1f}x"),
+                eveb=_fv(_p.get("ev_ebitda"), "{:.1f}x"),
+                evs=_fv(_p.get("ev_s"), "{:.1f}x"),
+                gm=(_fv(_p.get("gross_margin"), "{:.1f}") + "%" if _p.get("gross_margin") else "—"),
+                rg=(_fv(_p.get("rev_growth"), "{:.1f}") + "%" if _p.get("rev_growth") else "—"),
+            )
+
+        # Median row
+        peer_rows += (
+            "<tr style='border-top:2px solid var(--border);background:var(--surface);'>"
+            "<td style='padding:7px 12px;font-weight:600;color:var(--muted);'>MEDIAN</td>"
+            "<td style='padding:7px 12px;'></td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{pe}x</td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{pfcf}x</td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{eveb}x</td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{evs}x</td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{gm}%</td>"
+            "<td style='padding:7px 12px;font-family:DM Mono,monospace;text-align:right;color:var(--muted);'>{rg}%</td>"
+            "</tr>"
+        ).format(
+            pe=_fv(_p_pe), pfcf=_fv(_p_pfcf), eveb=_fv(_p_evebitda),
+            evs=_fv(_p_evs), gm=_fv(_p_gm), rg=_fv(_p_rg),
+        )
+
+        # Subject vs median row
+        peer_rows += (
+            "<tr style='background:rgba(79,142,247,0.06);'>"
+            "<td style='padding:7px 12px;font-weight:600;color:var(--accent);'>{tkr} vs Median</td>"
+            "<td style='padding:7px 12px;'></td>"
+            "<td style='padding:7px 12px;text-align:right;'>{pe}</td>"
+            "<td style='padding:7px 12px;text-align:right;'>{pfcf}</td>"
+            "<td style='padding:7px 12px;text-align:right;'>{eveb}</td>"
+            "<td style='padding:7px 12px;text-align:right;'>{evs}</td>"
+            "<td style='padding:7px 12px;text-align:right;'>{gm}</td>"
+            "<td style='padding:7px 12px;text-align:right;'>{rg}</td>"
+            "</tr>"
+        ).format(
+            tkr=ticker,
+            pe=_pct_vs(_s_pe, _p_pe, invert=True),
+            pfcf=_pct_vs(_s_pfcf, _p_pfcf, invert=True),
+            eveb=_pct_vs(_s_evebitda, _p_evebitda, invert=True),
+            evs=_pct_vs(_s_evs, _p_evs, invert=True),
+            gm=_pct_vs(_s_gm, _p_gm, invert=False),
+            rg=_pct_vs(_s_rg, _p_rg, invert=False),
+        )
+
+        peer_html = (
+            '<div style="margin-top:28px;">'
+            '<div class="fund-table-title">Peer Comparison — {ind}</div>'
+            '<div style="overflow-x:auto;">'
+            '<table style="width:100%;border-collapse:collapse;font-size:13px;">'
+            '<thead><tr>'
+            '<th style="padding:8px 12px;text-align:left;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">Ticker</th>'
+            '<th style="padding:8px 12px;text-align:left;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">Name</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">P/E</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">P/FCF</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">EV/EBITDA</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">EV/S</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">Gross Margin</th>'
+            '<th style="padding:8px 12px;text-align:right;color:var(--muted);font-size:10px;letter-spacing:1.2px;text-transform:uppercase;border-bottom:1px solid var(--border);">Rev Growth</th>'
+            '</tr></thead>'
+            '<tbody>{rows}</tbody>'
+            '</table></div>'
+            '<p style="font-size:11px;color:var(--muted);margin:6px 0 0 0;">'
+            'Industry peers with market cap 0.25×–4× subject. {n} peers shown. '
+            'Green = subject cheaper/better vs median; Red = more expensive/weaker.</p>'
+            '</div>'
+        ).format(ind=d.get("industry") or d.get("sector") or "Industry",
+                 rows=peer_rows, n=len(_peers))
 
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -5888,6 +6272,8 @@ def generate_html(d: dict, results: list, conv: dict, benchmarks: dict, gr: dict
         <div class="fund-row"><span class="fund-key">Debt / Equity</span><span class="fund-val">{d_e}</span></div>
         <div class="fund-row"><span class="fund-key">Beta (1yr)</span><span class="fund-val">{beta}</span></div>
       </div>
+      {eq_alloc_html}
+      {peer_html}
     </div>
   </section>
 
@@ -6262,6 +6648,8 @@ function btToggleLine(gid) {{
             '<div id="vm-help-pop-body"></div>'
             '</div>'
         ),
+        eq_alloc_html=eq_alloc_html,
+        peer_html=peer_html,
     )
 
     return html
@@ -6350,6 +6738,11 @@ def main():
           + " (" + str(benchmarks.get("peer_count", 0)) + " peers)")
     print("  P/E median=" + str(benchmarks["pe"]) + "x | P/FCF median=" + str(benchmarks["pfcf"]) + "x | EV/EBITDA median=" + str(benchmarks["ev_ebitda"]) + "x")
     erg_peer_data = fetch_peer_erg_data(sector, industry)
+    peer_group = []
+    if sector and industry:
+        peer_group = fetch_peer_group(sector, industry, d.get("market_cap") or 0)
+        if peer_group:
+            print("  Peer group: {} individual peers for radar chart".format(len(peer_group)))
     if erg_peer_data.get("peer_count", 0) > 0:
         print("  ERG peers:  {} companies  |  p25={:.3f}  median={:.3f}  p75={:.3f}  ({})".format(
             erg_peer_data["peer_count"],
@@ -6607,7 +7000,7 @@ def main():
     html = generate_html(d, results, conv, benchmarks, gr, reliability, bt,
                          applicability_scores=applicability_scores,
                          top_8=top_8, remainder=remainder + skipped_methods,
-                         seas=seas)
+                         seas=seas, peer_group=peer_group)
 
     outdir = "valuationData"
     os.makedirs(outdir, exist_ok=True)

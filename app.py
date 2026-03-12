@@ -216,6 +216,37 @@ SCRIPTS = {
                  values=["tsne", "umap", "pca"]),
         ],
     },
+    "Magic Formula": {
+        "path": os.path.join(ROOT, "12_magicFormula", "magicFormula.py"),
+        "desc": "Greenblatt's Magic Formula — dual-ranks stocks by Earnings Yield (EBIT/EV) + Return on Capital (ROIC). Lower combined rank = better blend of cheap + quality.",
+        "icon": "📐",
+        "params": [
+            dict(id="index", label="Index",      type="option", flag="--index",
+                 required=True,  default="SPX",  values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",   label="Top N",      type="entry",  flag="--top",
+                 required=False, default="",
+                 hint="Stocks to screen (default: all index members)"),
+            dict(id="csv",   label="Export CSV", type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
+    "Quality Screener": {
+        "path": os.path.join(ROOT, "13_qualityScreener", "qualityScreener.py"),
+        "desc": "Quality / Compounder screener — scores stocks 0-100 across 4 pillars: Return on Capital (35pts), Profitability (25pts), Balance Sheet (25pts), Capital Efficiency (15pts).",
+        "icon": "🏆",
+        "params": [
+            dict(id="index",     label="Index",          type="option", flag="--index",
+                 required=True,  default="SPX",          values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",       label="Top N",          type="entry",  flag="--top",
+                 required=False, default="",
+                 hint="Stocks to screen (default: all index members)"),
+            dict(id="min_score", label="Min quality score", type="entry", flag="--min-score",
+                 required=False, default="",
+                 hint="Only show stocks with score ≥ N (e.g. 70 for B+ and above)"),
+            dict(id="csv",       label="Export CSV",     type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
     "Price Forecast": {
         "path": os.path.join(ROOT, "11_priceForecast", "priceForecast.py"),
         "desc": "ARIMA + ETS price forecasting with walk-forward backtest — compares model accuracy against a naive random-walk baseline and surfaces uncertainty cones over the forecast horizon.",
@@ -241,7 +272,8 @@ SCRIPTS = {
 # Sidebar group layout — defines sections and order shown in the UI
 SIDEBAR_GROUPS = [
     {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
-    {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener"]},
+    {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener",
+                                               "Magic Formula", "Quality Screener"]},
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
@@ -770,6 +802,29 @@ loadList();
 </html>"""
 
 
+@app.route("/run-prefill")
+def run_prefill():
+    """
+    Redirect to main page with JS that pre-selects a script and pre-fills a ticker.
+    Usage: /run-prefill?script=Valuation+Master&ticker=AAPL
+    """
+    script = request.args.get("script", "")
+    ticker = request.args.get("ticker", "")
+    return """<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<title>Loading...</title>
+<script>
+  const script = "{s}";
+  const ticker = "{t}";
+  sessionStorage.setItem("prefill_script", script);
+  sessionStorage.setItem("prefill_ticker", ticker);
+  window.location.href = "/";
+</script></head>
+<body style="background:#0d0f14;color:#e8eaf2;font-family:monospace;padding:40px;">
+  Redirecting to {s} for {t}...
+</body></html>""".format(s=script.replace('"', ""), t=ticker.replace('"', ""))
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
     """Save an uploaded CSV.  Optional ?script= query param routes to the correct directory."""
@@ -1132,9 +1187,25 @@ Promise.all([
     });
   });
 
-  // Select first script of first group by default
-  const firstName = groups[0]?.scripts[0];
-  if (firstName && SCRIPTS[firstName]) selectScript(firstName);
+  // Check for prefill from /run-prefill redirect
+  const _pScript = sessionStorage.getItem("prefill_script");
+  const _pTicker = sessionStorage.getItem("prefill_ticker");
+  if (_pScript && SCRIPTS[_pScript]) {
+    sessionStorage.removeItem("prefill_script");
+    sessionStorage.removeItem("prefill_ticker");
+    selectScript(_pScript);
+    if (_pTicker) {
+      // Find the first text input param and fill it
+      setTimeout(() => {
+        const inp = document.querySelector("#params-grid input[type=text]");
+        if (inp) { inp.value = _pTicker; inp.dispatchEvent(new Event("input")); }
+      }, 100);
+    }
+  } else {
+    // Select first script of first group by default
+    const firstName = groups[0]?.scripts[0];
+    if (firstName && SCRIPTS[firstName]) selectScript(firstName);
+  }
 });
 
 // ── Script selection ───────────────────────────────────────────────────────

@@ -512,8 +512,9 @@ def parse_row(row):
     else:
         cash = 0.0
 
-    # (buyback field not available in TradingView screener API)
+    # (buyback/issuance fields not available in TradingView screener API)
     buyback_pct = None
+    net_issuance_annual = None   # populated by yfinance enrichment if available
 
     return dict(
         ticker=str(row.get("name", "?")), price=price, market_cap=mktcap,
@@ -529,7 +530,8 @@ def parse_row(row):
         perf_1m=perf_1m, perf_3m=perf_3m,
         ev_live=ev_live,
         # v3
-        roic=roic, p_b=p_b, buyback_pct=buyback_pct, gross_margin_v=gross_margin_v,
+        roic=roic, p_b=p_b, buyback_pct=buyback_pct, net_issuance_annual=net_issuance_annual,
+        gross_margin_v=gross_margin_v,
         eps_fwd_fy=eps_fwd_fy, rev_fwd_fy=rev_fwd_fy,
         actual_growth_used=actual_growth_used,
     )
@@ -1392,6 +1394,50 @@ def main():
     if write_csv_flag:
         write_csv(results, out_csv)
         print(f"  CSV saved:  {out_csv}")
+
+    # ── Screener snapshot + strategy performance card ──────────────────────────
+    try:
+        import sys as _sys
+        _wl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "8_watchlist")
+        if _wl_dir not in _sys.path:
+            _sys.path.insert(0, _wl_dir)
+        from watchlistTracker import save_screener_snapshot, calc_strategy_performance
+        save_screener_snapshot(results, "value", index_slug)
+        _perf = calc_strategy_performance("value", index_slug)
+        if _perf:
+            _sret  = _perf["strategy_return"]
+            _bret  = _perf.get("benchmark_return")
+            _alpha = _perf.get("alpha")
+            _hit   = _perf["hit_rate"]
+            _sdate = _perf["snapshot_date"]
+            _days  = _perf["days_elapsed"]
+            _sc = "color:#00c896" if _sret >= 0 else "color:#e05c5c"
+            _bc = "color:#00c896" if (_bret or 0) >= 0 else "color:#e05c5c"
+            _ac = "color:#00c896" if (_alpha or 0) >= 0 else "color:#e05c5c"
+            _bret_html = (f'<span style="{_bc}">{"+" if _bret>=0 else ""}{_bret:.1f}%</span>'
+                          if _bret is not None else "—")
+            _alpha_html = (f'<span style="{_ac}">{"+" if _alpha>=0 else ""}{_alpha:.1f}pp</span>'
+                           if _alpha is not None else "—")
+            _strategy_card = (
+                f'<div style="background:#1e2538;border:1px solid #252a3a;border-left:'
+                f'4px solid #4f8ef7;border-radius:8px;padding:14px 20px;margin:12px 16px 0;'
+                f'font-family:\'Inter\',sans-serif;font-size:13px;">'
+                f'<b style="color:#e8eaf0">Strategy Performance</b>'
+                f'<span style="color:#6b7194;margin-left:10px;font-size:11px">'
+                f'Top-{_perf["n_stocks"]} eq-weight vs SPY · snapshot {_sdate} ({_days}d ago)</span>'
+                f'<div style="display:flex;gap:32px;margin-top:8px;">'
+                f'<span>Strategy <b style="{_sc}">{"+" if _sret>=0 else ""}{_sret:.1f}%</b></span>'
+                f'<span>SPY {_bret_html}</span>'
+                f'<span>Alpha {_alpha_html}</span>'
+                f'<span>Hit rate <b style="color:#e8eaf0">{_hit:.0f}%</b></span>'
+                f'</div></div>'
+            )
+            html = html.replace("<body>", "<body>" + _strategy_card, 1)
+            with open(out, "w", encoding="utf-8") as _f:
+                _f.write(html)
+    except Exception as _e:
+        print(f"  [strategy] Warning: {_e}")
 
     if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
         webbrowser.open("file://" + os.path.abspath(out))

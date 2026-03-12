@@ -393,8 +393,18 @@ def fetch_price_history(ticker: str, days: int = 300) -> list:
 def fetch_wacc_inputs(ticker: str) -> dict:
     """Fetch yfinance TTM interest expense, effective tax rate, 5-yr beta, debt.
     Identical to valuationMaster.fetch_wacc_inputs()."""
-    result = {"interest_expense": None, "income_tax_expense": None,
-              "pretax_income": None, "total_debt_yf": None, "beta_yf": None}
+    result = {
+        "interest_expense": None, "income_tax_expense": None,
+        "pretax_income": None, "total_debt_yf": None, "beta_yf": None,
+        # Earnings quality
+        "operating_cash_flow": None, "total_assets": None, "total_assets_prior": None,
+        "accounts_receivable": None, "accounts_receivable_prior": None,
+        # Estimate revision
+        "revision_direction": None, "revision_magnitude": None, "revision_num_analysts": None,
+        # Capital allocation
+        "buyback_yield_3y": None, "net_issuance_annual": None,
+        "capex_efficiency": None, "div_growth_3y_pct": None,
+    }
     if not _YF:
         return result
     try:
@@ -477,6 +487,98 @@ def fetch_wacc_inputs(ticker: str) -> dict:
             if rev_yf    is not None: result["revenue_yf"] = rev_yf
             if fcf_yf    is not None: result["fcf_yf"]     = fcf_yf
             if ebitda_yf is not None: result["ebitda_yf"]  = ebitda_yf
+        except Exception: pass
+        # Earnings quality data
+        try:
+            OCF_NAMES = ["Operating Cash Flow", "Cash Flow From Operations",
+                         "Total Cash From Operating Activities"]
+            bs_pa = tk.balance_sheet
+            if use_q_cf:
+                ocf = _ttm(q_cf, OCF_NAMES)
+            else:
+                ocf = _annual(tk.cashflow, OCF_NAMES)
+            if ocf is not None: result["operating_cash_flow"] = ocf
+            if bs_pa is not None and not bs_pa.empty:
+                ta_key = _first(bs_pa, ["Total Assets", "Assets"])
+                if ta_key:
+                    ta_row = bs_pa.loc[ta_key].dropna()
+                    if len(ta_row) >= 1: result["total_assets"]       = float(ta_row.iloc[0])
+                    if len(ta_row) >= 2: result["total_assets_prior"] = float(ta_row.iloc[1])
+                ar_key = _first(bs_pa, ["Accounts Receivable", "Net Receivables", "Receivables"])
+                if ar_key:
+                    ar_row = bs_pa.loc[ar_key].dropna()
+                    if len(ar_row) >= 1: result["accounts_receivable"]       = float(ar_row.iloc[0])
+                    if len(ar_row) >= 2: result["accounts_receivable_prior"] = float(ar_row.iloc[1])
+        except Exception: pass
+        # EPS estimate revision
+        try:
+            trend = tk.eps_trend
+            if trend is not None and not trend.empty and "0y" in trend.index:
+                row_0y  = trend.loc["0y"]
+                cur_est = row_0y.get("current")
+                ago30   = row_0y.get("30daysAgo")
+                if cur_est is not None and ago30 is not None and abs(float(ago30)) > 0.001:
+                    delta = (float(cur_est) - float(ago30)) / abs(float(ago30))
+                    result["revision_magnitude"] = round(delta, 4)
+                    result["revision_direction"] = (
+                        "UP" if delta > 0.02 else "DOWN" if delta < -0.02 else "FLAT")
+                    try:
+                        ee = tk.earnings_estimate
+                        if ee is not None and not ee.empty and "0y" in ee.index:
+                            result["revision_num_analysts"] = int(
+                                ee.loc["0y"].get("numberOfAnalysts") or 0)
+                    except Exception: pass
+        except Exception: pass
+        # Capital allocation
+        try:
+            info_pa  = tk.info or {}
+            mktcap_v = info_pa.get("marketCap") or 0
+            a_cf_pa  = tk.cashflow
+            if a_cf_pa is not None and not a_cf_pa.empty:
+                BUYB = ["Repurchase Of Common Stock", "Purchase Of Common Stock",
+                        "Common Stock Repurchase"]
+                ISS  = ["Issuance Of Common Stock", "Common Stock Issuance"]
+                CAPX = ["Capital Expenditure", "Purchase Of Plant Property Equipment"]
+                buyb_key = _first(a_cf_pa, BUYB)
+                iss_key  = _first(a_cf_pa, ISS)
+                capx_key = _first(a_cf_pa, CAPX)
+                if buyb_key and mktcap_v > 0:
+                    buyb_3y = sum(
+                        abs(float(a_cf_pa.loc[buyb_key].dropna().iloc[i] or 0))
+                        for i in range(min(3, len(a_cf_pa.loc[buyb_key].dropna())))
+                    )
+                    result["buyback_yield_3y"] = round(buyb_3y / (mktcap_v * 3), 4)
+                if mktcap_v > 0:
+                    net_iss_vals = []
+                    for i in range(min(3, a_cf_pa.shape[1])):
+                        bv = abs(float(a_cf_pa.loc[buyb_key].iloc[i] or 0)) if buyb_key else 0
+                        iv = abs(float(a_cf_pa.loc[iss_key].iloc[i] or 0))  if iss_key  else 0
+                        net_iss_vals.append((iv - bv) / mktcap_v)
+                    if net_iss_vals:
+                        result["net_issuance_annual"] = round(
+                            sum(net_iss_vals) / len(net_iss_vals), 4)
+                a_inc_pa = tk.income_stmt
+                rev_key_pa = _first(a_inc_pa, ["Total Revenue", "Revenue", "Revenues"]) \
+                             if a_inc_pa is not None and not a_inc_pa.empty else None
+                if capx_key and rev_key_pa and a_inc_pa.shape[1] >= 3 and a_cf_pa.shape[1] >= 3:
+                    rn = float(a_inc_pa.loc[rev_key_pa].dropna().iloc[0])
+                    ro = float(a_inc_pa.loc[rev_key_pa].dropna().iloc[2])
+                    cn = abs(float(a_cf_pa.loc[capx_key].dropna().iloc[0] or 1))
+                    co = abs(float(a_cf_pa.loc[capx_key].dropna().iloc[2] or 1))
+                    if ro > 0 and co > 0 and cn > 0:
+                        rc = (rn / ro) ** (1/3) - 1
+                        cc = (cn / co) ** (1/3) - 1
+                        result["capex_efficiency"] = round(rc / cc, 2) if abs(cc) > 0.005 else (3.0 if rc > 0 else None)
+            # Div growth from dividends
+            try:
+                divs = tk.dividends
+                if divs is not None and len(divs) >= 2:
+                    da = divs.resample("Y").sum()
+                    if len(da) >= 4:
+                        d_new = float(da.iloc[-1]); d_old = float(da.iloc[-4])
+                        if d_old > 0 and d_new > 0:
+                            result["div_growth_3y_pct"] = round(((d_new / d_old) ** (1/3) - 1) * 100, 1)
+            except Exception: pass
         except Exception: pass
     except Exception as e:
         print("  [WACC yf] {}: {}".format(ticker, e))
@@ -2990,6 +3092,19 @@ def _build_risk_tab_html(stocks_data: dict, metrics: dict) -> str:
         for t1 in tickers
     }
 
+    # ── 6b. CVaR (Expected Shortfall) ─────────────────────────────────────
+    def _cvar(confidence):
+        """Mean of returns below the VaR threshold (positive loss fraction)."""
+        cutoff_idx = max(0, int(n_obs * (1 - confidence)) - 1)
+        tail = srt[: cutoff_idx + 1]
+        return -sum(tail) / len(tail) if tail else 0.0
+
+    cvar_95_1d  = _cvar(0.95)
+    cvar_95_10d = cvar_95_1d * (10 ** 0.5)
+
+    # ── 6c. HHI concentration ──────────────────────────────────────────────
+    hhi = sum(w ** 2 for w in weights.values())
+
     # ── 8. Build VaR banner ────────────────────────────────────────────────
     def _var_box(label, pct_loss):
         dollar = total_eq * pct_loss
@@ -3004,19 +3119,50 @@ def _build_risk_tab_html(stocks_data: dict, metrics: dict) -> str:
             "</div>"
         ).format(lbl=label, pct=pct_loss * 100, dlr=dollar, eq=total_eq)
 
+    # CVaR boxes
+    def _cvar_box(label, pct_loss):
+        dollar = total_eq * pct_loss
+        color = "var(--down)" if pct_loss > var_95_1d * 1.1 else "#f0a500"
+        return (
+            "<div style='background:var(--surface);border-radius:10px;padding:20px 24px;text-align:center;'>"
+            "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+            "color:var(--muted);margin-bottom:8px;'>{lbl}</div>"
+            "<div style='font-size:24px;font-family:DM Mono,monospace;"
+            "color:{col};font-weight:700;'>{pct:.2f}%</div>"
+            "<div style='font-size:11px;color:var(--muted);margin-top:4px;'>"
+            "${dlr:,.0f} on ${eq:,.0f} equity</div>"
+            "</div>"
+        ).format(lbl=label, pct=pct_loss * 100, dlr=dollar, eq=total_eq, col=color)
+
+    hhi_color = "var(--down)" if hhi > 0.25 else "var(--warn)" if hhi > 0.15 else "var(--up)"
+    hhi_label = "High concentration" if hhi > 0.25 else "Moderate" if hhi > 0.15 else "Well diversified"
+    hhi_box = (
+        "<div style='background:var(--surface);border-radius:10px;padding:20px 24px;text-align:center;'>"
+        "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+        "color:var(--muted);margin-bottom:8px;'>HHI Concentration</div>"
+        "<div style='font-size:24px;font-family:DM Mono,monospace;"
+        "color:{col};font-weight:700;'>{hhi:.3f}</div>"
+        "<div style='font-size:11px;color:var(--muted);margin-top:4px;'>{lbl}</div>"
+        "</div>"
+    ).format(col=hhi_color, hhi=hhi, lbl=hhi_label)
+
     var_section = (
         "<section>"
         "<div class='section-label'>Portfolio Value at Risk — Historical Simulation</div>"
-        "<div style='display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:8px;'>"
+        "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:8px;'>"
         + _var_box("95% VaR — 1 Day",   var_95_1d)
         + _var_box("99% VaR — 1 Day",   var_99_1d)
         + _var_box("95% VaR — 10 Day",  var_95_10d)
-        + _var_box("99% VaR — 10 Day",  var_99_10d)
+        + "</div>"
+        + "<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;'>"
+        + _cvar_box("95% CVaR — 1 Day",  cvar_95_1d)
+        + _cvar_box("95% CVaR — 10 Day", cvar_95_10d)
+        + hhi_box
         + "</div>"
         + "<p style='font-size:11px;color:var(--muted);margin:4px 0 0 0;'>"
         + "Based on {:,} common trading days. "
-          "95% VaR: worst loss exceeded on 1 in 20 days. "
-          "10-day VaR = 1-day × √10 (Basel square-root-of-time scaling).".format(n_obs)
+          "CVaR (Expected Shortfall) = mean loss in the worst 5% of days — more conservative than VaR. "
+          "HHI &gt;0.25 = high concentration risk.".format(n_obs)
         + "</p></section>"
     )
 
@@ -3200,14 +3346,176 @@ def _build_risk_tab_html(stocks_data: dict, metrics: dict) -> str:
         + "</p></section>"
     )
 
+    # ── Fama-French 5-Factor Exposure ─────────────────────────────────────
+    ff_section = ""
+    try:
+        import pandas as pd
+        from valuation_models import calc_factor_exposure as _cfe
+        # Need portfolio returns as pd.Series with DatetimeIndex
+        _port_series = pd.Series(
+            port_rets,
+            index=pd.to_datetime(common_dates)
+        ).sort_index()
+        _start_dt = _port_series.index.min().strftime("%Y-%m-%d")
+        _ff = _cfe(_port_series, _start_dt)
+        if _ff and _ff.get("loadings"):
+            _factors = ["Mkt-RF", "SMB", "HML", "RMW", "CMA"]
+            _ff_rows = ""
+            for _f in _factors:
+                _load = _ff["loadings"].get(_f)
+                _t    = _ff["t_stats"].get(_f)
+                _sig  = _ff["significant"].get(_f, False)
+                if _load is None:
+                    continue
+                _lc   = "var(--up)" if _load > 0.1 else "var(--down)" if _load < -0.1 else "var(--muted)"
+                _star = "**" if abs(_t or 0) > 2.576 else "*" if abs(_t or 0) > 1.96 else ""
+                _ff_rows += (
+                    "<tr>"
+                    "<td style='padding:10px 14px;font-weight:600;'>{f}</td>"
+                    "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;"
+                    "color:{lc};'>{load:+.3f}</td>"
+                    "<td style='padding:10px 14px;font-family:DM Mono,monospace;text-align:right;'>"
+                    "{t:.2f}{star}</td>"
+                    "</tr>"
+                ).format(f=_f, lc=_lc, load=_load, t=_t or 0, star=_star)
+            _alpha = _ff.get("alpha_annualized") or 0.0
+            _r2    = _ff.get("r_squared") or 0.0
+            _alc   = "var(--up)" if _alpha > 0 else "var(--down)"
+            ff_section = (
+                "<section style='margin-top:28px;'>"
+                "<div class='section-label'>Fama-French 5-Factor Exposure</div>"
+                "<div style='display:flex;gap:24px;margin-bottom:12px;'>"
+                "<div style='background:var(--surface);border-radius:10px;padding:16px 24px;'>"
+                "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+                "color:var(--muted);margin-bottom:6px;'>Alpha (ann.)</div>"
+                "<div style='font-size:22px;font-family:DM Mono,monospace;color:{alc};font-weight:700;'>"
+                "{alpha:+.2%}</div></div>"
+                "<div style='background:var(--surface);border-radius:10px;padding:16px 24px;'>"
+                "<div style='font-size:10px;letter-spacing:1.5px;text-transform:uppercase;"
+                "color:var(--muted);margin-bottom:6px;'>R²</div>"
+                "<div style='font-size:22px;font-family:DM Mono,monospace;font-weight:700;'>"
+                "{r2:.1%}</div></div>"
+                "</div>"
+                "<div style='overflow-x:auto;'>"
+                "<table style='width:auto;border-collapse:collapse;'>"
+                "<thead><tr>"
+                "<th style='padding:8px 14px;font-size:10px;letter-spacing:1.5px;text-align:left;"
+                "text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Factor</th>"
+                "<th style='padding:8px 14px;font-size:10px;letter-spacing:1.5px;text-align:right;"
+                "text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>Loading (β)</th>"
+                "<th style='padding:8px 14px;font-size:10px;letter-spacing:1.5px;text-align:right;"
+                "text-transform:uppercase;color:var(--muted);border-bottom:1px solid var(--border);'>t-stat</th>"
+                "</tr></thead><tbody>" + _ff_rows + "</tbody></table></div>"
+                "<p style='font-size:11px;color:var(--muted);margin:8px 0 0 0;'>"
+                "OLS regression of portfolio excess returns on daily Fama-French 5 factors. "
+                "** p&lt;1%, * p&lt;5%. Mkt-RF = market risk, SMB = small-cap tilt, "
+                "HML = value tilt, RMW = profitability, CMA = investment conservatism.</p>"
+                "</section>"
+            ).format(alc=_alc, alpha=_alpha, r2=_r2)
+    except Exception:
+        pass
+
     return (
         '<div id="tab-risk" class="tab-panel">'
         '<div class="container" style="padding-top:48px;">'
         + var_section
         + corr_section
         + stats_section
+        + ff_section
         + "</div></div>"
     )
+
+
+def fetch_macro_regime() -> dict:
+    """
+    Fetch macro regime signals: VIX, yield curve (10Y-3M), credit (HYG/LQD).
+    Returns:
+      vix_current, vix_pct  (VIX vs 1yr percentile 0-100)
+      yield_curve           (10Y - 3M spread in bps)
+      credit_label          ("TIGHTENING"|"NEUTRAL"|"WIDENING")
+      regime_score          (0-100 composite: 100=risk-on, 0=risk-off)
+      regime_label          ("RISK-ON"|"NEUTRAL"|"RISK-OFF")
+      sector_tilts          {overweight: [], underweight: []}
+    """
+    out = {
+        "vix_current": None, "vix_pct": None,
+        "yield_curve": None, "credit_label": "NEUTRAL",
+        "regime_score": 50, "regime_label": "NEUTRAL",
+        "sector_tilts": {"overweight": [], "underweight": []},
+    }
+    try:
+        import yfinance as yf
+        # VIX — 1yr history
+        vix = yf.Ticker("^VIX").history(period="1y")
+        if not vix.empty:
+            _vix_now = float(vix["Close"].iloc[-1])
+            _vix_all = vix["Close"].tolist()
+            _below   = sum(1 for v in _vix_all if v <= _vix_now)
+            out["vix_current"] = round(_vix_now, 1)
+            out["vix_pct"]     = round(_below / len(_vix_all) * 100, 0)
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        # 10Y treasury
+        t10 = yf.Ticker("^TNX").history(period="5d")
+        # 3M treasury
+        t3  = yf.Ticker("^IRX").history(period="5d")
+        if not t10.empty and not t3.empty:
+            _10y = float(t10["Close"].iloc[-1])
+            _3m  = float(t3["Close"].iloc[-1])
+            out["yield_curve"] = round((_10y - _3m) * 10, 0)   # % × 10 = bps approx
+    except Exception:
+        pass
+    try:
+        import yfinance as yf
+        # HYG / LQD ratio 30-day momentum
+        hyg = yf.Ticker("HYG").history(period="35d")["Close"]
+        lqd = yf.Ticker("LQD").history(period="35d")["Close"]
+        if len(hyg) >= 20 and len(lqd) >= 20:
+            ratio_now  = float(hyg.iloc[-1]) / float(lqd.iloc[-1])
+            ratio_past = float(hyg.iloc[-21]) / float(lqd.iloc[-21])
+            _chg = (ratio_now - ratio_past) / ratio_past * 100
+            out["credit_label"] = "TIGHTENING" if _chg > 0.5 else "WIDENING" if _chg < -0.5 else "NEUTRAL"
+    except Exception:
+        pass
+
+    # Composite regime score (0-100)
+    _score = 50.0
+    if out["vix_pct"] is not None:
+        # Low VIX percentile = risk-on (high score)
+        _score += (50 - out["vix_pct"]) * 0.5   # ±25 pts
+    if out["yield_curve"] is not None:
+        # Positive (non-inverted) yield curve = risk-on
+        if   out["yield_curve"] >= 100: _score += 15
+        elif out["yield_curve"] >= 0:   _score += 8
+        elif out["yield_curve"] >= -50: _score -= 8
+        else:                           _score -= 15
+    if out["credit_label"] == "TIGHTENING":
+        _score += 10
+    elif out["credit_label"] == "WIDENING":
+        _score -= 10
+
+    _score = max(0.0, min(100.0, _score))
+    out["regime_score"] = round(_score, 0)
+
+    if   _score > 65: lbl = "RISK-ON"
+    elif _score < 35: lbl = "RISK-OFF"
+    else:             lbl = "NEUTRAL"
+    out["regime_label"] = lbl
+
+    # Sector tilts
+    if lbl == "RISK-ON":
+        out["sector_tilts"] = {
+            "overweight":  ["Technology", "Consumer Cyclical", "Industrials"],
+            "underweight": ["Utilities", "Consumer Defensive"],
+        }
+    elif lbl == "RISK-OFF":
+        out["sector_tilts"] = {
+            "overweight":  ["Utilities", "Consumer Defensive", "Healthcare"],
+            "underweight": ["Technology", "Energy", "Financial Services"],
+        }
+    return out
 
 
 def _build_earnings_tab_html(stocks_data: dict) -> str:
@@ -3559,8 +3867,43 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
             scol=sig_color, sbg=sig_bg_col, sig=signal_str
         )
 
+    # ── Macro Regime Banner ──────────────────────────────────────────────────
+    macro_banner = ""
+    try:
+        _mr = fetch_macro_regime()
+        _rl = _mr.get("regime_label", "NEUTRAL")
+        _rs = _mr.get("regime_score", 50)
+        _vix = _mr.get("vix_current")
+        _yc  = _mr.get("yield_curve")
+        _cr  = _mr.get("credit_label", "NEUTRAL")
+        _ow  = _mr.get("sector_tilts", {}).get("overweight", [])
+        _uw  = _mr.get("sector_tilts", {}).get("underweight", [])
+        _rcolor = {"RISK-ON": "#00c896", "NEUTRAL": "#f0a500", "RISK-OFF": "#e05c5c"}.get(_rl, "#6b7194")
+        _rbg    = {"RISK-ON": "rgba(0,200,150,0.08)", "NEUTRAL": "rgba(240,165,0,0.08)", "RISK-OFF": "rgba(224,92,92,0.08)"}.get(_rl, "rgba(107,113,148,0.08)")
+        _vix_s  = "VIX {:.1f}".format(_vix) if _vix else ""
+        _yc_s   = "Yield Curve {:+.0f}bps".format(_yc) if _yc is not None else ""
+        _cr_s   = "Credit {}".format(_cr)
+        _signals = " · ".join(s for s in [_vix_s, _yc_s, _cr_s] if s)
+        _ow_s = ", ".join(_ow) if _ow else ""
+        _uw_s = ", ".join(_uw) if _uw else ""
+        macro_banner = (
+            '<div style="border-left:4px solid {rc};background:{rb};padding:14px 20px;'
+            'border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:24px;">'
+            '<div><div style="font-size:10px;letter-spacing:1.5px;text-transform:uppercase;'
+            'color:{rc};margin-bottom:4px;">Macro Regime</div>'
+            '<div style="font-size:22px;font-weight:700;color:{rc};">{rl}</div>'
+            '<div style="font-size:11px;color:var(--muted);margin-top:4px;">{sig}</div></div>'
+            '<div style="font-size:11px;color:var(--muted);line-height:1.8;">'
+            '<div>Score: <strong style="color:{rc};">{rs:.0f}/100</strong></div>'
+            + ('<div>Overweight: <span style="color:#00c896;">{ow}</span></div>' if _ow_s else '')
+            + ('<div>Underweight: <span style="color:#e05c5c;">{uw}</span></div>' if _uw_s else '')
+            + '</div></div>'
+        ).format(rc=_rcolor, rb=_rbg, rl=_rl, sig=_signals, rs=_rs, ow=_ow_s, uw=_uw_s)
+    except Exception:
+        pass
+
     # concentration warnings + sector clustering warning
-    conc_html = ""
+    conc_html = macro_banner
     for w in metrics.get("concentration_warns", []):
         pct_v = allocs.get(w, {}).get("pct", 0)
         conc_html += '<div class="danger-banner"><strong>⚠ CONCENTRATION RISK: {}</strong> — {:.1f}% of portfolio exceeds the {:.0f}% maximum. Consider trimming.</div>'.format(
@@ -3620,6 +3963,11 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
     )
 
     # ── Signals Tab ────────────────────────────────────────────────
+    _suite_port = int(os.environ.get("VALUATION_SUITE_PORT", "5050"))
+    _link_style = ("display:inline-block;font-size:10px;color:var(--accent);border:1px solid var(--accent);"
+                   "border-radius:4px;padding:2px 7px;text-decoration:none;"
+                   "margin-left:4px;white-space:nowrap;")
+
     signals_cards = ""
     for ticker in sorted(stocks_data.keys()):
         sd   = stocks_data[ticker]
@@ -3707,6 +4055,8 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
               <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                 <span class="type-badge" style="color:{tcol};border-color:{tcol};">{ctype}</span>
                 <span style="font-size:11px;color:var(--muted);">{sector}</span>
+                {vm_link}
+                {sent_link}
               </div>
               <div style="margin-top:8px;">{chips}</div>
             </div>
@@ -3750,6 +4100,8 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
             sig=signal_str, st=strength,
             fv_rows=fv_rows, reasons=reasons_html,
             rsi_disp=rsi_disp, rsi_col=rsi_col,
+            vm_link='<a href="http://localhost:{p}/run-prefill?script=Valuation+Master&ticker={t}" target="_blank" style="{ls}">→ Valuation</a>'.format(p=_suite_port, t=ticker, ls=_link_style),
+            sent_link='<a href="http://localhost:{p}/run-prefill?script=Sentiment+Analyzer&ticker={t}" target="_blank" style="{ls}">→ Sentiment</a>'.format(p=_suite_port, t=ticker, ls=_link_style),
         )
 
     signals_tab = """
@@ -3968,6 +4320,31 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
 
         t_col  = type_color(cls.get("type","BLEND"))
         an_fd  = sd.get("analyst", {})
+        # Earnings Quality + Revision Direction
+        try:
+            from valuation_models import calc_earnings_quality
+            _eq = calc_earnings_quality({
+                "net_income": fund.get("net_income"),
+                "operating_cash_flow": fund.get("operating_cash_flow"),
+                "total_assets": fund.get("total_assets"),
+                "total_assets_prior": fund.get("total_assets_prior"),
+                "fcf": fund.get("fcf"),
+                "revenue": fund.get("revenue"),
+                "accounts_receivable": fund.get("accounts_receivable"),
+                "accounts_receivable_prior": fund.get("accounts_receivable_prior"),
+            })
+            _eq_grade = _eq.get("quality_grade", "—")
+        except Exception:
+            _eq_grade = "—"
+        _grade_color_map = {"A": "var(--up)", "B": "var(--up)", "C": "var(--warn)",
+                            "D": "var(--down)", "F": "var(--down)"}
+        _eq_color = _grade_color_map.get(_eq_grade, "var(--muted)")
+        _rev_dir = fund.get("revision_direction") or "—"
+        _rev_arr = {"UP": "↑", "DOWN": "↓", "FLAT": "→"}.get(_rev_dir, "—")
+        _rev_col = {"UP": "var(--up)", "DOWN": "var(--down)", "FLAT": "var(--muted)"}.get(_rev_dir, "var(--muted)")
+        _rev_n = fund.get("revision_num_analysts")
+        _rev_disp = "{} {}".format(_rev_arr, _rev_dir) + (" ({}a)".format(_rev_n) if _rev_n else "")
+
         # Earnings imminence flag
         _earn_soon = False
         _ed = an_fd.get("earnings_date")
@@ -4008,6 +4385,8 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
                   <div class="fund-row"><span class="fund-key">Next Earnings</span><span class="fund-val" {earn_col}>{earn_date}</span></div>
                   <div class="fund-row"><span class="fund-key">Fwd EPS (NTM)</span><span class="fund-val">{fwd_eps_disp}</span></div>
                   <div class="fund-row"><span class="fund-key">Fwd Revenue (NTM)</span><span class="fund-val">{fwd_rev_disp}</span></div>
+                  <div class="fund-row"><span class="fund-key">Earnings Quality</span><span class="fund-val" style="color:{eq_color};">{eq_grade}</span></div>
+                  <div class="fund-row"><span class="fund-key">EPS Revision</span><span class="fund-val" style="color:{rev_col};">{rev_disp}</span></div>
                 </div>
               </div>
               <div>
@@ -4045,6 +4424,8 @@ def build_html(portfolio_raw: dict, stocks_data: dict, metrics: dict, ts: str) -
             evr="{:.1f}x".format(fund.get("ev_rev")) if fund.get("ev_rev") else "—",
             flags=flags_html,
             cls_reasons="".join("<li>{}</li>".format(r) for r in cls.get("reasons",[])[:4]),
+            eq_grade=_eq_grade, eq_color=_eq_color,
+            rev_disp=_rev_disp, rev_col=_rev_col,
         )
 
     fund_tab = """
@@ -4893,6 +5274,15 @@ def main():
             fund["current_pfcf"]  = (mktcap_v / fcf_yf) if mktcap_v and fcf_yf > 0 else None
         if wacc_raw.get("ebitda_yf") is not None:
             fund["ebitda"] = wacc_raw["ebitda_yf"]
+
+        # Propagate earnings quality, revision, and capital allocation keys
+        for _k in ("operating_cash_flow", "total_assets", "total_assets_prior",
+                   "accounts_receivable", "accounts_receivable_prior",
+                   "revision_direction", "revision_magnitude", "revision_num_analysts",
+                   "buyback_yield_3y", "net_issuance_annual", "capex_efficiency",
+                   "div_growth_3y_pct"):
+            if wacc_raw.get(_k) is not None:
+                fund[_k] = wacc_raw[_k]
 
         bars      = fetch_price_history(ticker, backtest_days + 50)
         analyst   = fetch_analyst_forecasts(ticker)

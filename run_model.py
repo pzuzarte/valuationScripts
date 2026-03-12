@@ -528,7 +528,8 @@ def _print_erg(r, price):
     _line("Fair value (base)",  _mo(r.get("fair_value")), _upside(r.get("fair_value"), price))
     _line("Bear",               _mo(r.get("bear_value")))
     _line("Bull",               _mo(r.get("bull_value")))
-    _line("ERG multiple",       f"{r.get('erg_mult','?'):.3f}")
+    _erg_m = r.get("erg_mult")
+    _line("ERG multiple",       f"{_erg_m:.3f}" if isinstance(_erg_m, (int, float)) else "—")
     if r.get("warning"):
         _warn(r["warning"])
 

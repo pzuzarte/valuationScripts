@@ -1128,7 +1128,9 @@ def _fetch_yf_data_gs(ticker):
     """
     _EMPTY = lambda: {"fcf": None, "ebitda": None,
                       "revenue": None, "fwd_rev": None, "total_debt": None,
-                      "cash": None, "gross_margin": None, "fwd_eps": None}
+                      "cash": None, "gross_margin": None, "fwd_eps": None,
+                      "revision_direction": None, "revision_magnitude": None,
+                      "revision_num_analysts": None, "short_float": None}
 
     # ── Cache hit — skip all HTTP calls ──────────────────────────────────────
     # No lock needed: dict.get() is GIL-protected and safe from any thread
@@ -1152,6 +1154,9 @@ def _fetch_yf_data_gs(ticker):
                 fwd_eps = info.get("forwardEps")
                 if fwd_eps is not None and fwd_eps > 0:
                     out["fwd_eps"] = float(fwd_eps)
+                sf = info.get("shortPercentOfFloat")
+                if sf is not None:
+                    out["short_float"] = round(float(sf) * 100, 2)  # fraction → %
             except Exception:
                 pass
 
@@ -1233,6 +1238,32 @@ def _fetch_yf_data_gs(ticker):
                         if n in bs.index:
                             v = bs.loc[n].dropna()
                             out["cash"] = float(v.iloc[0]) if len(v) else None
+                            break
+            except Exception:
+                pass
+
+            # ── EPS estimate revision momentum ────────────────────────────────────
+            try:
+                trend = tk.eps_trend
+                if trend is not None and not trend.empty and "0y" in trend.index:
+                    row_0y = trend.loc["0y"]
+                    cur = row_0y.get("current")
+                    prior = row_0y.get("30daysAgo") or row_0y.get("60daysAgo")
+                    if cur is not None and prior is not None and prior != 0:
+                        mag = (float(cur) - float(prior)) / abs(float(prior))
+                        out["revision_magnitude"] = round(mag, 4)
+                        if mag > 0.02:
+                            out["revision_direction"] = "UP"
+                        elif mag < -0.02:
+                            out["revision_direction"] = "DOWN"
+                        else:
+                            out["revision_direction"] = "FLAT"
+                    # analyst count from numberofAnalysts column if present
+                    for col_name in ["numberOfAnalysts", "number_of_analysts"]:
+                        if col_name in row_0y.index:
+                            n = row_0y[col_name]
+                            if n is not None:
+                                out["revision_num_analysts"] = int(n)
                             break
             except Exception:
                 pass
@@ -2105,7 +2136,7 @@ document.querySelectorAll('.tier').forEach((el, i) => {
 function toggleCol(n, checked) {
   document.querySelectorAll('.sr-table').forEach(tbl => {
     tbl.querySelectorAll('tr').forEach(row => {
-      const cell = row.children[n - 1];
+      const cell = row.children[n];
       if (cell) cell.style.display = checked ? '' : 'none';
     });
   });
@@ -2192,6 +2223,26 @@ def _closely_held_cell(r):
         f'<td class="mono" style="color:{col};" ' 
         f'title="Closely held: {pct:.1f}% of shares not in float">' 
         f'{pct:.1f}%</td>'
+    )
+def _short_float_cell(r):
+    """Render short float % cell, colour-coded by short interest level.
+    >35% = red (extreme, −3 pts penalty applied); >25% = yellow (−2 pts);
+    10–25% = muted (notable but not penalised); <10% = green (low)."""
+    sf = r.get("short_float")
+    if sf is None:
+        return '<td style="color:var(--mu);font-size:11px;">—</td>'
+    if sf > 35:
+        col  = "var(--rd)"; icon = " ⚠"; level = "extreme"
+    elif sf > 25:
+        col  = "var(--yw)"; icon = "";   level = "high"
+    elif sf > 10:
+        col  = "var(--mu)"; icon = "";   level = "moderate"
+    else:
+        col  = "var(--gr)"; icon = "";   level = "low"
+    tooltip = f"Short float: {sf:.1f}% ({level} short interest)"
+    return (
+        f'<td class="mono" style="color:{col};" title="{tooltip}">'
+        f'{sf:.1f}%{icon}</td>'
     )
 def _accumulation_cells(r):
     """Render accumulation signal cells."""
@@ -2488,6 +2539,11 @@ def build_html(results, ts, total, index_name="S&P 500",
                 if v is None: return ""
                 return "c-gr" if v >= 10 else "c-gr2" if v >= 0 else "c-rd"
 
+            # Revision arrow display
+            _rdir = r.get("revision_direction") or ""
+            _rarr = {"UP": "↑", "DOWN": "↓", "FLAT": "→"}.get(_rdir, "—")
+            _rcls = {"UP": "c-gr", "DOWN": "c-rd", "FLAT": "dim"}.get(_rdir, "dim")
+
             # EMA below flags for filtering
             ema13_v = "1" if r.get("below_ema13") else "0"
             ema50_v = "1" if r.get("below_ema50") else "0"
@@ -2512,6 +2568,7 @@ def build_html(results, ts, total, index_name="S&P 500",
                 f'<td class="t-bull">{fp(r["target_bull"])}</td>'
                 + _build_best3_cell(r) +
                 f'<td class="{up_cls}">{fpc(up)}</td>'
+                f'<td class="mono {_rcls}" title="{_rdir}">{_rarr}</td>'
                 f'<td class="mono {peg_cls}">{fx(peg)}</td>'
                 f'<td class="mono c-yw">{fp(r["peg_eps_used"])}</td>'
                 f'<td class="mono dim" style="font-size:10px;color:var(--mu)">{r.get("eps_source","—")}</td>'
@@ -2543,6 +2600,7 @@ def build_html(results, ts, total, index_name="S&P 500",
                 + _sentiment_cells(r.get('sentiment', {}))
                 + _accumulation_cells(r)
                 + _closely_held_cell(r)
+                + _short_float_cell(r)
                 + _analyst_target_cells(r)
                 + f'<td class="mono dim">{fb(r["market_cap"])}</td>'
                   f'<td>{flag_html}</td>'
@@ -2562,7 +2620,9 @@ def build_html(results, ts, total, index_name="S&P 500",
             f'<th>Score</th><th>Ticker</th><th>Sector</th><th>Price</th>'
             f'<th>Bear Target</th><th>Base Target</th><th>Bull Target</th>'
             f'<th title="{best3_tooltip}">{best3_label}</th>'
-            f'<th>Upside</th><th>Fwd PEG</th>'
+            f'<th>Upside</th>'
+            f'<th title="EPS estimate revision direction (30-day change)">EPS Rev</th>'
+            f'<th>Fwd PEG</th>'
             f'<th>Fwd EPS</th><th>EPS Src</th>'
             f'<th title="Forward-blended growth rate used in PEG calculation">Fwd EPS Growth</th>'
             f'<th title="Most recent quarter YoY">EPS Gth QoQ</th>'
@@ -2589,6 +2649,7 @@ def build_html(results, ts, total, index_name="S&P 500",
             f'<th title="Institutional accumulation proxy: MACD + Volume + ADX + CCI (hover for breakdown)">Accumulation</th>'
             f'<th title="Accumulation score 0-100">Accum. Score</th>'
             f'<th title="% of shares held by insiders/restricted holders (total - float) / total">Closely Held %</th>'
+            f'<th title="% of float shares currently sold short. &gt;25% = high (−2 pts Technical); &gt;35% = extreme (−3 pts Technical)">Short Float</th>'
             f'<th title="TradingView analyst consensus 1-year price target">Analyst Target</th>'
             f'<th title="% upside/downside to analyst consensus target">Analyst Upside</th>'
             f'<th>Mkt Cap</th><th>Flags</th>'
@@ -2722,62 +2783,65 @@ def build_html(results, ts, total, index_name="S&P 500",
       <label class="ct-cb"><input type="checkbox" checked data-col="5" onchange="toggleCol(5,this.checked)"> Bear Target</label>
       <label class="ct-cb"><input type="checkbox" checked data-col="6" onchange="toggleCol(6,this.checked)"> Base Target</label>
       <label class="ct-cb"><input type="checkbox" checked data-col="7" onchange="toggleCol(7,this.checked)"> Bull Target</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="8" onchange="toggleCol(8,this.checked)"> Upside %</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="8" onchange="toggleCol(8,this.checked)"> Backtest Top-3</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="9" onchange="toggleCol(9,this.checked)"> Upside %</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Valuation</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="9"  onchange="toggleCol(9,this.checked)"> Fwd PEG</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="10" onchange="toggleCol(10,this.checked)"> Fwd EPS</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="11" onchange="toggleCol(11,this.checked)"> EPS Src</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="29" onchange="toggleCol(29,this.checked)"> P/FCF</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="30" onchange="toggleCol(30,this.checked)"> EV/EBITDA</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="10" onchange="toggleCol(10,this.checked)"> EPS Rev</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="11" onchange="toggleCol(11,this.checked)"> Fwd PEG</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="12" onchange="toggleCol(12,this.checked)"> Fwd EPS</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="13" onchange="toggleCol(13,this.checked)"> EPS Src</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="31" onchange="toggleCol(31,this.checked)"> P/FCF</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="32" onchange="toggleCol(32,this.checked)"> EV/EBITDA</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Growth Rates</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="12" onchange="toggleCol(12,this.checked)"> Fwd EPS Growth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="13" onchange="toggleCol(13,this.checked)"> EPS Gth QoQ</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="14" onchange="toggleCol(14,this.checked)"> Rev Growth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="15" onchange="toggleCol(15,this.checked)"> Rev Gth QoQ</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="16" onchange="toggleCol(16,this.checked)"> Rev QoQ</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="17" onchange="toggleCol(17,this.checked)"> EPS QoQ</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="18" onchange="toggleCol(18,this.checked)"> GP Growth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="19" onchange="toggleCol(19,this.checked)"> NI Growth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="20" onchange="toggleCol(20,this.checked)"> FCF Growth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="21" onchange="toggleCol(21,this.checked)"> EBITDA Gth</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="22" onchange="toggleCol(22,this.checked)"> R&amp;D %</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="14" onchange="toggleCol(14,this.checked)"> Fwd EPS Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="15" onchange="toggleCol(15,this.checked)"> EPS Gth QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="16" onchange="toggleCol(16,this.checked)"> Rev Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="17" onchange="toggleCol(17,this.checked)"> Rev Gth QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="18" onchange="toggleCol(18,this.checked)"> Rev QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="19" onchange="toggleCol(19,this.checked)"> EPS QoQ</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="20" onchange="toggleCol(20,this.checked)"> GP Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="21" onchange="toggleCol(21,this.checked)"> NI Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="22" onchange="toggleCol(22,this.checked)"> FCF Growth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="23" onchange="toggleCol(23,this.checked)"> EBITDA Gth</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="24" onchange="toggleCol(24,this.checked)"> R&amp;D %</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Quality Metrics</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="23" onchange="toggleCol(23,this.checked)"> Gross Margin</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="24" onchange="toggleCol(24,this.checked)"> Op Margin</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="25" onchange="toggleCol(25,this.checked)"> ROE</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="26" onchange="toggleCol(26,this.checked)"> ROIC</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="27" onchange="toggleCol(27,this.checked)"> ROA</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="28" onchange="toggleCol(28,this.checked)"> Curr Ratio</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="25" onchange="toggleCol(25,this.checked)"> Gross Margin</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="26" onchange="toggleCol(26,this.checked)"> Op Margin</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="27" onchange="toggleCol(27,this.checked)"> ROE</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="28" onchange="toggleCol(28,this.checked)"> ROIC</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="29" onchange="toggleCol(29,this.checked)"> ROA</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="30" onchange="toggleCol(30,this.checked)"> Curr Ratio</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Technical</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="31" onchange="toggleCol(31,this.checked)"> Earnings In</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="32" onchange="toggleCol(32,this.checked)"> Perf 1M</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="33" onchange="toggleCol(33,this.checked)"> Perf 3M</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="34" onchange="toggleCol(34,this.checked)"> Perf 6M</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="35" onchange="toggleCol(35,this.checked)"> Momentum</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="36" onchange="toggleCol(36,this.checked)"> TV Signal</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="33" onchange="toggleCol(33,this.checked)"> Earnings In</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="34" onchange="toggleCol(34,this.checked)"> Perf 1M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="35" onchange="toggleCol(35,this.checked)"> Perf 3M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="36" onchange="toggleCol(36,this.checked)"> Perf 6M</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="37" onchange="toggleCol(37,this.checked)"> Momentum</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="38" onchange="toggleCol(38,this.checked)"> TV Signal</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Signal</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="37" onchange="toggleCol(37,this.checked)"> Sentiment</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="38" onchange="toggleCol(38,this.checked)"> Sent. Score</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="39" onchange="toggleCol(39,this.checked)"> Accumulation</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="40" onchange="toggleCol(40,this.checked)"> Accum. Score</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="39" onchange="toggleCol(39,this.checked)"> Sentiment</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="40" onchange="toggleCol(40,this.checked)"> Sent. Score</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="41" onchange="toggleCol(41,this.checked)"> Accumulation</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="42" onchange="toggleCol(42,this.checked)"> Accum. Score</label>
     </div>
     <div class="ct-group">
       <div class="ct-group-title">Other</div>
-      <label class="ct-cb"><input type="checkbox" checked data-col="41" onchange="toggleCol(41,this.checked)"> Closely Held %</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="42" onchange="toggleCol(42,this.checked)"> Analyst Target</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="43" onchange="toggleCol(43,this.checked)"> Analyst Upside</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="44" onchange="toggleCol(44,this.checked)"> Mkt Cap</label>
-      <label class="ct-cb"><input type="checkbox" checked data-col="45" onchange="toggleCol(45,this.checked)"> Flags</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="43" onchange="toggleCol(43,this.checked)"> Closely Held %</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="44" onchange="toggleCol(44,this.checked)"> Short Float</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="45" onchange="toggleCol(45,this.checked)"> Analyst Target</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="46" onchange="toggleCol(46,this.checked)"> Analyst Upside</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="47" onchange="toggleCol(47,this.checked)"> Mkt Cap</label>
+      <label class="ct-cb"><input type="checkbox" checked data-col="48" onchange="toggleCol(48,this.checked)"> Flags</label>
     </div>
   </div>
 </div>
@@ -2795,6 +2859,7 @@ def build_html(results, ts, total, index_name="S&P 500",
   <b>Flags:</b> UNPROFITABLE &middot; NEG FCF &middot; NEG MARGIN &middot; HIGH DEBT &middot; REV DECLINE<br>
   <b>Sentiment:</b> TV rating + RSI + 1M/3M momentum + 52wk position + EPS acceleration<br>
   <b>Closely Held %:</b> (Total shares &minus; Float) &divide; Total shares &mdash; captures insider/restricted/strategic ownership not freely tradeable<br>
+  <b>Short Float:</b> % of float shares sold short. &gt;25% = high (−2 pts Technical penalty); &gt;35% = extreme (−3 pts). Green &lt;10%, yellow 25–35%, red &gt;35%.<br>
   <b>Accumulation:</b> Institutional buying proxy &mdash; MACD histogram + Momentum + Relative volume trend + ADX/DI + MoneyFlow &mdash; hover any cell for signal breakdown<br>
   &#9888; Educational use only &mdash; not investment advice. Forward EPS estimates may be inaccurate. Always verify against SEC filings.
 </footer>
@@ -2906,6 +2971,7 @@ def build_html(results, ts, total, index_name="S&P 500",
       <div class="gloss-item"><span class="gloss-term">Accumulation</span><span class="gloss-def">Proxy for institutional buying pressure. Combines MACD crossovers, momentum, volume trends (relative + 30d vs 90d), ADX directional indicators, and MoneyFlow. Hover for full breakdown.</span></div>
       <div class="gloss-item"><span class="gloss-term">Accum. Score</span><span class="gloss-def">Accumulation score (0&ndash;100). &ge;75 = Strong Accumulation, &ge;60 = Accumulation, &le;30 = Strong Distribution.</span></div>
       <div class="gloss-item"><span class="gloss-term">Closely Held %</span><span class="gloss-def">(Total shares &minus; float shares) &divide; total shares. Captures insider, restricted, and strategic ownership not freely tradeable. High % = insider conviction.</span></div>
+      <div class="gloss-item"><span class="gloss-term">Short Float</span><span class="gloss-def">% of freely-tradeable float shares currently sold short. &gt;25% = high short interest (&minus;2 pts Technical penalty); &gt;35% = extreme (&minus;3 pts). Green = low (&lt;10%); yellow = notable (25&ndash;35%); red = extreme (&gt;35%). High shorts are often wrong on disruptive names but signal a contested thesis.</span></div>
       <div class="gloss-item"><span class="gloss-term">Analyst Target</span><span class="gloss-def">Wall Street analyst consensus 12-month price target (from TradingView).</span></div>
       <div class="gloss-item"><span class="gloss-term">Analyst Upside</span><span class="gloss-def">Percentage difference between analyst consensus target and current price.</span></div>
       <div class="gloss-item"><span class="gloss-term">Mkt Cap</span><span class="gloss-def">Market capitalisation. Current share price &times; total shares outstanding. Displayed in billions (B) or trillions (T).</span></div>
@@ -3053,12 +3119,63 @@ def main():
                 except Exception: bars_map[tk] = {"fcf": None, "ebitda": None, "fwd_rev": None,
                                          "revenue": None, "total_debt": None,
                                          "cash": None, "gross_margin": None,
-                                         "fwd_eps": None}
+                                         "fwd_eps": None,
+                                         "revision_direction": None,
+                                         "revision_magnitude": None,
+                                         "revision_num_analysts": None,
+                                         "short_float": None}
         _save_yf_cache()   # persist any newly-fetched entries for next run
         n_fetched = sum(1 for v in bars_map.values()
                         if any(v.get(k) is not None
                                for k in ("fcf", "revenue", "gross_margin")))
         print(f"  Fundamentals: {n_fetched}/{len(results)} stocks fetched")
+
+        # ── Apply estimate revision bonus to growth scores ────────────────────
+        try:
+            from valuation_models import calc_revision_score as _crs
+            _rev_applied = 0
+            for res in results:
+                yf_d = bars_map.get(res["ticker"], {})
+                rev_dir = yf_d.get("revision_direction")
+                rev_mag = yf_d.get("revision_magnitude")
+                rev_n   = yf_d.get("revision_num_analysts")
+                if rev_dir:
+                    _bonus = _crs({
+                        "revision_direction": rev_dir,
+                        "revision_magnitude": rev_mag,
+                        "revision_num_analysts": rev_n,
+                    })
+                    _scaled = _bonus * 0.35   # max ±3.5 pts on a 35pt pillar
+                    res["score_growth"] = round(min(35.0, max(0.0, res["score_growth"] + _scaled)), 1)
+                    res["growth_score"] = round(
+                        min(100.0, max(0.0, res["growth_score"] + _scaled)), 1)
+                    res["revision_direction"] = rev_dir
+                    res["revision_magnitude"] = rev_mag
+                    res["revision_num_analysts"] = rev_n
+                    _rev_applied += 1
+            if _rev_applied:
+                results.sort(key=lambda x: -x["growth_score"])
+                print(f"  Revision bonus applied to {_rev_applied} stocks; re-sorted.")
+        except Exception:
+            pass
+
+        # ── Apply short interest penalty + store for display ──────────────────
+        # >25% short float: −2 pts Technical; >35%: −3 pts Technical.
+        # Extreme short interest (hedge fund conviction, squeeze risk, thin float)
+        # is a legitimate market-structure headwind — not a valuation signal.
+        _si_applied = 0
+        for res in results:
+            yf_d = bars_map.get(res["ticker"], {})
+            sf   = yf_d.get("short_float")
+            res["short_float"] = sf
+            if sf is not None and sf > 25:
+                penalty = -3.0 if sf > 35 else -2.0
+                res["score_tech"]    = round(max(-5.0, res.get("score_tech", 0) + penalty), 1)
+                res["growth_score"]  = round(max(0.0,  res["growth_score"] + penalty), 1)
+                _si_applied += 1
+        if _si_applied:
+            results.sort(key=lambda x: -x["growth_score"])
+            print(f"  Short interest penalty applied to {_si_applied} stocks; re-sorted.")
     else:
         bars_map = {}
 
@@ -3205,6 +3322,50 @@ def main():
     if write_csv_flag:
         write_csv(results, out_csv)
         print(f"  CSV saved:  {out_csv}")
+
+    # ── Screener snapshot + strategy performance card ──────────────────────────
+    try:
+        import sys as _sys
+        _wl_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "8_watchlist")
+        if _wl_dir not in _sys.path:
+            _sys.path.insert(0, _wl_dir)
+        from watchlistTracker import save_screener_snapshot, calc_strategy_performance
+        save_screener_snapshot(results, "growth", index_slug)
+        _perf = calc_strategy_performance("growth", index_slug)
+        if _perf:
+            _sret  = _perf["strategy_return"]
+            _bret  = _perf.get("benchmark_return")
+            _alpha = _perf.get("alpha")
+            _hit   = _perf["hit_rate"]
+            _sdate = _perf["snapshot_date"]
+            _days  = _perf["days_elapsed"]
+            _sc = "color:#00c896" if _sret >= 0 else "color:#e05c5c"
+            _bc = "color:#00c896" if (_bret or 0) >= 0 else "color:#e05c5c"
+            _ac = "color:#00c896" if (_alpha or 0) >= 0 else "color:#e05c5c"
+            _bret_html = (f'<span style="{_bc}">{"+" if _bret>=0 else ""}{_bret:.1f}%</span>'
+                          if _bret is not None else "—")
+            _alpha_html = (f'<span style="{_ac}">{"+" if _alpha>=0 else ""}{_alpha:.1f}pp</span>'
+                           if _alpha is not None else "—")
+            _strategy_card = (
+                f'<div style="background:#1e2538;border:1px solid #252a3a;border-left:'
+                f'4px solid #4f8ef7;border-radius:8px;padding:14px 20px;margin:12px 16px 0;'
+                f'font-family:\'Inter\',sans-serif;font-size:13px;">'
+                f'<b style="color:#e8eaf0">Strategy Performance</b>'
+                f'<span style="color:#6b7194;margin-left:10px;font-size:11px">'
+                f'Top-{_perf["n_stocks"]} eq-weight vs SPY · snapshot {_sdate} ({_days}d ago)</span>'
+                f'<div style="display:flex;gap:32px;margin-top:8px;">'
+                f'<span>Strategy <b style="{_sc}">{"+" if _sret>=0 else ""}{_sret:.1f}%</b></span>'
+                f'<span>SPY {_bret_html}</span>'
+                f'<span>Alpha {_alpha_html}</span>'
+                f'<span>Hit rate <b style="color:#e8eaf0">{_hit:.0f}%</b></span>'
+                f'</div></div>'
+            )
+            html = html.replace("<body>", "<body>" + _strategy_card, 1)
+            with open(out, "w", encoding="utf-8") as _f:
+                _f.write(html)
+    except Exception as _e:
+        print(f"  [strategy] Warning: {_e}")
 
     if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
         webbrowser.open("file://" + os.path.abspath(out))

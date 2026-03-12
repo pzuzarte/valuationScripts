@@ -60,6 +60,18 @@ CREATE TABLE IF NOT EXISTS portfolio_signals (
     fair_value     REAL,
     upside_pct     REAL
 );
+CREATE TABLE IF NOT EXISTS screener_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_date    TEXT NOT NULL,
+    tool        TEXT NOT NULL,
+    index_label TEXT NOT NULL,
+    ticker      TEXT NOT NULL,
+    rank        INTEGER,
+    score       REAL,
+    price       REAL,
+    fair_value  REAL,
+    upside_pct  REAL
+);
 """
 
 
@@ -539,6 +551,165 @@ code {{ background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-
 </html>"""
 
 
+# ── Strategy backtest helpers ──────────────────────────────────────────────────
+
+def save_screener_snapshot(results: list, tool: str, index_label: str,
+                           top_n: int = 50) -> None:
+    """
+    Persist the top-N screener results to screener_snapshots.
+    Idempotent: skips if a snapshot for today + tool + index_label already exists.
+    """
+    try:
+        today = datetime.date.today().isoformat()
+        c = _conn()
+        exists = c.execute(
+            "SELECT 1 FROM screener_snapshots WHERE run_date=? AND tool=? AND index_label=? LIMIT 1",
+            (today, tool, index_label),
+        ).fetchone()
+        if exists:
+            c.close()
+            return
+        ranked = sorted(results, key=lambda r: -(r.get("growth_score")
+                                                 or r.get("rank_score")
+                                                 or r.get("composite") or 0))[:top_n]
+        rows = []
+        for i, r in enumerate(ranked, 1):
+            rows.append((
+                today, tool, index_label,
+                r.get("ticker", ""),
+                i,
+                r.get("growth_score") or r.get("rank_score") or r.get("composite"),
+                r.get("price"),
+                r.get("best3_mean") or r.get("composite"),
+                r.get("best3_upside") or r.get("discount"),
+            ))
+        c.executemany(
+            """INSERT INTO screener_snapshots
+               (run_date, tool, index_label, ticker, rank, score, price, fair_value, upside_pct)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            rows,
+        )
+        c.commit()
+        c.close()
+        print(f"  [snapshot] Saved {len(rows)} rows → screener_snapshots ({tool}/{index_label})")
+    except Exception as e:
+        print(f"  [snapshot] Warning: could not save snapshot — {e}")
+
+
+def calc_strategy_performance(tool: str, index_label: str,
+                              lookback_days: int = 90, top_n: int = 20) -> dict:
+    """
+    Load the oldest screener snapshot ≥30 days ago for this tool+index_label.
+    Fetch current prices, compute equal-weight top-N return vs SPY.
+    Returns dict with strategy_return, benchmark_return, alpha, hit_rate,
+    snapshot_date, days_elapsed — or {} if no qualifying snapshot found.
+    """
+    try:
+        cutoff = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+        c = _conn()
+        rows = c.execute(
+            """SELECT DISTINCT run_date FROM screener_snapshots
+               WHERE tool=? AND index_label=? AND run_date <= ?
+               ORDER BY run_date ASC LIMIT 1""",
+            (tool, index_label, cutoff),
+        ).fetchall()
+        if not rows:
+            c.close()
+            return {}
+        snap_date = rows[0][0]
+        tickers_rows = c.execute(
+            """SELECT ticker, price FROM screener_snapshots
+               WHERE tool=? AND index_label=? AND run_date=?
+               ORDER BY rank ASC LIMIT ?""",
+            (tool, index_label, snap_date, top_n),
+        ).fetchall()
+        c.close()
+        if not tickers_rows:
+            return {}
+
+        snap_prices = {t: p for t, p in tickers_rows if p}
+        all_tickers = [t for t, p in tickers_rows if p]
+        if not all_tickers:
+            return {}
+
+        if not _YF:
+            return {}
+
+        # Fetch current prices
+        cur_prices = {}
+        for tk in all_tickers:
+            try:
+                fi = yf.Ticker(tk).fast_info
+                px = getattr(fi, "last_price", None) or getattr(fi, "regularMarketPrice", None)
+                if px:
+                    cur_prices[tk] = float(px)
+            except Exception:
+                pass
+
+        # Equal-weight return
+        returns = []
+        hits = 0
+        for tk in all_tickers:
+            if tk in cur_prices and tk in snap_prices:
+                ret = (cur_prices[tk] - snap_prices[tk]) / snap_prices[tk]
+                returns.append(ret)
+                if ret > 0:
+                    hits += 1
+        if not returns:
+            return {}
+        strategy_return = sum(returns) / len(returns) * 100
+
+        # SPY return over same window
+        spy_return = None
+        try:
+            snap_dt = datetime.date.fromisoformat(snap_date)
+            spy_hist = yf.Ticker("SPY").history(start=snap_date,
+                                                end=datetime.date.today().isoformat())
+            if not spy_hist.empty:
+                spy_start = float(spy_hist["Close"].iloc[0])
+                spy_end   = float(spy_hist["Close"].iloc[-1])
+                spy_return = (spy_end - spy_start) / spy_start * 100
+        except Exception:
+            pass
+
+        days_elapsed = (datetime.date.today() - datetime.date.fromisoformat(snap_date)).days
+        alpha = (strategy_return - spy_return) if spy_return is not None else None
+
+        return {
+            "strategy_return": round(strategy_return, 2),
+            "benchmark_return": round(spy_return, 2) if spy_return is not None else None,
+            "alpha": round(alpha, 2) if alpha is not None else None,
+            "hit_rate": round(hits / len(returns) * 100, 1),
+            "n_stocks": len(returns),
+            "snapshot_date": snap_date,
+            "days_elapsed": days_elapsed,
+        }
+    except Exception as e:
+        print(f"  [strategy] Warning: {e}")
+        return {}
+
+
+def cmd_strategy_backtest(tool: str, index_label: str, lookback_days: int = 90):
+    """Print strategy performance to terminal."""
+    perf = calc_strategy_performance(tool, index_label, lookback_days)
+    if not perf:
+        print(f"  No qualifying snapshot found for {tool}/{index_label} "
+              f"(need ≥30-day-old snapshot).")
+        return
+    sp = perf.get("snapshot_date")
+    print(f"\n  Strategy Performance — {tool.upper()} / {index_label.upper()}")
+    print(f"  Snapshot: {sp}  ({perf['days_elapsed']} days ago)")
+    print(f"  Equal-weight top-{perf['n_stocks']} return:  "
+          f"{'+'  if perf['strategy_return'] >= 0 else ''}{perf['strategy_return']:.2f}%")
+    if perf.get("benchmark_return") is not None:
+        print(f"  SPY return (same window):              "
+              f"{'+'  if perf['benchmark_return'] >= 0 else ''}{perf['benchmark_return']:.2f}%")
+    if perf.get("alpha") is not None:
+        sign = "+" if perf["alpha"] >= 0 else ""
+        print(f"  Alpha:                                 {sign}{perf['alpha']:.2f}pp")
+    print(f"  Hit rate (% stocks positive):          {perf['hit_rate']:.1f}%")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
@@ -554,6 +725,8 @@ def main():
                         help="Target price (used with --add)")
     parser.add_argument("--notes",   metavar="TEXT",
                         help="Notes (used with --add)")
+    parser.add_argument("--strategy-backtest", nargs=2, metavar=("TOOL", "INDEX"),
+                        help="Print strategy performance, e.g. --strategy-backtest growth spx")
 
     args = parser.parse_args()
 
@@ -573,6 +746,9 @@ def main():
 
     elif args.list:
         cmd_list()
+
+    elif args.strategy_backtest:
+        cmd_strategy_backtest(args.strategy_backtest[0], args.strategy_backtest[1])
 
     else:
         # No subcommand → generate HTML report

@@ -46,6 +46,13 @@ except ImportError:
     ARCH_OK = False
     print("[warn] arch not found — GARCH disabled.  pip install arch")
 
+try:
+    from xgboost import XGBRegressor
+    XGB_OK = True
+except ImportError:
+    XGB_OK = False
+    print("[warn] xgboost not found — XGBoost disabled.  pip install xgboost")
+
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import acf as _acf
@@ -73,6 +80,193 @@ ACCENT_GRN  = "#00c896"
 ACCENT_RED  = "#e05c5c"
 ACCENT_AMB  = "#f0a500"
 ACCENT_PRP  = "#a78bfa"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# XGBoost Forecast
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(window).mean()
+    loss  = (-delta.clip(upper=0)).rolling(window).mean()
+    rs    = gain / loss.replace(0, float("nan"))
+    return 100 - (100 / (1 + rs))
+
+
+def build_features(prices: pd.Series) -> pd.DataFrame:
+    """
+    Build feature matrix from price series.
+    Features: log returns at 1/3/5/10/20/60d lags, RSI(14),
+              SMA20/SMA50 ratio, vol z-score (20d), realized vol (20d).
+    """
+    lr = np.log(prices / prices.shift(1))
+    features = {}
+    for lag in (1, 3, 5, 10, 20, 60):
+        features[f"ret_{lag}d"] = lr.shift(1).rolling(lag).sum()
+    features["rsi14"]     = _rsi(prices)
+    features["sma_ratio"] = prices.rolling(20).mean() / prices.rolling(50).mean()
+    _rvol = lr.rolling(20).std() * (252 ** 0.5)
+    _rvol_mean = _rvol.rolling(252).mean()
+    _rvol_std  = _rvol.rolling(252).std().replace(0, float("nan"))
+    features["rvol_z"]    = (_rvol - _rvol_mean) / _rvol_std
+    features["rvol_20d"]  = _rvol
+    df = pd.DataFrame(features, index=prices.index)
+    return df
+
+
+def fit_xgb_forecast(prices: pd.Series, horizon: int,
+                     backtest_window: int = 252) -> dict:
+    """
+    Walk-forward XGBoost forecast of horizon-day cumulative log return.
+    Uses expanding window, refits every 60 days.
+    Returns: forecast_prices (len=horizon), ci_80_lo, ci_80_hi,
+             ci_95_lo, ci_95_hi, backtest_mape (float or None).
+    """
+    if not XGB_OK:
+        return {}
+
+    feats = build_features(prices)
+    lr    = np.log(prices / prices.shift(1))
+
+    # Target: horizon-day forward cumulative log return
+    target = lr.rolling(horizon).sum().shift(-horizon)
+
+    df = feats.copy()
+    df["target"] = target
+    df = df.dropna()
+
+    if len(df) < backtest_window + horizon + 60:
+        # Not enough data — just fit on all available history
+        X_train = df.drop(columns=["target"]).values
+        y_train = df["target"].values
+        model = XGBRegressor(n_estimators=300, learning_rate=0.05,
+                             max_depth=4, subsample=0.8, random_state=42,
+                             verbosity=0)
+        model.fit(X_train, y_train)
+        # Point forecast from last row
+        last_feats = feats.iloc[[-1]].dropna(axis=1)
+        X_last = last_feats.reindex(columns=feats.dropna().columns, fill_value=0).values
+        pred_lr = float(model.predict(X_last)[0])
+        # CI: use residual std as proxy for uncertainty
+        resid_std = float(np.std(y_train - model.predict(X_train)))
+        z80, z95 = 1.282, 1.960
+        last_price = float(prices.iloc[-1])
+        future_dates = pd.bdate_range(prices.index[-1] + pd.Timedelta(days=1), periods=horizon)
+        # Linear interpolation of price path from last_price to forecast endpoint
+        pred_end  = last_price * np.exp(pred_lr)
+        lo80_end  = last_price * np.exp(pred_lr - z80 * resid_std)
+        hi80_end  = last_price * np.exp(pred_lr + z80 * resid_std)
+        lo95_end  = last_price * np.exp(pred_lr - z95 * resid_std)
+        hi95_end  = last_price * np.exp(pred_lr + z95 * resid_std)
+        t = np.linspace(0, 1, horizon)
+        forecast_prices = last_price + t * (pred_end - last_price)
+        ci_80_lo        = last_price + t * (lo80_end - last_price)
+        ci_80_hi        = last_price + t * (hi80_end - last_price)
+        ci_95_lo        = last_price + t * (lo95_end - last_price)
+        ci_95_hi        = last_price + t * (hi95_end - last_price)
+        return {
+            "forecast": forecast_prices.tolist(),
+            "ci_80_lo": ci_80_lo.tolist(), "ci_80_hi": ci_80_hi.tolist(),
+            "ci_95_lo": ci_95_lo.tolist(), "ci_95_hi": ci_95_hi.tolist(),
+            "backtest_mape": None,
+            "future_dates": [str(d.date()) for d in future_dates],
+        }
+
+    # Walk-forward backtest + final forecast
+    bt_start  = len(df) - backtest_window
+    actuals, preds = [], []
+    model = None
+    for i in range(bt_start, len(df)):
+        if (i - bt_start) % 60 == 0:
+            # Refit on all data up to current point
+            X_tr = df.iloc[:i].drop(columns=["target"]).values
+            y_tr = df.iloc[:i]["target"].values
+            model = XGBRegressor(n_estimators=300, learning_rate=0.05,
+                                 max_depth=4, subsample=0.8, random_state=42,
+                                 verbosity=0)
+            model.fit(X_tr, y_tr)
+        X_i = df.iloc[[i]].drop(columns=["target"]).values
+        preds.append(float(model.predict(X_i)[0]))
+        actuals.append(float(df.iloc[i]["target"]))
+
+    # Backtest MAPE on log-returns
+    valid = [(a, p) for a, p in zip(actuals, preds) if abs(a) > 1e-6]
+    bt_mape = float(np.mean([abs(a - p) / abs(a) * 100 for a, p in valid])) if valid else None
+
+    # Residual std for CI
+    resid_std = float(np.std([a - p for a, p in zip(actuals, preds)]))
+
+    # Final forecast using all data
+    X_all  = df.drop(columns=["target"]).values
+    y_all  = df["target"].values
+    model_final = XGBRegressor(n_estimators=300, learning_rate=0.05,
+                               max_depth=4, subsample=0.8, random_state=42,
+                               verbosity=0)
+    model_final.fit(X_all, y_all)
+    last_row = feats.iloc[[-1]].reindex(columns=df.drop(columns=["target"]).columns, fill_value=0)
+    pred_lr  = float(model_final.predict(last_row.values)[0])
+
+    z80, z95  = 1.282, 1.960
+    last_price = float(prices.iloc[-1])
+    future_dates = pd.bdate_range(prices.index[-1] + pd.Timedelta(days=1), periods=horizon)
+    pred_end = last_price * np.exp(pred_lr)
+    lo80_end = last_price * np.exp(pred_lr - z80 * resid_std)
+    hi80_end = last_price * np.exp(pred_lr + z80 * resid_std)
+    lo95_end = last_price * np.exp(pred_lr - z95 * resid_std)
+    hi95_end = last_price * np.exp(pred_lr + z95 * resid_std)
+    t = np.linspace(0, 1, horizon)
+    forecast_prices = last_price + t * (pred_end - last_price)
+    ci_80_lo        = last_price + t * (lo80_end - last_price)
+    ci_80_hi        = last_price + t * (hi80_end - last_price)
+    ci_95_lo        = last_price + t * (lo95_end - last_price)
+    ci_95_hi        = last_price + t * (hi95_end - last_price)
+    return {
+        "forecast": forecast_prices.tolist(),
+        "ci_80_lo": ci_80_lo.tolist(), "ci_80_hi": ci_80_hi.tolist(),
+        "ci_95_lo": ci_95_lo.tolist(), "ci_95_hi": ci_95_hi.tolist(),
+        "backtest_mape": bt_mape,
+        "future_dates": [str(d.date()) for d in future_dates],
+    }
+
+
+def ensemble_forecast(fc_arima: dict, fc_ets: dict, fc_xgb: dict) -> dict:
+    """
+    Inverse-MAPE weighted blend of available model forecasts.
+    Returns: forecast (list), ci_80_lo, ci_80_hi, ci_95_lo, ci_95_hi.
+    """
+    components = []
+    for name, fc in [("arima", fc_arima), ("ets", fc_ets), ("xgb", fc_xgb)]:
+        if fc and fc.get("forecast"):
+            mape = fc.get("backtest_mape") or 10.0   # 10% default if no backtest
+            w    = 1.0 / max(mape, 0.1)
+            components.append((name, fc, w))
+
+    if not components:
+        return {}
+
+    total_w = sum(c[2] for c in components)
+    n = min(len(c["forecast"]) for _, c, _ in components)
+
+    def _blend(key):
+        try:
+            return [
+                sum(c[key][i] * w for _, c, w in components if c.get(key) and i < len(c[key])) / total_w
+                for i in range(n)
+            ]
+        except Exception:
+            return None
+
+    return {
+        "forecast": _blend("forecast"),
+        "ci_80_lo": _blend("ci_80_lo"),
+        "ci_80_hi": _blend("ci_80_hi"),
+        "ci_95_lo": _blend("ci_95_lo"),
+        "ci_95_hi": _blend("ci_95_hi"),
+        "weights":  {name: round(w / total_w, 3) for name, _, w in components},
+        "backtest_mape": None,
+        "future_dates": components[0][1].get("future_dates"),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -409,6 +603,8 @@ def build_html(
     do_ets: bool,
     garch_fit=None,
     garch_var=None,        # shape (horizon,), log-return² units
+    xgb_result: dict = None,
+    do_ensemble: bool = False,
 ) -> str:
 
     today       = datetime.date.today()
@@ -460,6 +656,41 @@ def build_html(
         ets_fc_lo80 = lo80.tolist();  ets_fc_hi80 = hi80.tolist()
         ets_fc_lo95 = lo95.tolist();  ets_fc_hi95 = hi95.tolist()
 
+    # XGBoost forecast
+    xgb_fc_px = xgb_fc_lo80 = xgb_fc_hi80 = xgb_fc_lo95 = xgb_fc_hi95 = []
+    xgb_bt_mape = None
+    if xgb_result and xgb_result.get("forecast"):
+        xgb_fc_px   = xgb_result["forecast"]
+        xgb_fc_lo80 = xgb_result.get("ci_80_lo", [])
+        xgb_fc_hi80 = xgb_result.get("ci_80_hi", [])
+        xgb_fc_lo95 = xgb_result.get("ci_95_lo", [])
+        xgb_fc_hi95 = xgb_result.get("ci_95_hi", [])
+        xgb_bt_mape = xgb_result.get("backtest_mape")
+
+    # Ensemble forecast (inverse-MAPE weighted blend)
+    ens_fc_px = ens_fc_lo80 = ens_fc_hi80 = ens_fc_lo95 = ens_fc_hi95 = []
+    ens_weights = {}
+    if do_ensemble:
+        _arima_mape = (bt or {}).get("arima_metrics", {}).get("mape")
+        _ets_mape   = (bt or {}).get("ets_metrics",   {}).get("mape")
+        _ens = ensemble_forecast(
+            fc_arima={"forecast": arima_fc_px, "ci_80_lo": arima_fc_lo80,
+                      "ci_80_hi": arima_fc_hi80, "ci_95_lo": arima_fc_lo95,
+                      "ci_95_hi": arima_fc_hi95, "backtest_mape": _arima_mape}
+                     if arima_fc_px else {},
+            fc_ets=  {"forecast": ets_fc_px,   "ci_80_lo": ets_fc_lo80,
+                      "ci_80_hi": ets_fc_hi80,   "ci_95_lo": ets_fc_lo95,
+                      "ci_95_hi": ets_fc_hi95,   "backtest_mape": _ets_mape}
+                     if ets_fc_px else {},
+            fc_xgb=  xgb_result or {},
+        )
+        ens_fc_px   = _ens.get("forecast") or []
+        ens_fc_lo80 = _ens.get("ci_80_lo") or []
+        ens_fc_hi80 = _ens.get("ci_80_hi") or []
+        ens_fc_lo95 = _ens.get("ci_95_lo") or []
+        ens_fc_hi95 = _ens.get("ci_95_hi") or []
+        ens_weights = _ens.get("weights", {})
+
     # Naive forecast (flat)
     naive_fc_px = [last_price] * horizon
 
@@ -500,6 +731,8 @@ def build_html(
 
     arima_end, arima_chg = _summary(arima_fc_px)
     ets_end,   ets_chg   = _summary(ets_fc_px)
+    xgb_end,   xgb_chg   = _summary(xgb_fc_px)
+    ens_end,   ens_chg   = _summary(ens_fc_px)
 
     # ── ARIMA model text ───────────────────────────────────────────────────────
     arima_summary_html = ""
@@ -564,8 +797,13 @@ def build_html(
         return (f'<td>{v:.1f}%</td>'
                 f'<td style="color:{clr}">{sign}{delta:.1f}pp vs naive</td>')
 
+    # XGB backtest metrics (MAPE only; RMSE/MAE/dir not computed in walk-forward)
+    xgb_m = {}
+    if xgb_bt_mape is not None:
+        xgb_m = {"mape": xgb_bt_mape}
+
     metrics_html = ""
-    if bt:
+    if bt or xgb_m:
         rows = ""
         for label, m in [("ARIMA", arima_m), ("ETS", ets_m)]:
             if not m:
@@ -578,7 +816,35 @@ def build_html(
               {_metric_td(m, 'mape', naive_m)}
               {_dir_td(m, naive_m)}
             </tr>"""
-        rows += f"""
+        if xgb_m:
+            _xgb_mape_v = xgb_m.get("mape")
+            _xgb_naive  = naive_m.get("mape")
+            _xmape_str  = f"{_xgb_mape_v:.2f}%" if _xgb_mape_v is not None else "—"
+            if _xgb_mape_v is not None and _xgb_naive is not None:
+                _xclr = ACCENT_GRN if _xgb_mape_v < _xgb_naive else ACCENT_RED
+                _xdlt = _xgb_mape_v - _xgb_naive
+                _xdlt_str = f'<span style="color:{_xclr}">{"+" if _xdlt>=0 else ""}{_xdlt:.2f} vs naive</span>'
+            else:
+                _xdlt_str = "—"
+            rows += f"""
+            <tr>
+              <td><b>XGBoost</b></td>
+              <td>—</td><td>walk-forward log-return MAPE only</td>
+              <td>—</td><td></td>
+              <td>{_xmape_str}</td><td>{_xdlt_str}</td>
+              <td>—</td><td></td>
+            </tr>"""
+        if ens_weights:
+            _w_str = " / ".join(f"{k.upper()}:{v:.0%}" for k, v in ens_weights.items())
+            rows += f"""
+            <tr>
+              <td><b>Ensemble</b></td>
+              <td colspan="8" style="color:{TEXT_SUB}">
+                Inverse-MAPE blend — weights: {_w_str}
+              </td>
+            </tr>"""
+        if bt:
+            rows += f"""
             <tr style="color:{TEXT_SUB}">
               <td>Naive (flat)</td>
               <td>{naive_m.get('rmse', 0):.4f}</td><td>baseline</td>
@@ -639,6 +905,21 @@ def build_html(
             f"{currency} {ets_end:,.2f}",
             _fmt_pct(ets_chg),
             _color_delta(ets_chg),
+        )
+    if xgb_end is not None:
+        stat_cards += _stat_card(
+            f"XGBoost t+{horizon}",
+            f"{currency} {xgb_end:,.2f}",
+            _fmt_pct(xgb_chg),
+            _color_delta(xgb_chg),
+        )
+    if ens_end is not None:
+        _w_str = " | ".join(f"{k.upper()}:{v:.0%}" for k, v in ens_weights.items())
+        stat_cards += _stat_card(
+            f"Ensemble t+{horizon}",
+            f"{currency} {ens_end:,.2f}",
+            _fmt_pct(ens_chg),
+            _color_delta(ens_chg),
         )
     stat_cards += _stat_card(
         f"Naive t+{horizon}",
@@ -748,6 +1029,79 @@ def build_html(
             "type": "scatter", "mode": "lines",
             "name": "ETS (damped)", "x": fx, "y": fy_mid,
             "line": {"color": ACCENT_AMB, "width": 2, "dash": "dot"},
+            "showlegend": True,
+        })
+
+    if xgb_fc_px:
+        fx = conn_date + future_strs
+        fy_mid = conn_val + xgb_fc_px
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "XGB 95% CI", "x": fx, "y": [conn_val[0]] + xgb_fc_hi95,
+            "line": {"width": 0, "color": ACCENT_PRP},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "XGB 95% CI", "x": fx, "y": [conn_val[0]] + xgb_fc_lo95,
+            "fill": "tonexty", "fillcolor": ACCENT_PRP + "22",
+            "line": {"width": 0, "color": ACCENT_PRP},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "XGB 80% CI", "x": fx, "y": [conn_val[0]] + xgb_fc_hi80,
+            "line": {"width": 0, "color": ACCENT_PRP},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "XGB 80% CI", "x": fx, "y": [conn_val[0]] + xgb_fc_lo80,
+            "fill": "tonexty", "fillcolor": ACCENT_PRP + "44",
+            "line": {"width": 0, "color": ACCENT_PRP},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "XGBoost", "x": fx, "y": fy_mid,
+            "line": {"color": ACCENT_PRP, "width": 2, "dash": "dash"},
+            "showlegend": True,
+        })
+
+    if ens_fc_px:
+        _ENS_CLR = "#ffffff"
+        fx = conn_date + future_strs
+        fy_mid = conn_val + ens_fc_px
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "Ensemble 95% CI", "x": fx, "y": [conn_val[0]] + ens_fc_hi95,
+            "line": {"width": 0, "color": _ENS_CLR},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "Ensemble 95% CI", "x": fx, "y": [conn_val[0]] + ens_fc_lo95,
+            "fill": "tonexty", "fillcolor": _ENS_CLR + "18",
+            "line": {"width": 0, "color": _ENS_CLR},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "Ensemble 80% CI", "x": fx, "y": [conn_val[0]] + ens_fc_hi80,
+            "line": {"width": 0, "color": _ENS_CLR},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "Ensemble 80% CI", "x": fx, "y": [conn_val[0]] + ens_fc_lo80,
+            "fill": "tonexty", "fillcolor": _ENS_CLR + "30",
+            "line": {"width": 0, "color": _ENS_CLR},
+            "showlegend": False,
+        })
+        fc_traces.append({
+            "type": "scatter", "mode": "lines",
+            "name": "Ensemble", "x": fx, "y": fy_mid,
+            "line": {"color": _ENS_CLR, "width": 2.5},
             "showlegend": True,
         })
 
@@ -1174,33 +1528,37 @@ def main():
     ap.add_argument("--ticker",  default="AAPL")
     ap.add_argument("--horizon", type=int, default=30,
                     help="Trading days to forecast (default 30)")
-    ap.add_argument("--model",   default="arima",
-                    choices=["arima", "ets", "both"])
+    ap.add_argument("--model",   default="ensemble",
+                    choices=["arima", "ets", "both", "xgb", "ensemble", "all"])
     ap.add_argument("--period",  default="5y",
                     choices=["2y", "5y", "10y"])
     args = ap.parse_args()
 
     ticker  = args.ticker.upper().strip()
     horizon = max(5, min(args.horizon, 252))
-    do_arima = args.model in ("arima", "both")
-    do_ets   = args.model in ("ets",   "both")
+    do_arima    = args.model in ("arima", "both", "all", "ensemble")
+    do_ets      = args.model in ("ets",   "both", "all", "ensemble")
+    do_xgb      = args.model in ("xgb", "ensemble", "all") and XGB_OK
+    do_ensemble = args.model in ("ensemble", "all")
 
     if do_arima and not PMDARIMA_OK:
         print("[warn] pmdarima not installed — falling back to ETS only.")
         do_arima = False
         do_ets   = True
 
+    _active = [m for m, ok in [("ARIMA", do_arima), ("ETS", do_ets),
+                                ("XGB", do_xgb), ("Ensemble", do_ensemble)] if ok]
     print(f"\n{'='*60}", flush=True)
     print(f"  Price Forecast · {ticker} · horizon={horizon}d · "
-          f"model={'ARIMA+ETS' if (do_arima and do_ets) else ('ARIMA' if do_arima else 'ETS')}",
-          flush=True)
+          f"model={'+'.join(_active) or 'None'}", flush=True)
     print(f"{'='*60}", flush=True)
 
     # 1. Data
     prices = fetch_prices(ticker, args.period)
     info   = fetch_info(ticker)
 
-    n_steps = (2 if do_arima else 0) + (1 if do_ets else 0) + 2  # GARCH + backtest
+    n_steps = ((2 if do_arima else 0) + (1 if do_ets else 0) + 2
+               + (1 if do_xgb else 0) + (1 if do_ensemble else 0))
     step = [0]
     def _step(label):
         step[0] += 1
@@ -1240,6 +1598,19 @@ def main():
         print("  [warn] Not enough data for backtest (need ≥504 trading days).",
               flush=True)
 
+    # 5b. XGBoost forecast
+    xgb_result = {}
+    if do_xgb:
+        _step("XGBoost walk-forward forecast")
+        xgb_result = fit_xgb_forecast(prices, horizon)
+        _mape = xgb_result.get("backtest_mape")
+        print(f"  XGB MAPE: {_mape:.2f}%" if _mape else "  XGB MAPE: n/a (short history)",
+              flush=True)
+
+    # 5c. Ensemble blend hint (actual blending done in build_html after ARIMA/ETS arrays computed)
+    if do_ensemble:
+        _step("Ensemble blend (inverse-MAPE weighted)")
+
     # 6. HTML
     print("\n  Building HTML report…", flush=True)
     html = build_html(
@@ -1258,6 +1629,8 @@ def main():
         do_ets=do_ets,
         garch_fit=garch_fit_,
         garch_var=garch_var_,
+        xgb_result=xgb_result,
+        do_ensemble=do_ensemble,
     )
 
     today    = datetime.date.today().strftime("%Y_%m_%d")
