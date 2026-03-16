@@ -127,6 +127,7 @@ ALIASES = {
     "multifactor":    "multifactor",
     "mf":             "multifactor",
     "bayesian":       "bayesian",
+    "wacc":           "wacc",
     "all":            "all",
 }
 
@@ -360,6 +361,69 @@ def _skip(reason):
 
 
 # ── Per-model print functions ─────────────────────────────────────────────────
+def _print_wacc(wacc_rate, source, d):
+    """Print a full WACC component breakdown."""
+    from valuation_models import RISK_FREE_RATE, EQUITY_RISK_PREMIUM
+    _section("WACC Breakdown")
+    raw   = d.get("wacc_raw", {}) or {}
+    mktcap = d.get("market_cap") or 0.0
+
+    # Reconstruct components (mirrors calculate_wacc logic)
+    beta_yf = raw.get("beta_yf")
+    beta_tv = d.get("beta", 1.0) or 1.0
+    beta    = beta_yf if beta_yf is not None else beta_tv
+    beta_src = "yfinance 5Y" if beta_yf is not None else "TradingView 1Y"
+
+    ke = RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM
+
+    debt_yf = raw.get("total_debt_yf")
+    debt_tv = d.get("total_debt") or 0.0
+    debt    = debt_yf if (debt_yf is not None and debt_yf > 0) else debt_tv
+
+    int_exp = raw.get("interest_expense")
+    kd      = RISK_FREE_RATE + 0.015
+    kd_src  = "Rf + 1.5% spread (fallback)"
+    if int_exp and int_exp > 0 and debt > 0:
+        kd_raw = int_exp / debt
+        if 0.01 <= kd_raw <= 0.20:
+            kd     = kd_raw
+            kd_src = "interest_expense / total_debt (TTM)"
+
+    tax_exp = raw.get("income_tax_expense")
+    pretax  = raw.get("pretax_income")
+    tax_rate = 0.21
+    tax_src  = "21% statutory fallback"
+    if pretax and pretax > 0 and tax_exp is not None:
+        eff = max(0.0, tax_exp) / pretax
+        if 0.0 <= eff <= 0.55:
+            tax_rate = eff
+            tax_src  = "income_tax / pretax_income (TTM)"
+
+    V  = mktcap + debt if mktcap > 0 else 1.0
+    we = mktcap / V if mktcap > 0 else 1.0
+    wd = debt   / V if mktcap > 0 else 0.0
+
+    _line("WACC",            f"{wacc_rate*100:.2f}%")
+    print()
+    _line("── Cost of equity (Ke)", f"{ke*100:.2f}%")
+    _line("   Risk-free rate (Rf)",  f"{RISK_FREE_RATE*100:.1f}%")
+    _line("   Equity risk premium",  f"{EQUITY_RISK_PREMIUM*100:.1f}%")
+    _line("   Beta",                 f"{beta:.3f}", f"({beta_src})")
+    _line("   Ke = Rf + β×ERP",      f"{ke*100:.2f}%")
+    print()
+    _line("── Cost of debt (Kd)",    f"{kd*100:.2f}%", f"({kd_src})")
+    _line("── Effective tax rate",   f"{tax_rate*100:.1f}%", f"({tax_src})")
+    _line("   After-tax Kd",         f"{kd*(1-tax_rate)*100:.2f}%")
+    print()
+    _line("── Capital structure",     "")
+    _line("   Equity weight (E/V)",  f"{we*100:.1f}%")
+    _line("   Debt weight (D/V)",    f"{wd*100:.1f}%")
+    print()
+    _line("WACC = Ke×(E/V) + Kd×(1−t)×(D/V)", f"{wacc_rate*100:.2f}%")
+    if d.get("wacc_override"):
+        _warn("Using manual override — computed WACC shown above is illustrative only")
+
+
 def _print_dcf(r, price):
     _section("DCF Result")
     _line("Fair value",  _mo(r["fair_value"]), _upside(r["fair_value"], price))
@@ -595,6 +659,13 @@ def run_one(model_key, d, benchmarks):
     """Run model_key, print result. Returns result dict/float or None."""
     price = d["price"]
     ext   = d.get("ext", {})
+
+    # ── WACC breakdown ────────────────────────────────────────────────────────
+    if model_key == "wacc":
+        from valuation_models import calculate_wacc
+        wacc_rate, source = calculate_wacc(d)
+        _print_wacc(wacc_rate, source, d)
+        return {"wacc": wacc_rate, "source": source}
 
     # ── Classic ───────────────────────────────────────────────────────────────
     if model_key == "dcf":
@@ -1021,7 +1092,7 @@ _KEY_TO_METHOD = {
     "rule40":         "Rule of 40",     "erg":             "ERG",
     "scurve":         "S-Curve TAM",    "pie":             "PIE",
     "ddm":            "DDM",            "graham":          "Graham Number",
-    "multifactor":    "Multi-Factor",
+    "multifactor":    "Multi-Factor",   "wacc":            "WACC",
 }
 
 def _run_one_snap(model_key: str, d_h: dict, bm: dict) -> float:

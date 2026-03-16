@@ -352,9 +352,15 @@ def compute_features(prices: pd.DataFrame) -> pd.DataFrame:
     Build a feature matrix with one row per ticker:
       - Return momentum for 8 look-back windows
       - Realised volatility (21d, 63d)
+      - Volatility ratio (vol_21d / vol_126d) — vol regime
       - Beta to SPY (252d rolling, last value)
+      - Alpha vs SPY (annualised excess return, 252d)
       - Max drawdown over 252d
       - Return skewness over 126d
+      - Return kurtosis over 126d — tail risk
+      - Lag-1 autocorrelation of 21d returns — mean-reversion vs momentum
+      - Trend R² over 63d — trend smoothness
+      - Price vs 52-week high — cycle positioning
     """
     import yfinance as yf
 
@@ -390,6 +396,23 @@ def compute_features(prices: pd.DataFrame) -> pd.DataFrame:
         feat["vol_21d"] = float(r.tail(21).std() * np.sqrt(252)) if len(r) >= 21 else np.nan
         feat["vol_63d"] = float(r.tail(63).std() * np.sqrt(252)) if len(r) >= 63 else np.nan
 
+        # Downside vol — semi-deviation using only negative-return days (21d)
+        # More relevant for drawdown risk than symmetric volatility
+        r21_neg = r.tail(21)
+        r21_neg = r21_neg[r21_neg < 0]
+        feat["downside_vol_21d"] = float(r21_neg.std() * np.sqrt(252)) if len(r21_neg) >= 3 else np.nan
+
+        # Sortino ratio (252d) — annualised return / annualised downside vol
+        # Penalises downside volatility only; higher = better risk-adjusted return
+        r252 = r.tail(252)
+        neg252 = r252[r252 < 0]
+        if len(neg252) >= 10 and len(r252) >= 30:
+            ann_ret = float(r252.add(1).prod() ** (252 / len(r252)) - 1)
+            dsv     = float(neg252.std() * np.sqrt(252))
+            feat["sortino_ratio"] = ann_ret / dsv if dsv > 0 else np.nan
+        else:
+            feat["sortino_ratio"] = np.nan
+
         # Beta to SPY (rolling 252d on available aligned data)
         aligned = pd.concat([r, spy_ret], axis=1).dropna()
         aligned.columns = ["stock", "spy"]
@@ -410,6 +433,60 @@ def compute_features(prices: pd.DataFrame) -> pd.DataFrame:
         # Skewness (126 days)
         feat["skew_126d"] = float(r.tail(126).skew()) if len(r) >= 30 else np.nan
 
+        # Kurtosis (126 days) — tail-risk / fat-tails
+        feat["kurtosis_126d"] = float(r.tail(126).kurt()) if len(r) >= 30 else np.nan
+
+        # Volatility ratio (vol_21d / vol_126d) — vol-regime: >1 = expanding, <1 = contracting
+        vol_126 = float(r.tail(126).std() * np.sqrt(252)) if len(r) >= 126 else np.nan
+        if vol_126 and vol_126 > 0 and not np.isnan(feat.get("vol_21d", np.nan)):
+            feat["vol_ratio"] = feat["vol_21d"] / vol_126
+        else:
+            feat["vol_ratio"] = np.nan
+
+        # Lag-1 autocorrelation of 21d returns — positive = momentum, negative = mean-reversion
+        r21 = r.tail(42)
+        if len(r21) >= 10:
+            try:
+                feat["autocorr_21d"] = float(r21.autocorr(lag=1))
+            except Exception:
+                feat["autocorr_21d"] = np.nan
+        else:
+            feat["autocorr_21d"] = np.nan
+
+        # Trend R² over 63d — smoothness of log-price trend (1 = perfect trend, 0 = choppy)
+        if len(r) >= 63:
+            from scipy import stats as _stats
+            log_p = np.log(prices[ticker].dropna().tail(63).values)
+            if len(log_p) >= 10:
+                x = np.arange(len(log_p))
+                _, _, r_val, _, _ = _stats.linregress(x, log_p)
+                feat["trend_r2_63d"] = float(r_val ** 2)
+            else:
+                feat["trend_r2_63d"] = np.nan
+        else:
+            feat["trend_r2_63d"] = np.nan
+
+        # Alpha vs SPY (annualised) — excess return beyond market beta
+        aligned = pd.concat([r, spy_ret], axis=1).dropna()
+        aligned.columns = ["stock", "spy"]
+        if len(aligned) >= 126:
+            cov = aligned["stock"].cov(aligned["spy"])
+            var = aligned["spy"].var()
+            b   = float(cov / var) if var > 0 else 0.0
+            alpha_daily = float(aligned["stock"].mean()) - b * float(aligned["spy"].mean())
+            feat["alpha_252d"] = alpha_daily * 252
+        else:
+            feat["alpha_252d"] = np.nan
+
+        # Price vs 52-week high — cycle positioning (0 = at high, -0.5 = 50% below, etc.)
+        p_series = prices[ticker].dropna()
+        if len(p_series) >= 252:
+            high_52w = float(p_series.tail(252).max())
+            last_p   = float(p_series.iloc[-1])
+            feat["price_vs_52w_high"] = (last_p / high_52w) - 1.0 if high_52w > 0 else np.nan
+        else:
+            feat["price_vs_52w_high"] = np.nan
+
         features[ticker] = pd.Series(feat)
 
     feat_df = pd.DataFrame(features).T
@@ -427,31 +504,188 @@ def compute_features(prices: pd.DataFrame) -> pd.DataFrame:
     return feat_df
 
 
+# ── Fundamental feature fetch ──────────────────────────────────────────────────
+
+# Set of feature column names that come from yf.Ticker().info (not price history).
+# Used in main() to decide whether to call fetch_fundamentals().
+FUNDAMENTAL_FEATURES: frozenset[str] = frozenset({
+    # Value
+    "pe_ratio", "pb_ratio", "ps_ratio", "div_yield", "fcf_yield",
+    "ev_ebitda", "ev_sales",
+    # Growth
+    "eps_growth_1y", "rev_growth_1y", "peg_ratio", "gross_margin",
+    # Quality
+    "roe", "roa", "op_margin", "net_margin", "debt_equity", "current_ratio",
+})
+
+# Outlier clip percentiles applied to fundamental columns before clustering.
+# Fundamentals (P/E, PEG, etc.) can have extreme outliers that would dominate
+# StandardScaler even after z-scoring.  Winsorising at [1 %, 99 %] per column
+# preserves the distribution shape while removing pathological extremes.
+_FUND_CLIP_PCT = (1.0, 99.0)
+
+
+def fetch_fundamentals(tickers: list[str], max_workers: int = 20) -> pd.DataFrame:
+    """Fetch fundamental valuation/growth metrics via yf.Ticker().info.
+
+    Runs concurrently with ThreadPoolExecutor.  Returns a DataFrame indexed by
+    ticker with columns:
+      pe_ratio      — trailing P/E
+      pb_ratio      — price / book
+      div_yield     — dividend yield (0 for non-payers; NOT NaN)
+      fcf_yield     — free cash flow / market cap
+      ev_ebitda     — enterprise value / EBITDA
+      eps_growth_1y — most-recent-quarter YoY earnings growth
+      rev_growth_1y — most-recent-quarter YoY revenue growth
+      peg_ratio     — trailing PEG ratio
+
+    Missing values are filled with the column median after fetching.
+    Columns are winsorised at [1 %, 99 %] to remove extreme outliers before
+    they reach StandardScaler.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import yfinance as yf
+
+    # yfinance .info field → our column name
+    _INFO_MAP = {
+        # Value
+        "trailingPE":                      "pe_ratio",
+        "priceToBook":                     "pb_ratio",
+        "priceToSalesTrailing12Months":    "ps_ratio",
+        "dividendYield":                   "div_yield",
+        "enterpriseToEbitda":              "ev_ebitda",
+        "enterpriseToRevenue":             "ev_sales",
+        # Growth
+        "earningsGrowth":                  "eps_growth_1y",
+        "revenueGrowth":                   "rev_growth_1y",
+        "trailingPegRatio":                "peg_ratio",
+        "grossMargins":                    "gross_margin",
+        # Quality
+        "returnOnEquity":                  "roe",
+        "returnOnAssets":                  "roa",
+        "operatingMargins":                "op_margin",
+        "profitMargins":                   "net_margin",
+        "debtToEquity":                    "debt_equity",
+        "currentRatio":                    "current_ratio",
+    }
+
+    def _fetch_one(ticker: str) -> tuple[str, dict]:
+        try:
+            full = yf.Ticker(ticker).info
+            row: dict[str, float] = {}
+
+            for yf_key, col in _INFO_MAP.items():
+                v = full.get(yf_key)
+                row[col] = float(v) if (v is not None and v == v) else np.nan
+
+            # Non-payers: dividendYield is None → treat as 0, not NaN
+            if np.isnan(row.get("div_yield", np.nan)):
+                row["div_yield"] = 0.0
+
+            # Negative PEG is meaningless for valuation → set to NaN
+            if row.get("peg_ratio", np.nan) is not np.nan and row["peg_ratio"] < 0:
+                row["peg_ratio"] = np.nan
+
+            # FCF yield = freeCashflow / marketCap
+            fcf  = full.get("freeCashflow")
+            mcap = full.get("marketCap")
+            if fcf is not None and mcap and float(mcap) > 0:
+                row["fcf_yield"] = float(fcf) / float(mcap)
+            else:
+                row["fcf_yield"] = np.nan
+
+            return ticker, row
+        except Exception:
+            return ticker, {}
+
+    print(f"  Fetching fundamentals for {len(tickers)} tickers "
+          f"(max_workers={max_workers})…", flush=True)
+    t0 = time.time()
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = {pool.submit(_fetch_one, t): t for t in tickers}
+        done = 0
+        for fut in as_completed(futs):
+            ticker, row = fut.result()
+            if row:
+                results[ticker] = row
+            done += 1
+            if done % 100 == 0:
+                print(f"    {done} / {len(tickers)}…", flush=True)
+
+    elapsed = time.time() - t0
+    print(f"  Fundamentals fetched in {elapsed:.1f}s  ({len(results)} / {len(tickers)} tickers)")
+
+    if not results:
+        return pd.DataFrame()
+
+    fund_df = pd.DataFrame(results).T
+    fund_df.index.name = "ticker"
+
+    # Ensure all expected columns exist
+    for col in list(_INFO_MAP.values()) + ["fcf_yield"]:
+        if col not in fund_df.columns:
+            fund_df[col] = np.nan
+
+    # Fill missing with column median (except div_yield which stays 0 for non-payers)
+    for col in fund_df.columns:
+        med = fund_df[col].median()
+        if col == "div_yield":
+            fund_df[col] = fund_df[col].fillna(0.0)
+        else:
+            fund_df[col] = fund_df[col].fillna(med if not np.isnan(med) else 0.0)
+
+    # Winsorise at [1 %, 99 %] per column to remove pathological outliers
+    lo_pct, hi_pct = _FUND_CLIP_PCT
+    for col in fund_df.columns:
+        lo = float(fund_df[col].quantile(lo_pct / 100))
+        hi = float(fund_df[col].quantile(hi_pct / 100))
+        fund_df[col] = fund_df[col].clip(lo, hi)
+
+    return fund_df
+
+
 # ── Clustering pipeline ────────────────────────────────────────────────────────
 
-K_SCAN_MIN, K_SCAN_MAX = 2, 15   # k search range for auto-selection
-# Minimum cluster size for k-means silhouette scan.
+K_SCAN_MIN, K_SCAN_MAX = 4, 15   # k search range for auto-selection
+# k=2/3 are skipped: for large indexes (~500 stocks) the silhouette criterion
+# always peaks at k=2 because the dominant variance axis (beta/volatility)
+# produces one clean binary split while suppressing all finer structure.
+# Starting at k=4 forces discovery of the meaningful sub-groups present in
+# sector/style data.
+
+# Minimum cluster size for k-means composite scan.
 # Prevents picking a degenerate split where 1-2 extreme outliers form their
 # own cluster — which produces a spuriously high silhouette score.
 K_MIN_CLUSTER_FRAC = 0.02        # 2 % of n  (≥10 stocks for SPX)
 
 
 def _auto_k_silhouette(Xp: np.ndarray) -> tuple[int, dict[int, float]]:
-    """K-Means k-selection via silhouette scan with balance filter.
+    """K-Means k-selection via composite silhouette + Calinski-Harabasz scan.
 
-    Returns (best_k, {k: silhouette_score}).
+    Pure silhouette score tends to peak at k=2 for financial continuum data
+    (the single largest variance axis — beta/vol — dominates).  Calinski-
+    Harabasz (CH) measures between-cluster / within-cluster variance ratio
+    and selects higher, more granular k values.  The two metrics are each
+    normalised to [0, 1] across the scanned range and averaged into a
+    composite score.
+
+    Returns (best_k, {k: composite_score}).
     """
     from sklearn.cluster import KMeans
-    from sklearn.metrics import silhouette_score
+    from sklearn.metrics import silhouette_score, calinski_harabasz_score
 
     n_samples = Xp.shape[0]
     k_max     = min(K_SCAN_MAX, n_samples - 1)
     min_size  = max(2, int(K_MIN_CLUSTER_FRAC * n_samples))
-    scores: dict[int, float] = {}
+    sil_raw:  dict[int, float] = {}
+    ch_raw:   dict[int, float] = {}
     skipped: list[int] = []
 
-    print(f"  Auto-selecting k ({K_SCAN_MIN}–{k_max}) via silhouette score "
-          f"(min cluster size = {min_size})…", flush=True)
+    print(f"  Auto-selecting k ({K_SCAN_MIN}–{k_max}) via silhouette + "
+          f"Calinski-Harabasz composite (min cluster size = {min_size})…",
+          flush=True)
 
     for k in range(K_SCAN_MIN, k_max + 1):
         lbl    = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(Xp)
@@ -459,19 +693,37 @@ def _auto_k_silhouette(Xp: np.ndarray) -> tuple[int, dict[int, float]]:
         if counts.min() < min_size:
             skipped.append(k)
             continue
-        scores[k] = float(silhouette_score(Xp, lbl))
+        sil_raw[k] = float(silhouette_score(Xp, lbl))
+        ch_raw[k]  = float(calinski_harabasz_score(Xp, lbl))
 
     if skipped:
         print(f"  Skipped degenerate k values (cluster < {min_size} stocks): {skipped}")
 
-    if not scores:
+    if not sil_raw:
         print("  ⚠  All k values were degenerate; falling back to unconstrained scan.")
         for k in range(K_SCAN_MIN, k_max + 1):
             lbl = KMeans(n_clusters=k, random_state=42, n_init=10).fit_predict(Xp)
-            scores[k] = float(silhouette_score(Xp, lbl))
+            sil_raw[k] = float(silhouette_score(Xp, lbl))
+            ch_raw[k]  = float(calinski_harabasz_score(Xp, lbl))
+
+    # Normalise each metric to [0, 1] then average into a composite score
+    def _norm(d: dict[int, float]) -> dict[int, float]:
+        lo, hi = min(d.values()), max(d.values())
+        if hi == lo:
+            return {k: 1.0 for k in d}
+        return {k: (v - lo) / (hi - lo) for k, v in d.items()}
+
+    sil_n = _norm(sil_raw)
+    ch_n  = _norm(ch_raw)
+    scores: dict[int, float] = {
+        k: round((sil_n[k] + ch_n[k]) / 2, 4) for k in sil_raw
+    }
 
     best_k = max(scores, key=scores.get)
-    print(f"  → Best k = {best_k}  (silhouette = {scores[best_k]:.3f})")
+    print(f"  → Best k = {best_k}  "
+          f"(composite = {scores[best_k]:.3f}, "
+          f"sil = {sil_raw[best_k]:.3f}, "
+          f"CH = {ch_raw[best_k]:.0f})")
     return best_k, scores
 
 
@@ -582,7 +834,7 @@ def auto_select_k(Xp: np.ndarray, method: str) -> tuple[int, dict[int, float]]:
 
 
 def run_pipeline(feat_df: pd.DataFrame, method: str, n_clusters: int,
-                 viz: str) -> tuple[pd.DataFrame, list[float], np.ndarray, dict[int, float]]:
+                 viz: str) -> tuple:
     """
     StandardScaler → PCA (12 components) → clustering → 2-D embedding.
 
@@ -591,11 +843,15 @@ def run_pipeline(feat_df: pd.DataFrame, method: str, n_clusters: int,
 
     Returns
     -------
-    result_df : DataFrame with columns [x, y, cluster]  (index = ticker)
-    expl_var  : explained variance ratio per PCA component
-    labels    : cluster label per sample (int array)
-    sil_scan  : {k: silhouette_score} dict from the auto-scan, or {} if
-                n_clusters was supplied manually or method == 'dbscan'
+    result_df     : DataFrame with columns [x, y, cluster]  (index = ticker)
+    expl_var      : explained variance ratio per PCA component
+    labels        : cluster label per sample (int array)
+    sil_scan      : {k: silhouette_score} dict from the auto-scan, or {} if
+                    n_clusters was supplied manually or method == 'dbscan'
+    pca           : fitted sklearn PCA object
+    feature_names : list of column names from feat_df
+    pca_scores    : DataFrame (index=tickers, columns=[PC1, PC2, ...]) —
+                    PCA-transformed coordinates before embedding
     """
     from sklearn.preprocessing  import StandardScaler
     from sklearn.decomposition  import PCA
@@ -615,6 +871,13 @@ def run_pipeline(feat_df: pd.DataFrame, method: str, n_clusters: int,
     pca    = PCA(n_components=n_comp, random_state=42)
     Xp     = pca.fit_transform(Xs)
     expl_var = list(pca.explained_variance_ratio_)
+
+    feature_names = list(feat_df.columns)
+    pca_scores = pd.DataFrame(
+        Xp,
+        index=feat_df.index,
+        columns=[f"PC{i+1}" for i in range(Xp.shape[1])]
+    )
 
     # 3. Clustering
     sil_scan: dict[int, float] = {}
@@ -698,7 +961,119 @@ def run_pipeline(feat_df: pd.DataFrame, method: str, n_clusters: int,
 
     result_df = pd.DataFrame({"x": x, "y": y, "cluster": labels},
                              index=feat_df.index)
-    return result_df, expl_var, labels, sil_scan
+    return result_df, expl_var, labels, sil_scan, pca, feature_names, pca_scores
+
+
+# ── DTW clustering pipeline ────────────────────────────────────────────────────
+
+def run_dtw_pipeline(prices: pd.DataFrame, n_clusters: int, viz: str,
+                     window: int = 63) -> tuple:
+    """
+    DTW-based hierarchical clustering on raw normalised return series.
+
+    Bypasses the feature matrix — clusters stocks by *price pattern similarity*
+    with lag-tolerance that Pearson correlation misses.
+
+    Returns same structure as run_pipeline but pca=None, feature_names=[],
+    pca_scores=empty DataFrame.
+    """
+    from sklearn.cluster       import AgglomerativeClustering
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.manifold      import TSNE
+    import scipy.spatial.distance as ssd
+
+    print(f"  Running DTW pipeline: {window}d return series → hierarchical → {viz}…")
+
+    ret = prices.pct_change().dropna(how="all").tail(window)
+    # Keep tickers that have a full window
+    valid = ret.columns[ret.notna().all()]
+    ret   = ret[valid]
+
+    tickers = list(ret.columns)
+    n       = len(tickers)
+    if n < 10:
+        raise ValueError("Too few tickers with complete return history for DTW.")
+
+    # Normalise each series to zero-mean unit-variance
+    seqs = ret.values.T.astype(np.float64)      # (n, window)
+    seqs = (seqs - seqs.mean(axis=1, keepdims=True)) / (seqs.std(axis=1, keepdims=True) + 1e-12)
+
+    # --- DTW distance matrix ---
+    def _build_dtw_matrix(S: np.ndarray, radius: int = 5) -> np.ndarray:
+        """Pairwise DTW with Sakoe-Chiba band. Tries fast libs first."""
+        try:
+            from tslearn.metrics import cdist_dtw
+            print("    dtw: using tslearn …")
+            return cdist_dtw(S[:, :, np.newaxis],
+                             global_constraint="sakoe_chiba",
+                             sakoe_chiba_radius=radius)
+        except ImportError:
+            pass
+        try:
+            import dtaidistance.dtw as _dtw_lib
+            print("    dtw: using dtaidistance …")
+            return _dtw_lib.distance_matrix_fast(S, window=radius)
+        except ImportError:
+            pass
+        # Pure-numpy fallback
+        print(f"    dtw: pure-numpy fallback (n={S.shape[0]}, T={S.shape[1]}) …")
+        nn, T = S.shape
+        D = np.zeros((nn, nn), dtype=np.float32)
+        for i in range(nn - 1):
+            for j in range(i + 1, nn):
+                s1, s2 = S[i], S[j]
+                prev = np.full(T + 1, np.inf)
+                prev[0] = 0.0
+                for r in range(1, T + 1):
+                    curr = np.full(T + 1, np.inf)
+                    lo = max(1, r - radius)
+                    hi = min(T, r + radius)
+                    for c in range(lo, hi + 1):
+                        cost = abs(s1[r-1] - s2[c-1])
+                        curr[c] = cost + min(prev[c], prev[c-1], curr[c-1])
+                    prev = curr
+                D[i, j] = D[j, i] = prev[T]
+        return D
+
+    D = _build_dtw_matrix(seqs)
+    # Ensure symmetry and zero diagonal
+    D = (D + D.T) / 2
+    np.fill_diagonal(D, 0.0)
+
+    # --- Hierarchical clustering on precomputed distances ---
+    if n_clusters == 0:
+        # Simple heuristic: sqrt(n/2), clamped to [4, 12]
+        nc = int(np.clip(round(np.sqrt(n / 2)), 4, 12))
+        print(f"    dtw: auto k = {nc} (heuristic)")
+    else:
+        nc = min(n_clusters, n - 1)
+
+    clf    = AgglomerativeClustering(n_clusters=nc, metric="precomputed", linkage="average")
+    labels = clf.fit_predict(D).astype(int)
+
+    # --- 2-D embedding for visualisation ---
+    # Use TSNE with precomputed distance matrix
+    perp = min(30, max(5, n // 10))
+    import sklearn
+    tsne_iter_kwarg = (
+        {"max_iter": 1000}
+        if tuple(int(x) for x in sklearn.__version__.split(".")[:2]) >= (1, 4)
+        else {"n_iter": 1000}
+    )
+    if viz in ("tsne", "umap"):
+        # TSNE can accept a precomputed distance matrix
+        emb = TSNE(n_components=2, perplexity=perp, random_state=42,
+                   metric="precomputed", init="random", **tsne_iter_kwarg).fit_transform(D)
+    else:  # pca → use MDS
+        from sklearn.manifold import MDS
+        emb = MDS(n_components=2, dissimilarity="precomputed",
+                  random_state=42, n_init=1, max_iter=300).fit_transform(D)
+    x, y = emb[:, 0], emb[:, 1]
+
+    result_df = pd.DataFrame({"x": x, "y": y, "cluster": labels}, index=tickers)
+    expl_var  = []          # not applicable for DTW
+    sil_scan  = {}
+    return result_df, expl_var, labels, sil_scan, None, [], pd.DataFrame()
 
 
 # ── HTML report ────────────────────────────────────────────────────────────────
@@ -716,7 +1091,10 @@ def build_html(embed_df: pd.DataFrame,
                expl_var: list[float],
                labels:   np.ndarray,
                args:     argparse.Namespace,
-               sil_scan: dict[int, float] | None = None) -> str:
+               sil_scan: dict[int, float] | None = None,
+               pca=None,
+               feature_names=None,
+               pca_scores=None) -> str:
     """Assemble the full HTML report."""
     import plotly.graph_objects as go
     import plotly.io            as pio
@@ -733,9 +1111,12 @@ def build_html(embed_df: pd.DataFrame,
         r_series = ret.tail(window).add(1).prod().sub(1).mul(100)
         df[col]  = df.index.map(lambda t, rs=r_series: rs.get(t, np.nan))
 
-    df["vol_21d_pct"] = feat_df["vol_21d"].mul(100).reindex(df.index)
-    df["beta"]        = feat_df["beta"].reindex(df.index)
-    df["max_dd"]      = feat_df["max_dd_252d"].mul(100).reindex(df.index)
+    # These columns are used in hover tooltips / summary table but may be absent
+    # when the user has deselected them via --features.  Fall back to NaN series.
+    _nan = pd.Series(np.nan, index=feat_df.index)
+    df["vol_21d_pct"] = (feat_df["vol_21d"].mul(100) if "vol_21d" in feat_df.columns else _nan).reindex(df.index)
+    df["beta"]        = (feat_df["beta"]              if "beta"    in feat_df.columns else _nan).reindex(df.index)
+    df["max_dd"]      = (feat_df["max_dd_252d"].mul(100) if "max_dd_252d" in feat_df.columns else _nan).reindex(df.index)
 
     unique_clusters = sorted(df["cluster"].unique())
     n_noise         = int((labels == -1).sum())
@@ -928,10 +1309,10 @@ def build_html(embed_df: pd.DataFrame,
             hover_tmpl   = "k = %{x}<br>Gap = %{y:.4f}<extra></extra>"
             score_label  = f"gap = {sil_scan[best_k]:.4f}"
         else:
-            chart_title  = "Silhouette Score by k — Auto-selection"
-            y_axis_label = "Avg silhouette score"
-            hover_tmpl   = "k = %{x}<br>Silhouette = %{y:.4f}<extra></extra>"
-            score_label  = f"silhouette = {sil_scan[best_k]:.3f}"
+            chart_title  = "Composite Score by k — Auto-selection (Silhouette + Calinski-Harabász)"
+            y_axis_label = "Composite score (normalised)"
+            hover_tmpl   = "k = %{x}<br>Score = %{y:.4f}<extra></extra>"
+            score_label  = f"composite = {sil_scan[best_k]:.3f}"
 
         sil_fig = go.Figure(go.Bar(
             x             = sil_ks,
@@ -986,6 +1367,270 @@ def build_html(embed_df: pd.DataFrame,
     if sil_scan:
         sil_div = _div(sil_fig, "sil-scan")
 
+    # ── 7. Minimum Spanning Tree ───────────────────────────────────────────────
+    from scipy.sparse.csgraph import minimum_spanning_tree as _mst
+
+    ret_mst  = prices.pct_change().dropna(how="all").tail(126)
+    tk_mst   = [t for t in df.sort_values("cluster").index if t in ret_mst.columns]
+    if len(tk_mst) > 200:
+        # Keep top 5 per cluster to avoid unreadable hairball
+        keep_mst = []
+        for cid in unique_clusters:
+            cl_t = df[df["cluster"] == cid].index.tolist()
+            keep_mst.extend([t for t in cl_t if t in tk_mst][:5])
+        tk_mst = [t for t in tk_mst if t in keep_mst][:200]
+
+    corr_mst = ret_mst[tk_mst].corr().clip(-1, 1).values
+    dist_mst = np.sqrt(np.clip(2 * (1 - corr_mst), 0, 4))
+    np.fill_diagonal(dist_mst, 0)
+
+    mst_sparse = _mst(dist_mst)
+    mst_coo    = mst_sparse.tocoo()
+
+    # Use embed_df x,y positions projected to this ticker subset
+    pos_df = embed_df.reindex(tk_mst).dropna()
+    tk_mst_valid = pos_df.index.tolist()
+
+    # Build edge traces
+    edge_x, edge_y, edge_hover = [], [], []
+    for r_i, c_i, w in zip(mst_coo.row, mst_coo.col, mst_coo.data):
+        ta, tb = tk_mst[r_i], tk_mst[c_i]
+        if ta not in pos_df.index or tb not in pos_df.index:
+            continue
+        xa, ya = pos_df.loc[ta, "x"], pos_df.loc[ta, "y"]
+        xb, yb = pos_df.loc[tb, "x"], pos_df.loc[tb, "y"]
+        edge_x += [xa, xb, None]
+        edge_y += [ya, yb, None]
+        corr_val = 1 - (w ** 2) / 2
+        edge_hover.append(f"{ta}–{tb}: corr={corr_val:.2f}")
+
+    mst_fig = go.Figure()
+    mst_fig.add_trace(go.Scatter(
+        x=edge_x, y=edge_y,
+        mode="lines",
+        line=dict(color="rgba(100,100,150,0.45)", width=0.8),
+        hoverinfo="skip",
+        name="MST edge",
+        showlegend=False,
+    ))
+
+    # Node traces — one per cluster (for legend / colour)
+    for cid in unique_clusters:
+        sub_t = [t for t in tk_mst_valid if df.loc[t, "cluster"] == cid]
+        if not sub_t:
+            continue
+        label = "Noise" if cid == -1 else f"Cluster {cid + 1}"
+        mst_fig.add_trace(go.Scatter(
+            x=[pos_df.loc[t, "x"] for t in sub_t],
+            y=[pos_df.loc[t, "y"] for t in sub_t],
+            mode="markers+text",
+            name=label,
+            text=sub_t,
+            textposition="top center",
+            textfont=dict(size=7, color="rgba(200,200,200,0.7)"),
+            marker=dict(
+                color=_colour_for(cid),
+                size=7, opacity=0.9,
+                line=dict(color="rgba(0,0,0,0.3)", width=0.5),
+            ),
+            hovertemplate="%{text}<extra>" + label + "</extra>",
+        ))
+
+    mst_fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG, plot_bgcolor=PANEL,
+        font=dict(family="Inter, system-ui, sans-serif", color=TEXT, size=11),
+        title=dict(text="Minimum Spanning Tree — Correlation Distance Network",
+                   x=0.02, font=dict(size=14, color=TEXT)),
+        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+        margin=dict(l=20, r=20, t=50, b=20),
+        height=520,
+        showlegend=True,
+        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+    )
+    mst_div = _div(mst_fig, "mst-graph")
+
+    # ── 8. PCA factor loadings ─────────────────────────────────────────────────
+    pca_loadings_div   = ""
+    pca_top_stocks_div = ""
+    if pca is not None and feature_names:
+        n_show_comp = min(8, len(pca.components_))
+        comp_labels = [f"PC{i+1}" for i in range(n_show_comp)]
+        feat_labels = list(feature_names)
+
+        # Clamp loadings to n_show_comp rows
+        loadings = pca.components_[:n_show_comp]   # (n_show_comp, n_features)
+
+        load_fig = go.Figure(go.Heatmap(
+            z=loadings,
+            x=feat_labels,
+            y=comp_labels,
+            colorscale=[[0, "#1a3a5c"], [0.5, PANEL], [1, ACCENT]],
+            zmid=0,
+            showscale=True,
+            hovertemplate="%{y} / %{x}: %{z:.3f}<extra></extra>",
+            text=[[f"{v:.2f}" for v in row] for row in loadings],
+            texttemplate="%{text}",
+            textfont=dict(size=8),
+        ))
+        load_fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor=BG, plot_bgcolor=BG,
+            font=dict(family="Inter, system-ui, sans-serif", color=TEXT, size=10),
+            title=dict(text="PCA Feature Loadings — top components", x=0.02,
+                       font=dict(size=14, color=TEXT)),
+            xaxis=dict(tickangle=45, tickfont=dict(size=9)),
+            yaxis=dict(tickfont=dict(size=10)),
+            margin=dict(l=60, r=20, t=50, b=100),
+            height=max(240, n_show_comp * 34 + 100),
+        )
+        pca_loadings_div = _div(load_fig, "pca-loadings")
+
+        # Top/bottom 15 stocks on PC1 and PC2
+        if pca_scores is not None and not pca_scores.empty:
+            pc_figs = []
+            for pc_col in ["PC1", "PC2"]:
+                if pc_col not in pca_scores.columns:
+                    continue
+                scores = pca_scores[pc_col].reindex(df.index).dropna().sort_values()
+                n_each = min(15, len(scores) // 2)
+                show_t  = pd.concat([scores.head(n_each), scores.tail(n_each)])
+                colours = [
+                    _colour_for(int(df.loc[t, "cluster"])) if t in df.index else BORDER
+                    for t in show_t.index
+                ]
+                pc_fig = go.Figure(go.Bar(
+                    y=show_t.index.tolist(),
+                    x=show_t.values,
+                    orientation="h",
+                    marker_color=colours,
+                    hovertemplate="%{y}: %{x:.2f}<extra></extra>",
+                ))
+                pc_fig.add_vline(x=0, line_color=BORDER, line_width=1)
+                pc_fig.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor=BG, plot_bgcolor=PANEL,
+                    font=dict(family="Inter, system-ui, sans-serif", color=TEXT, size=10),
+                    title=dict(text=f"{pc_col} Extreme Stocks (top & bottom {n_each})",
+                               x=0.02, font=dict(size=13, color=TEXT)),
+                    xaxis=dict(title=f"{pc_col} score", gridcolor=BORDER),
+                    yaxis=dict(tickfont=dict(size=9)),
+                    margin=dict(l=80, r=20, t=40, b=40),
+                    height=max(300, n_each * 2 * 18 + 80),
+                )
+                pc_figs.append(_div(pc_fig, f"pca-top-{pc_col.lower()}"))
+            pca_top_stocks_div = "\n".join(pc_figs)
+
+    # ── 9. Density-based clusters on embedding ────────────────────────────────
+    density_div = ""
+    try:
+        from sklearn.cluster import HDBSCAN as _HDBSCAN
+        _have_hdbscan = True
+    except ImportError:
+        try:
+            import hdbscan as _hdbscan_lib
+            _have_hdbscan = True
+        except ImportError:
+            _have_hdbscan = False
+
+    if _have_hdbscan:
+        emb_xy = embed_df[["x", "y"]].values
+        try:
+            from sklearn.cluster import HDBSCAN as _HDBSCAN
+            _hdb = _HDBSCAN(min_cluster_size=max(3, len(emb_xy) // 20),
+                             min_samples=3, cluster_selection_epsilon=0.0)
+        except ImportError:
+            import hdbscan as _hdbscan_lib
+            _hdb = _hdbscan_lib.HDBSCAN(min_cluster_size=max(3, len(emb_xy) // 20),
+                                         min_samples=3)
+        density_labels = _hdb.fit_predict(emb_xy)
+
+        # Map unique density labels to colours (reuse _colour_for palette)
+        density_unique = sorted(set(density_labels))
+        dens_fig = go.Figure()
+        for did in density_unique:
+            mask  = density_labels == did
+            sub_t = embed_df.index[mask].tolist()
+            dlabel = "Noise" if did == -1 else f"D-Cluster {did + 1}"
+            dens_fig.add_trace(go.Scatter(
+                x=embed_df.loc[sub_t, "x"].values,
+                y=embed_df.loc[sub_t, "y"].values,
+                mode="markers",
+                name=dlabel,
+                text=sub_t,
+                marker=dict(
+                    color=_colour_for(did),
+                    size=7, opacity=0.85,
+                    line=dict(color="rgba(0,0,0,0.2)", width=0.5),
+                ),
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    + "<br>".join(
+                        f"{c}: %{{customdata[{i}]}}"
+                        for i, c in enumerate(["Sector", "Cluster"])
+                    )
+                    + f"<extra>{dlabel}</extra>"
+                ),
+                customdata=[
+                    [df.loc[t, "sector"] if t in df.index else "",
+                     f"Cluster {int(df.loc[t, 'cluster'])+1}" if t in df.index else ""]
+                    for t in sub_t
+                ],
+            ))
+        dens_fig.update_layout(
+            template="plotly_dark",
+            paper_bgcolor=BG, plot_bgcolor=PANEL,
+            font=dict(family="Inter, system-ui, sans-serif", color=TEXT, size=11),
+            title=dict(text="Density Clusters (HDBSCAN on Embedding Geometry)",
+                       x=0.02, font=dict(size=14, color=TEXT)),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+            margin=dict(l=20, r=20, t=50, b=20),
+            height=480,
+            showlegend=True,
+            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
+        )
+        density_div = _div(dens_fig, "density-scatter")
+
+    # ── Build new panel HTML strings ──────────────────────────────────────────
+    mst_panel_html = (
+        '  <!-- MST network -->\n'
+        '  <div class="panel">\n'
+        '    <div class="panel-title">Minimum Spanning Tree — Correlation Distance Network</div>\n'
+        f'    {mst_div}\n'
+        '    <p style="margin-top:8px;font-size:12px;color:var(--subtext)">\n'
+        '      Edges connect stocks nearest in Mantegna distance (d=\u221a(2(1\u2212\u03c1))). Node positions match the embedding above.\n'
+        + (f'      Showing sampled subset ({len(tk_mst)} tickers, 5 per cluster).\n' if len(tk_mst) < len(embed_df) else '') +
+        '    </p>\n'
+        '  </div>'
+    )
+
+    density_panel_html = (
+        '  <!-- Density clustering -->\n'
+        '  <div class="panel">\n'
+        '    <div class="panel-title">Density Clusters (HDBSCAN on Embedding)</div>\n'
+        f'    {density_div}\n'
+        '    <p style="margin-top:8px;font-size:12px;color:var(--subtext)">\n'
+        '      HDBSCAN applied to the 2-D embedding coordinates. Finds geometrically dense groups without convex-shape assumptions. Grey = noise. Compare against feature-based clusters above.\n'
+        '    </p>\n'
+        '  </div>'
+    ) if density_div else ''
+
+    pca_panel_html = (
+        '  <!-- PCA factor loadings -->\n'
+        '  <div class="panel">\n'
+        '    <div class="panel-title">PCA Factor Loadings</div>\n'
+        f'    {pca_loadings_div}\n'
+        '    <p style="margin-top:8px;font-size:12px;color:var(--subtext)">\n'
+        '      Feature contributions to each principal component. Blue=negative, violet=positive. Larger absolute value = stronger driver.\n'
+        '    </p>\n'
+        '  </div>\n'
+        '  <div class="grid-2">\n'
+        f'    {pca_top_stocks_div}\n'
+        '  </div>'
+    ) if pca_loadings_div else ''
+
     # ── Summary table HTML ────────────────────────────────────────────────
     def _th(col): return f'<th>{col}</th>'
     def _td(val): return f'<td>{val}</td>'
@@ -1029,7 +1674,7 @@ def build_html(embed_df: pd.DataFrame,
 
     # ── Meta info ─────────────────────────────────────────────────────────
     ts          = datetime.now().strftime("%Y-%m-%d %H:%M")
-    method_map  = {"kmeans": "K-Means", "hierarchical": "Hierarchical (Ward)", "dbscan": "DBSCAN"}
+    method_map  = {"kmeans": "K-Means", "hierarchical": "Hierarchical (Ward)", "dbscan": "DBSCAN", "dtw": "DTW + Hierarchical"}
     method_str  = method_map.get(args.method, args.method)
     n_c_str     = f"{len([c for c in unique_clusters if c != -1])} clusters"
     if n_noise:
@@ -1296,8 +1941,8 @@ def build_html(embed_df: pd.DataFrame,
       <div class="panel-title" style="margin-bottom:0">{viz_label} Embedding</div>
       <div class="plot-search-wrap">
         <span class="plot-search-lbl">Find ticker</span>
-        <input type="text" id="plot-ticker-search" placeholder="e.g. NVDA"
-               oninput="onPlotSearch(event)" autocomplete="off" spellcheck="false" maxlength="12">
+        <input type="text" id="plot-ticker-search" placeholder="e.g. NVDA, AAPL, MSFT"
+               oninput="onPlotSearch(event)" autocomplete="off" spellcheck="false">
         <span id="plot-search-status"></span>
       </div>
     </div>
@@ -1340,6 +1985,12 @@ def build_html(embed_df: pd.DataFrame,
       Showing up to 150 tickers (5 per cluster); colour scale: purple = −1, dark = 0, violet = +1.
     </p>
   </div>
+
+  {mst_panel_html}
+
+  {density_panel_html}
+
+  {pca_panel_html}
 
   <!-- Ticker detail table -->
   <div class="panel">
@@ -1394,54 +2045,72 @@ function _restoreScatter() {{
   _origScatter = null;
 }}
 
-function _searchScatter(query) {{
+function _searchScatter(queries) {{
+  // queries: array of uppercase strings (one or more tickers)
   var el = document.getElementById('scatter');
-  if (!el || !el.data) return {{found: false}};
+  if (!el || !el.data) return {{found: false, tickers: []}};
   _cacheScatter();
-  var q = query.toUpperCase();
-  var foundT = -1, foundP = -1, foundTicker = "";
 
-  // Three passes: exact → prefix → substring, across all cluster traces
-  var passes = [
-    function(s) {{ return s === q; }},
-    function(s) {{ return s.startsWith(q); }},
-    function(s) {{ return s.includes(q); }},
-  ];
-  outer: for (var pass = 0; pass < passes.length; pass++) {{
-    for (var t = 0; t < el.data.length; t++) {{
-      var texts = el.data[t].text;
-      if (!texts) continue;
-      for (var p = 0; p < texts.length; p++) {{
-        if (passes[pass](texts[p].toUpperCase())) {{
-          foundT = t; foundP = p; foundTicker = texts[p];
-          break outer;
+  // Find best match for each query; collect {{t, p, ticker}} per match
+  var matches = [];
+  queries.forEach(function(q) {{
+    if (!q) return;
+    var passes = [
+      function(s) {{ return s === q; }},
+      function(s) {{ return s.startsWith(q); }},
+      function(s) {{ return s.includes(q); }},
+    ];
+    for (var pass = 0; pass < passes.length; pass++) {{
+      var hit = false;
+      for (var t = 0; t < el.data.length; t++) {{
+        var texts = el.data[t].text;
+        if (!texts) continue;
+        for (var p = 0; p < texts.length; p++) {{
+          if (passes[pass](texts[p].toUpperCase())) {{
+            matches.push({{t: t, p: p, ticker: texts[p]}});
+            hit = true; break;
+          }}
         }}
+        if (hit) break;
       }}
+      if (hit) break;
     }}
-  }}
+  }});
 
-  if (foundT === -1) {{ _restoreScatter(); return {{found: false}}; }}
+  if (matches.length === 0) {{ _restoreScatter(); return {{found: false, tickers: []}}; }}
 
-  // Dim every trace uniformly (no trace arg = all traces)
+  // Dim all traces uniformly
   Plotly.restyle(el, {{'marker.opacity': 0.07}});
 
-  // Highlight the single matched point in its trace
-  var o      = _origScatter[foundT];
-  var n      = el.data[foundT].text.length;
-  var oCol   = o.color;
-  var oSize  = o.size;
-  var oCols  = Array.isArray(oCol) ? oCol : Array(n).fill(oCol);
-  var newColors  = oCols.slice();   newColors[foundP]  = '#FFD700';
-  var newSizes   = Array(n).fill(oSize);  newSizes[foundP]   = oSize * 2.5;
-  var newOpacity = Array(n).fill(0.07);   newOpacity[foundP] = 1.0;
+  // Group matched points by trace index, then apply highlights per trace
+  var byTrace = {{}};
+  matches.forEach(function(m) {{
+    if (!byTrace[m.t]) byTrace[m.t] = [];
+    byTrace[m.t].push(m.p);
+  }});
+  Object.keys(byTrace).forEach(function(tStr) {{
+    var t    = parseInt(tStr);
+    var pts  = byTrace[t];
+    var o    = _origScatter[t];
+    var n    = el.data[t].text.length;
+    var oCol = o.color;
+    var oCols = Array.isArray(oCol) ? oCol.slice() : Array(n).fill(oCol);
+    var newColors  = oCols.slice();
+    var newSizes   = Array(n).fill(o.size);
+    var newOpacity = Array(n).fill(0.07);
+    pts.forEach(function(p) {{
+      newColors[p]  = '#FFD700';
+      newSizes[p]   = o.size * 2.5;
+      newOpacity[p] = 1.0;
+    }});
+    Plotly.restyle(el, {{
+      'marker.color':   [newColors],
+      'marker.size':    [newSizes],
+      'marker.opacity': [newOpacity],
+    }}, [t]);
+  }});
 
-  Plotly.restyle(el, {{
-    'marker.color':   [newColors],
-    'marker.size':    [newSizes],
-    'marker.opacity': [newOpacity],
-  }}, [foundT]);
-
-  return {{found: true, ticker: foundTicker}};
+  return {{found: true, tickers: matches.map(function(m) {{ return m.ticker; }})}};
 }}
 
 function _restoreHeatmap() {{
@@ -1449,62 +2118,59 @@ function _restoreHeatmap() {{
   if (el) Plotly.relayout(el, {{shapes: []}});
 }}
 
-function _searchHeatmap(query) {{
+function _searchHeatmap(queries) {{
+  // queries: array of uppercase strings
   var el = document.getElementById('corr-heat');
   if (!el || !CORR_TICKERS || !CORR_TICKERS.length) return;
-  var q = query.toUpperCase();
-  var idx = -1;
-  // exact → prefix → substring
-  for (var i = 0; i < CORR_TICKERS.length; i++) {{
-    if (CORR_TICKERS[i].toUpperCase() === q) {{ idx = i; break; }}
-  }}
-  if (idx === -1) {{
-    for (var i = 0; i < CORR_TICKERS.length; i++) {{
-      if (CORR_TICKERS[i].toUpperCase().startsWith(q)) {{ idx = i; break; }}
-    }}
-  }}
-  if (idx === -1) {{
-    for (var i = 0; i < CORR_TICKERS.length; i++) {{
-      if (CORR_TICKERS[i].toUpperCase().includes(q)) {{ idx = i; break; }}
-    }}
-  }}
-  if (idx === -1) {{ _restoreHeatmap(); return; }}
 
-  // Gold column + row bands via layout shapes
-  Plotly.relayout(el, {{
-    shapes: [
-      {{ // vertical column band
-        type: 'rect', layer: 'above',
-        xref: 'x', yref: 'paper',
-        x0: idx - 0.5, x1: idx + 0.5, y0: 0, y1: 1,
-        fillcolor: 'rgba(255,215,0,0.13)',
-        line: {{color: '#FFD700', width: 1.5}},
-      }},
-      {{ // horizontal row band
-        type: 'rect', layer: 'above',
-        xref: 'paper', yref: 'y',
-        x0: 0, x1: 1, y0: idx - 0.5, y1: idx + 0.5,
-        fillcolor: 'rgba(255,215,0,0.13)',
-        line: {{color: '#FFD700', width: 1.5}},
+  var shapes = [];
+  queries.forEach(function(q) {{
+    if (!q) return;
+    var idx = -1;
+    // exact → prefix → substring
+    for (var i = 0; i < CORR_TICKERS.length; i++) {{
+      if (CORR_TICKERS[i].toUpperCase() === q) {{ idx = i; break; }}
+    }}
+    if (idx === -1) {{
+      for (var i = 0; i < CORR_TICKERS.length; i++) {{
+        if (CORR_TICKERS[i].toUpperCase().startsWith(q)) {{ idx = i; break; }}
       }}
-    ]
+    }}
+    if (idx === -1) {{
+      for (var i = 0; i < CORR_TICKERS.length; i++) {{
+        if (CORR_TICKERS[i].toUpperCase().includes(q)) {{ idx = i; break; }}
+      }}
+    }}
+    if (idx === -1) return;
+    shapes.push(
+      {{ type: 'rect', layer: 'above', xref: 'x', yref: 'paper',
+        x0: idx - 0.5, x1: idx + 0.5, y0: 0, y1: 1,
+        fillcolor: 'rgba(255,215,0,0.13)', line: {{color: '#FFD700', width: 1.5}} }},
+      {{ type: 'rect', layer: 'above', xref: 'paper', yref: 'y',
+        x0: 0, x1: 1, y0: idx - 0.5, y1: idx + 0.5,
+        fillcolor: 'rgba(255,215,0,0.13)', line: {{color: '#FFD700', width: 1.5}} }}
+    );
   }});
+
+  if (shapes.length === 0) {{ _restoreHeatmap(); return; }}
+  Plotly.relayout(el, {{shapes: shapes}});
 }}
 
 function onPlotSearch(e) {{
-  var query    = e.target.value.trim();
-  _lastPlotQuery = query;
+  var raw      = e.target.value;
+  var queries  = raw.split(',').map(function(s) {{ return s.trim().toUpperCase(); }}).filter(Boolean);
+  _lastPlotQuery = raw;
   var statusEl = document.getElementById('plot-search-status');
-  if (!query) {{
+  if (!queries.length) {{
     _restoreScatter();
     _restoreHeatmap();
     statusEl.textContent = "";
     return;
   }}
-  var res = _searchScatter(query);
-  _searchHeatmap(query);
+  var res = _searchScatter(queries);
+  _searchHeatmap(queries);
   if (res.found) {{
-    statusEl.textContent = res.ticker;
+    statusEl.textContent = res.tickers.join(', ');
     statusEl.style.color = '#FFD700';
   }} else {{
     statusEl.textContent = "not found";
@@ -1543,12 +2209,16 @@ def parse_args():
     p.add_argument("--index",      default="SPX",
                    choices=["SPX", "NDX", "DOW", "RUT", "TSX"])
     p.add_argument("--method",     default="kmeans",
-                   choices=["kmeans", "hierarchical", "dbscan"])
+                   choices=["kmeans", "hierarchical", "dbscan", "dtw"])
     p.add_argument("--n_clusters", default=0, type=int,
                    help="Number of clusters (0 = auto via silhouette scan; "
                         "ignored for DBSCAN)")
     p.add_argument("--viz",        default="tsne",
                    choices=["tsne", "umap", "pca"])
+    p.add_argument("--features",   default="",
+                   help="Comma-separated list of feature columns to use for clustering. "
+                        "Omit or leave empty to use all computed features (default). "
+                        "Example: --features mom_21d,mom_63d,vol_21d,beta")
     return p.parse_args()
 
 
@@ -1594,13 +2264,65 @@ def main():
         print("✗  Too few tickers with valid features — cannot cluster.")
         sys.exit(1)
 
+    # 3b. Fundamental features (Value / Growth lenses) — fetched only when requested
+    #     Determine whether any fundamental features are needed before fetching.
+    requested_set: set[str] | None = None
+    if args.features:
+        requested_set = {f.strip() for f in args.features.split(",") if f.strip()}
+
+    need_fundamentals = (
+        requested_set is None                          # all features → include fundamentals
+        or bool(requested_set & FUNDAMENTAL_FEATURES)  # at least one fundamental requested
+    )
+
+    if need_fundamentals:
+        fund_df = fetch_fundamentals(list(feat_df.index))
+        if not fund_df.empty:
+            # Align index then join; only keep rows present in feat_df
+            fund_df = fund_df.reindex(feat_df.index)
+            feat_df = feat_df.join(fund_df, how="left")
+            # Fill any remaining NaN introduced by the join
+            for col in fund_df.columns:
+                if col in feat_df.columns:
+                    fill_val = 0.0 if col == "div_yield" else feat_df[col].median()
+                    feat_df[col] = feat_df[col].fillna(
+                        fill_val if not (isinstance(fill_val, float) and np.isnan(fill_val)) else 0.0
+                    )
+            print(f"  Feature matrix expanded to {feat_df.shape[1]} columns "
+                  f"(+{len(fund_df.columns)} fundamental)")
+
+    # Optional feature selection — filter columns to the requested subset
+    if args.features:
+        requested = [f.strip() for f in args.features.split(",") if f.strip()]
+        available = [f for f in requested if f in feat_df.columns]
+        missing   = [f for f in requested if f not in feat_df.columns]
+        if missing:
+            print(f"  ⚠  Unknown feature(s) ignored: {missing}")
+        if not available:
+            print("✗  No valid features remain after filtering — cannot cluster.")
+            sys.exit(1)
+        if len(available) < len(feat_df.columns):
+            print(f"  Feature selection: {len(available)} / {len(feat_df.columns)} features "
+                  f"→ {available}")
+        feat_df = feat_df[available]
+
     # Re-align prices to feat_df tickers
     prices = prices[[t for t in feat_df.index if t in prices.columns]]
 
     # 4. Cluster + embed
-    embed_df, expl_var, labels, sil_scan = run_pipeline(
-        feat_df, args.method, args.n_clusters, args.viz
-    )
+    if args.method == "dtw":
+        embed_df, expl_var, labels, sil_scan, pca, feature_names, pca_scores = run_dtw_pipeline(
+            prices, args.n_clusters, args.viz
+        )
+        # DTW result_df may have fewer tickers (only those with full window)
+        # Re-align feat_df and prices to the tickers present in embed_df
+        valid_tickers = embed_df.index.tolist()
+        feat_df = feat_df.reindex(valid_tickers).dropna(how="all")
+        prices  = prices[[t for t in valid_tickers if t in prices.columns]]
+    else:
+        embed_df, expl_var, labels, sil_scan, pca, feature_names, pca_scores = run_pipeline(
+            feat_df, args.method, args.n_clusters, args.viz
+        )
 
     # Warn loudly when DBSCAN produces a high noise ratio
     if args.method == "dbscan":
@@ -1616,7 +2338,8 @@ def main():
     # 5. Build HTML
     print("  Building HTML report…")
     html = build_html(embed_df, feat_df, prices, meta, expl_var, labels, args,
-                      sil_scan=sil_scan)
+                      sil_scan=sil_scan, pca=pca, feature_names=feature_names,
+                      pca_scores=pca_scores)
 
     # 6. Save
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")

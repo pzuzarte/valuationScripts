@@ -103,7 +103,8 @@ SCRIPTS = {
                  values=["dcf", "three-stage", "monte-carlo", "pfcf", "pe", "ev-ebitda",
                          "fcf-yield", "rim", "roic", "ncav", "mean-reversion",
                          "reverse-dcf", "peg", "ev-ntm", "tam", "rule40", "erg",
-                         "scurve", "pie", "ddm", "graham", "multifactor", "bayesian", "all"]),
+                         "scurve", "pie", "ddm", "graham", "multifactor", "bayesian",
+                         "wacc", "all"]),
             dict(id="wacc",   label="WACC override",   type="entry",  flag="--wacc",
                  required=False, default=""),
             dict(id="growth", label="Growth override", type="entry",  flag="--growth",
@@ -199,7 +200,7 @@ SCRIPTS = {
     "Classifier": {
         "path": os.path.join(ROOT, "10_classifier", "classifier.py"),
         "desc": "Behavioural clustering — groups index constituents by return/risk/momentum similarity using K-Means, Hierarchical or DBSCAN, with interactive t-SNE / UMAP / PCA visualisation.",
-        "note": "💡 Set <b># Clusters</b> to <b>0</b> (default) to auto-select the optimal k via silhouette score scan (k = 2–15). Enter any other number to fix k manually. This setting is ignored for DBSCAN, which determines its own cluster count.",
+        "note": "💡 Set <b># Clusters</b> to <b>0</b> (default) to auto-select the optimal k via composite silhouette + Calinski-Harabász scan (k = 4–15). Enter any other number to fix k manually. Ignored for DBSCAN.<br><br>Use the <b>Features</b> checkboxes to select which lens drives clustering: <b>Momentum + Risk</b> (default — price-derived, fast) · <b>Value</b> (P/E, P/B, FCF Yield, etc.) · <b>Growth</b> (EPS/Revenue growth, PEG). Enabling Value or Growth features adds ~60s for fundamental data fetching.<br><br><b>DTW + Hierarchical</b> clusters stocks by raw return-series shape similarity using Dynamic Time Warping distance — captures pattern similarity with lag-tolerance that Pearson correlation misses. Feature checkboxes are ignored for DTW.",
         "icon": "🧬",
         "params": [
             dict(id="index",      label="Index",          type="option", flag="--index",
@@ -207,13 +208,60 @@ SCRIPTS = {
                  values=["SPX", "NDX", "DOW", "RUT", "TSX"]),
             dict(id="method",     label="Cluster method", type="option", flag="--method",
                  required=True,  default="kmeans",
-                 values=["kmeans", "hierarchical", "dbscan"]),
+                 values=["kmeans", "hierarchical", "dbscan", "dtw"]),
             dict(id="n_clusters", label="# Clusters",     type="entry",  flag="--n_clusters",
                  required=False, default="0",
                  hint="0 = auto (silhouette scan); ignored for DBSCAN"),
             dict(id="viz",        label="2-D embedding",  type="option", flag="--viz",
                  required=True,  default="tsne",
                  values=["tsne", "umap", "pca"]),
+            dict(id="features", label="Features", type="checkgroup", flag="--features",
+                 required=False,
+                 items=[
+                     # ── Momentum ──────────────────────────────────────────
+                     {"id": "mom_5d",      "label": "Mom 5d",      "group": "Momentum", "default": True},
+                     {"id": "mom_10d",     "label": "Mom 10d",     "group": "Momentum", "default": True},
+                     {"id": "mom_21d",     "label": "Mom 21d",     "group": "Momentum", "default": True},
+                     {"id": "mom_42d",     "label": "Mom 42d",     "group": "Momentum", "default": True},
+                     {"id": "mom_63d",     "label": "Mom 63d",     "group": "Momentum", "default": True},
+                     {"id": "mom_126d",    "label": "Mom 126d",    "group": "Momentum", "default": True},
+                     {"id": "mom_189d",    "label": "Mom 189d",    "group": "Momentum", "default": True},
+                     {"id": "mom_252d",    "label": "Mom 252d",    "group": "Momentum", "default": True},
+                     # ── Risk ──────────────────────────────────────────────
+                     {"id": "vol_21d",           "label": "Vol 21d",        "group": "Risk", "default": True},
+                     {"id": "vol_63d",           "label": "Vol 63d",        "group": "Risk", "default": True},
+                     {"id": "vol_ratio",         "label": "Vol Ratio",      "group": "Risk", "default": True},
+                     {"id": "downside_vol_21d",  "label": "Downside Vol",   "group": "Risk", "default": True},
+                     {"id": "sortino_ratio",     "label": "Sortino",        "group": "Risk", "default": True},
+                     {"id": "beta",              "label": "Beta",           "group": "Risk", "default": True},
+                     {"id": "max_dd_252d",       "label": "Max DD",         "group": "Risk", "default": True},
+                     {"id": "autocorr_21d",      "label": "Autocorr",       "group": "Risk", "default": True},
+                     {"id": "skew_126d",         "label": "Skewness",       "group": "Risk", "default": True},
+                     {"id": "kurtosis_126d",     "label": "Kurtosis",       "group": "Risk", "default": True},
+                     {"id": "trend_r2_63d",      "label": "Trend R²",       "group": "Risk", "default": True},
+                     {"id": "alpha_252d",        "label": "Alpha",          "group": "Risk", "default": True},
+                     {"id": "price_vs_52w_high", "label": "vs 52w High",    "group": "Risk", "default": True},
+                     # ── Value (fundamental — opt-in; adds ~60s fetch) ─────
+                     {"id": "pe_ratio",   "label": "P/E",          "group": "Value", "default": False},
+                     {"id": "pb_ratio",   "label": "P/B",          "group": "Value", "default": False},
+                     {"id": "ps_ratio",   "label": "P/S",          "group": "Value", "default": False},
+                     {"id": "div_yield",  "label": "Div Yield",    "group": "Value", "default": False},
+                     {"id": "fcf_yield",  "label": "FCF Yield",    "group": "Value", "default": False},
+                     {"id": "ev_ebitda",  "label": "EV/EBITDA",    "group": "Value", "default": False},
+                     {"id": "ev_sales",   "label": "EV/Sales",     "group": "Value", "default": False},
+                     # ── Growth (fundamental — opt-in; adds ~60s fetch) ────
+                     {"id": "eps_growth_1y", "label": "EPS Growth",   "group": "Growth", "default": False},
+                     {"id": "rev_growth_1y", "label": "Rev Growth",   "group": "Growth", "default": False},
+                     {"id": "peg_ratio",     "label": "PEG",          "group": "Growth", "default": False},
+                     {"id": "gross_margin",  "label": "Gross Margin", "group": "Growth", "default": False},
+                     # ── Quality (fundamental — opt-in; adds ~60s fetch) ───
+                     {"id": "roe",           "label": "ROE",           "group": "Quality", "default": False},
+                     {"id": "roa",           "label": "ROA",           "group": "Quality", "default": False},
+                     {"id": "op_margin",     "label": "Op Margin",     "group": "Quality", "default": False},
+                     {"id": "net_margin",    "label": "Net Margin",    "group": "Quality", "default": False},
+                     {"id": "debt_equity",   "label": "Debt/Equity",   "group": "Quality", "default": False},
+                     {"id": "current_ratio", "label": "Current Ratio", "group": "Quality", "default": False},
+                 ]),
         ],
     },
     "Magic Formula": {
@@ -247,6 +295,40 @@ SCRIPTS = {
                  required=False, default=True),
         ],
     },
+    "CANSLIM": {
+        "path": os.path.join(ROOT, "14_canslim", "canslim.py"),
+        "desc": "O'Neil's CANSLIM method — scores stocks on 6 factors: Current EPS growth, Annual earnings quality, Near 52w high, Supply/size, Leader relative strength, Institutional proxy. Score 100 = ideal setup.",
+        "icon": "📈",
+        "params": [
+            dict(id="index",     label="Index",          type="option", flag="--index",
+                 required=True,  default="SPX",          values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",       label="Top N",          type="entry",  flag="--top",
+                 required=False, default="",
+                 hint="Stocks to screen (default: all index members)"),
+            dict(id="min_score", label="Min CANSLIM score", type="entry", flag="--min-score",
+                 required=False, default="",
+                 hint="Only show stocks with score ≥ N (e.g. 60 for B+ and above)"),
+            dict(id="csv",       label="Export CSV",     type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
+    "Earnings Acceleration": {
+        "path": os.path.join(ROOT, "15_earningsAccel", "earningsAccel.py"),
+        "desc": "Earnings Acceleration screener — scores stocks on high-magnitude growth + margin quality: EPS growth rate (35pts), Revenue growth (30pts), Gross+Op margin (20pts), ROE/ROIC quality (15pts).",
+        "icon": "🚀",
+        "params": [
+            dict(id="index",     label="Index",          type="option", flag="--index",
+                 required=True,  default="SPX",          values=["SPX", "NDX", "RUT", "TSX"]),
+            dict(id="top",       label="Top N",          type="entry",  flag="--top",
+                 required=False, default="",
+                 hint="Stocks to screen (default: all index members)"),
+            dict(id="min_score", label="Min accel score", type="entry", flag="--min-score",
+                 required=False, default="",
+                 hint="Only show stocks with score ≥ N (e.g. 65 for A-grade)"),
+            dict(id="csv",       label="Export CSV",     type="check",  flag="--csv",
+                 required=False, default=True),
+        ],
+    },
     "Price Forecast": {
         "path": os.path.join(ROOT, "11_priceForecast", "priceForecast.py"),
         "desc": "ARIMA + ETS price forecasting with walk-forward backtest — compares model accuracy against a naive random-walk baseline and surfaces uncertainty cones over the forecast horizon.",
@@ -273,7 +355,8 @@ SCRIPTS = {
 SIDEBAR_GROUPS = [
     {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener",
-                                               "Magic Formula", "Quality Screener"]},
+                                               "Magic Formula", "Quality Screener",
+                                               "CANSLIM", "Earnings Acceleration"]},
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
@@ -1069,6 +1152,27 @@ HTML = r"""<!DOCTYPE html>
   .toggle.on  { background: var(--accent); color: #fff; }
   .toggle.off { background: var(--border); color: var(--muted); }
 
+  /* ── Checkgroup (feature selector) ── */
+  .checkgroup-wrap { display: flex; flex-direction: column; gap: 6px; }
+  .checkgroup-header { display: flex; align-items: center; gap: 8px; }
+  .checkgroup-header .cg-lbl { font-size: 11px; color: var(--muted); text-transform: uppercase;
+                                letter-spacing: .05em; }
+  .checkgroup-header button { font-size: 10px; padding: 2px 7px; border-radius: 4px;
+                               border: 1px solid var(--border); background: transparent;
+                               color: var(--muted); cursor: pointer; }
+  .checkgroup-header button:hover { color: var(--text); border-color: var(--accent); }
+  .checkgroup-grid { display: flex; flex-wrap: wrap; gap: 5px 10px; }
+  .checkgroup-item { display: flex; align-items: center; gap: 4px; white-space: nowrap;
+                     font-size: 12px; color: var(--text); cursor: pointer; }
+  .checkgroup-item input[type="checkbox"] { accent-color: var(--accent); cursor: pointer;
+                                            width: 13px; height: 13px; }
+  /* Group section headers within a checkgroup (Momentum / Risk / Value / Growth) */
+  .checkgroup-section { width: 100%; margin-top: 8px; padding-top: 6px;
+                        border-top: 1px solid var(--border);
+                        font-size: 10px; color: var(--accent);
+                        text-transform: uppercase; letter-spacing: .08em; }
+  .checkgroup-section:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+
   .file-row { display: flex; align-items: center; gap: 8px; }
   .file-row input[type="text"] { width: 280px; }
   .file-row input[type="file"] { display: none; }
@@ -1265,6 +1369,70 @@ function selectScript(name) {
       };
       group.appendChild(btn);
 
+    } else if (p.type === "checkgroup") {
+      // Override group layout: span full width, stack vertically
+      group.style.flexDirection = "column";
+      group.style.alignItems    = "flex-start";
+      group.style.width         = "100%";
+
+      const wrap = document.createElement("div");
+      wrap.className = "checkgroup-wrap";
+
+      // Header row: label + Select All / None buttons
+      const hdr = document.createElement("div");
+      hdr.className = "checkgroup-header";
+      const cgLbl = document.createElement("span");
+      cgLbl.className = "cg-lbl";
+      cgLbl.textContent = p.label;
+      const allBtn  = document.createElement("button");
+      allBtn.textContent = "Select all";
+      allBtn.onclick = (e) => {
+        e.preventDefault();
+        wrap.querySelectorAll("input[type='checkbox']").forEach(cb => cb.checked = true);
+      };
+      const noneBtn = document.createElement("button");
+      noneBtn.textContent = "Deselect all";
+      noneBtn.onclick = (e) => {
+        e.preventDefault();
+        wrap.querySelectorAll("input[type='checkbox']").forEach(cb => cb.checked = false);
+      };
+      hdr.appendChild(cgLbl);
+      hdr.appendChild(allBtn);
+      hdr.appendChild(noneBtn);
+      wrap.appendChild(hdr);
+
+      // Checkbox grid — supports optional item.group for section headers
+      const cgGrid = document.createElement("div");
+      cgGrid.className = "checkgroup-grid";
+      let _lastGroup = null;
+      (p.items || []).forEach(item => {
+        // Render a section header whenever the group label changes
+        const grp = item.group || "";
+        if (grp && grp !== _lastGroup) {
+          const sec = document.createElement("div");
+          sec.className   = "checkgroup-section";
+          sec.textContent = grp;
+          cgGrid.appendChild(sec);
+          _lastGroup = grp;
+        }
+        const itemWrap = document.createElement("label");
+        itemWrap.className = "checkgroup-item";
+        const cb = document.createElement("input");
+        cb.type    = "checkbox";
+        cb.id      = "param-" + p.id + "-" + item.id;
+        cb.checked = item.default !== false;
+        const span = document.createElement("span");
+        span.textContent = item.label;
+        itemWrap.appendChild(cb);
+        itemWrap.appendChild(span);
+        cgGrid.appendChild(itemWrap);
+      });
+      wrap.appendChild(cgGrid);
+
+      // Remove the auto-generated label (we render our own in the header)
+      if (lbl.parentNode === group) group.removeChild(lbl);
+      group.appendChild(wrap);
+
     } else if (p.type === "file") {
       const row = document.createElement("div");
       row.className = "file-row";
@@ -1326,6 +1494,14 @@ function collectParams() {
     if (p.type === "check") {
       const btn = document.getElementById("param-" + p.id);
       params[p.id] = btn ? btn.dataset.val === "1" : false;
+    } else if (p.type === "checkgroup") {
+      const checked = (p.items || [])
+        .filter(item => {
+          const cb = document.getElementById("param-" + p.id + "-" + item.id);
+          return cb ? cb.checked : item.default !== false;
+        })
+        .map(item => item.id);
+      params[p.id] = checked.join(",");
     } else {
       const el = document.getElementById("param-" + p.id);
       params[p.id] = el ? el.value : "";

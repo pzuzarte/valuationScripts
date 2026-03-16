@@ -1139,7 +1139,8 @@ def main():
         f.write(html_str)
 
     print(f"  Saved → {fpath}")
-    webbrowser.open(f"file://{fpath}")
+    if not os.environ.get("VALUATION_SUITE_LAUNCHED"):
+        webbrowser.open(f"file://{fpath}")
     print("  ✓  Done\n")
 
 

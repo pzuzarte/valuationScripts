@@ -6,6 +6,7 @@ Deep-dive multi-source sentiment analysis for a portfolio of stocks.
 
 Data sources (no API keys required):
   · News headlines     — yfinance + VADER / keyword scoring
+  · News body-level    — Finnhub news sentiment API (optional, set FINNHUB_API_KEY)
   · Social media       — Reddit public JSON API (r/wallstreetbets, r/stocks, r/investing)
   · Short interest     — yfinance (shortPercentOfFloat, shortRatio, daysTocover)
   · Institutional flow — yfinance (heldPercentInstitutions, top holders)
@@ -96,17 +97,23 @@ ROOT       = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(ROOT, "sentimentData")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-EDGAR_UA = "ValuationSuite/1.0 research@example.com"   # EDGAR requires User-Agent
+EDGAR_UA    = "ValuationSuite/1.0 research@example.com"   # EDGAR requires User-Agent
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
+# To enable Finnhub body-level news sentiment set env var FINNHUB_API_KEY=<your_key>
+# Free tier: 60 req/min — https://finnhub.io/register
 
 SIGNAL_WEIGHTS = {
     "news":          0.18,
     "social":        0.08,
     "trends":        0.07,
-    "short":         0.14,
-    "institutional": 0.09,
-    "insider":       0.18,
-    "options":       0.10,
-    "analyst":       0.16,
+    "short":         0.12,
+    "institutional": 0.08,
+    "insider":       0.16,
+    "options":       0.09,
+    "analyst":       0.14,
+    "squeeze":       0.05,   # contrarian: high short interest = latent buying pressure
+    "rel_strength":  0.08,   # price outperformance vs SPY over 20 trading days
+    "volume":        0.06,   # 10d avg vol vs 90d avg vol (accumulation/distribution)
 }
 SIGNAL_LABELS = {
     "news":          "News",
@@ -117,11 +124,15 @@ SIGNAL_LABELS = {
     "insider":       "Insider",
     "options":       "Options",
     "analyst":       "Analyst",
+    "squeeze":       "Squeeze",
+    "rel_strength":  "Rel. Str.",
+    "volume":        "Volume",
 }
 
 # Session-level caches (populated once, shared across ticker threads)
 _CIK_MAP_CACHE:   dict = {}
 _CONGRESS_CACHE:  dict = {}
+_SPY_CACHE:       dict = {}   # keyed by date string; holds SPY Close pd.Series
 
 # ── Formatting helpers ─────────────────────────────────────────────────────────
 def days_ago(n: int) -> str:
@@ -198,11 +209,11 @@ _HELP_DATA = {
         "title": "Composite Sentiment Score",
         "body": (
             "<b>What it is:</b> A weighted average of all available signal scores, "
-            "ranging from −1 (strongly bearish) to +1 (strongly bullish).<br><br>"
+            "displayed on a 0–100 scale where 50 = Neutral, 0 = most bearish, 100 = most bullish.<br><br>"
             "<b>Weights:</b> News 18% · Insider 18% · Analyst 16% · Short Interest 14% · "
             "Options 10% · Institutional 9% · Social/Reddit 8% · Trends 7%.<br><br>"
-            "<b>How to read it:</b> ≥+0.30 = Bullish · +0.10 to +0.30 = Slightly Bullish · "
-            "−0.10 to +0.10 = Neutral · −0.10 to −0.30 = Slightly Bearish · ≤−0.30 = Bearish.<br><br>"
+            "<b>How to read it:</b> ≥65 = Bullish · 55–65 = Slightly Bullish · "
+            "45–55 = Neutral · 35–45 = Slightly Bearish · ≤35 = Bearish.<br><br>"
             "<b>Note:</b> Only signals with available data contribute. "
             "A composite built on 3 signals is less reliable than one built on 7."
         ),
@@ -252,12 +263,16 @@ _HELP_DATA = {
     "recent-news": {
         "title": "Recent News",
         "body": (
-            "<b>Source:</b> yfinance news feed (Yahoo Finance), filtered to your lookback window.<br><br>"
-            "<b>Sentiment score:</b> Each headline is scored −1 to +1 using VADER sentiment analysis "
-            "(or keyword fallback). The coloured dot shows polarity.<br><br>"
-            "<b>Limitations:</b> Scored on headline only — not the full article. "
-            "Clickbait and sarcasm can mislead the scorer. "
-            "Always read the article for material events (earnings, lawsuits, FDA approvals)."
+            "<b>Sources:</b> yfinance news feed (Yahoo Finance) + Finnhub body-level NLP (if API key set).<br><br>"
+            "<b>Gauges:</b> When both sources are active, two semi-circle gauges appear side by side — "
+            "left = VADER headline score, right = Finnhub body-level score. "
+            "The blended score (60% Finnhub + 40% VADER) feeds the composite.<br><br>"
+            "<b>VADER score:</b> Each headline is scored −1 to +1. "
+            "Clickbait and sarcasm can mislead the scorer.<br><br>"
+            "<b>Finnhub score:</b> Body-level NLP on full article text — more accurate and less prone to "
+            "headline bias. Also shows bullish/bearish breakdown and buzz (articles/week vs weekly average).<br><br>"
+            "<b>Enable Finnhub:</b> Set the <code>FINNHUB_API_KEY</code> environment variable. "
+            "Free tier: 60 req/min at finnhub.io/register."
         ),
     },
     "reddit-sentiment": {
@@ -355,6 +370,52 @@ _HELP_DATA = {
             "High short float + high DTC + positive catalyst = classic squeeze setup.<br><br>"
             "<b>Caveat:</b> High short interest can also mean smart money is right about the stock. "
             "Cross-reference with fundamentals and insider signals."
+        ),
+    },
+    "squeeze-signal": {
+        "title": "Squeeze Signal (Composite Score → Sentiment)",
+        "body": (
+            "<b>What it is:</b> The 0–100 squeeze score converted to a sentiment signal (0 → +1). "
+            "High short interest + high days-to-cover = large pool of forced buyers if price rises.<br><br>"
+            "<b>Why it's bullish:</b> Every short seller must eventually buy back. When a positive catalyst "
+            "arrives, shorts scramble to cover, creating a self-reinforcing price surge.<br><br>"
+            "<b>Threshold:</b> Scores below 15/100 return no signal (insufficient short fuel). "
+            "Scores above 80/100 approach the maximum bullish signal (+1.0).<br><br>"
+            "<b>Note:</b> The raw squeeze score table appears in the Signals tab. "
+            "This is the same data expressed on the −1..+1 sentiment scale used for the composite."
+        ),
+    },
+    "rel-strength": {
+        "title": "Relative Strength vs SPY (20-Day)",
+        "body": (
+            "<b>Formula:</b> Ticker 20-day return − SPY 20-day return<br><br>"
+            "<b>Signal:</b> Stocks outperforming the market attract institutional attention "
+            "and often continue to outperform (momentum effect). "
+            "Underperformers reflect sector rotation or deteriorating fundamentals.<br><br>"
+            "<b>Scale:</b> +10% alpha → +1.0 (max bullish) · −10% alpha → −1.0 (max bearish)<br><br>"
+            "<b>Limitation:</b> Momentum can reverse sharply. Best used alongside fundamental signals, "
+            "not as a standalone buy/sell signal."
+        ),
+    },
+    "volume-trend": {
+        "title": "Volume Trend (Accumulation / Distribution)",
+        "body": (
+            "<b>Formula:</b> 10-day avg volume ÷ 90-day avg volume<br><br>"
+            "<b>Signal:</b> Rising volume = growing participation. "
+            "Combined with price strength = institutional accumulation. "
+            "Falling volume = waning interest, potential distribution.<br><br>"
+            "<b>Scale:</b> Ratio 1.5× → +1.0 · 1.0× → 0.0 (neutral) · 0.5× → −1.0<br><br>"
+            "<b>Source:</b> yfinance info: averageVolume10Day (10d) and averageVolume (90d avg)."
+        ),
+    },
+    "price-momentum-section": {
+        "title": "Price Momentum & Volume Trend",
+        "body": (
+            "<b>Relative Strength:</b> Ticker's 20-day return minus SPY's 20-day return over the same window. "
+            "Positive = outperforming the market. Fetched via yfinance history (65-day window).<br><br>"
+            "<b>Volume Trend:</b> 10-day average volume divided by 90-day average volume. "
+            ">1.2 = accumulation (institutions buying). <0.8 = distribution (selling pressure).<br><br>"
+            "<b>Both signals feed into the composite score</b> with weights of 8% (RS) and 6% (Volume)."
         ),
     },
     "congressional-trading": {
@@ -565,18 +626,33 @@ def _load_congress_data() -> dict:
     if _CONGRESS_CACHE:
         return _CONGRESS_CACHE
     result = {"house": [], "senate": []}
-    house = _get(
-        "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
-        timeout=25,
-    )
-    if isinstance(house, list):
-        result["house"] = house
-    senate = _get(
-        "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
-        timeout=25,
-    )
-    if isinstance(senate, list):
-        result["senate"] = senate
+
+    def _fetch_house():
+        data = _get(
+            "https://house-stock-watcher-data.s3-us-west-2.amazonaws.com/data/all_transactions.json",
+            timeout=8,   # reduced from 25s — skip rather than block startup
+        )
+        if isinstance(data, list):
+            result["house"] = data
+
+    def _fetch_senate():
+        data = _get(
+            "https://senate-stock-watcher-data.s3-us-west-2.amazonaws.com/aggregate/all_transactions.json",
+            timeout=8,   # reduced from 25s
+        )
+        if isinstance(data, list):
+            result["senate"] = data
+
+    # Fetch both chambers in parallel with a hard 12s wall-clock cap so a slow
+    # or down S3 endpoint never blocks startup for more than 12 seconds total.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(_fetch_house), pool.submit(_fetch_senate)]
+        for f in as_completed(futures, timeout=12):
+            try:
+                f.result()
+            except Exception:
+                pass
+
     _CONGRESS_CACHE = result
     return result
 
@@ -648,12 +724,13 @@ def fetch_sec_filings(cik: str, form_type: str = "8-K",
 def fetch_google_trends(ticker: str, company_name: str = "") -> dict:
     """Fetch 3-month Google Trends interest for ticker stock search term."""
     empty = {"interest_now": None, "interest_avg": None,
-             "trend_slope": None, "series": [], "kw": ""}
+             "trend_slope": None, "series": [], "kw": "", "blocked": False}
     if not PYTRENDS_AVAILABLE:
         return empty
-    try:
+
+    def _do_fetch():
         kw = ticker + " stock"
-        pt = TrendReq(hl="en-US", tz=360, timeout=(10, 25))
+        pt = TrendReq(hl="en-US", tz=360, timeout=(5, 8))
         pt.build_payload([kw], cat=7, timeframe="today 3-m", geo="US")
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning, module="pytrends")
@@ -675,6 +752,57 @@ def fetch_google_trends(ticker: str, company_name: str = "") -> dict:
             "trend_slope": trend_slope,
             "series": last12,
             "kw": kw,
+            "blocked": False,
+        }
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_do_fetch)
+            try:
+                return fut.result(timeout=12)
+            except TimeoutError:
+                return {**empty, "blocked": False}
+    except Exception as exc:
+        # 429 means Google is rate-limiting pytrends (automated requests blocked)
+        blocked = "429" in str(exc) or "TooManyRequests" in type(exc).__name__
+        return {**empty, "blocked": blocked}
+
+
+# ── Finnhub news sentiment ─────────────────────────────────────────────────────
+def fetch_finnhub_sentiment(ticker: str) -> dict:
+    """Fetch Finnhub company news sentiment (body-level NLP).
+    Returns empty dict with available=False if key not set or request fails.
+    companyNewsScore is 0–1 (higher = more positive).
+    buzz.buzz is articles-this-week / weekly-average.
+    """
+    empty = {"available": False}
+    if not FINNHUB_KEY or not _REQUESTS_AVAILABLE:
+        return empty
+    try:
+        url = (f"https://finnhub.io/api/v1/news-sentiment"
+               f"?symbol={ticker}&token={FINNHUB_KEY}")
+        import requests as _req
+        resp = _req.get(url, timeout=8)
+        if resp.status_code != 200:
+            return empty
+        data = resp.json()
+        if not data or "sentiment" not in data:
+            return empty
+        sentiment = data.get("sentiment", {})
+        buzz      = data.get("buzz", {})
+        raw_score = data.get("companyNewsScore", 0.5)
+        # Convert 0–1 scale to −1…+1
+        normalized = round((raw_score - 0.5) * 2, 3)
+        return {
+            "available":      True,
+            "score":          normalized,            # −1…+1
+            "raw_score":      raw_score,             # 0–1 as returned by Finnhub
+            "bullish_pct":    sentiment.get("bullishPercent", 0),
+            "bearish_pct":    sentiment.get("bearishPercent", 0),
+            "buzz_score":     buzz.get("buzz", 0),
+            "articles_week":  int(buzz.get("articlesInLastWeek", 0)),
+            "weekly_avg":     buzz.get("weeklyAverage", 0),
+            "sector_avg_bull": data.get("sectorAverageBullishPercent", 0),
         }
     except Exception:
         return empty
@@ -797,30 +925,39 @@ def fetch_reddit_sentiment(ticker: str, days: int = 30) -> dict:
         data = None
         headers = {"User-Agent": _REDDIT_UA, "Accept": "application/json"}
         for attempt in range(3):          # up to 3 attempts with backoff
-            with _REDDIT_LOCK:            # serialise all Reddit calls across threads
+            is_429   = False
+            got_data = False
+            # Hold the lock only for the actual HTTP request — NEVER sleep inside it,
+            # because sleeping inside the lock blocks every other thread for the full
+            # backoff duration (4s/8s/12s × N threads = minutes of deadlock).
+            with _REDDIT_LOCK:
                 try:
                     if _REQUESTS_AVAILABLE:
                         resp = _requests.get(url, headers=headers, timeout=12)
                         if resp.status_code == 429:
-                            wait = 4 * (attempt + 1)  # 4s, 8s, 12s
-                            time.sleep(wait)
-                            continue
-                        resp.raise_for_status()
-                        data = resp.json()
+                            is_429 = True
+                        else:
+                            resp.raise_for_status()
+                            data     = resp.json()
+                            got_data = True
                     else:
                         req = Request(url, headers=headers)
                         with urlopen(req, timeout=12) as r:
-                            data = json.loads(r.read().decode("utf-8", errors="replace"))
-                    time.sleep(_REDDIT_DELAY)
-                    break
+                            data     = json.loads(r.read().decode("utf-8", errors="replace"))
+                            got_data = True
                 except Exception as e:
                     code = getattr(e, "code", None) or getattr(getattr(e, "response", None), "status_code", None)
                     if code == 429:
-                        wait = 4 * (attempt + 1)
-                        time.sleep(wait)
-                    else:
-                        time.sleep(_REDDIT_DELAY)
-                        break                       # non-429 error — skip this sub
+                        is_429 = True
+            # All sleeps happen OUTSIDE the lock so other threads are not blocked
+            if got_data:
+                time.sleep(_REDDIT_DELAY)
+                break
+            elif is_429:
+                time.sleep(4 * (attempt + 1))   # backoff: 4s, 8s, 12s
+            else:
+                time.sleep(_REDDIT_DELAY)
+                break                           # non-429 error — skip this sub
         if not data:
             continue
         posts = (data.get("data") or {}).get("children") or []
@@ -984,6 +1121,9 @@ def fetch_yf(ticker: str, days: int = 30) -> dict:
                         "insider":     str(row.get("Insider", row.get("insider", ""))),
                         "position":    str(row.get("Position", row.get("position", ""))),
                         "transaction": str(row.get("Transaction", row.get("transaction", ""))),
+                        # yfinance moved the type description to the "Text" column in newer versions
+                        # (e.g. "Sale at price 182.47 per share.") — capture it as fallback
+                        "text":        str(row.get("Text", row.get("text", ""))),
                         "shares":      shares,
                         "value":       val,
                         "date":        date_str,
@@ -1311,6 +1451,45 @@ def fetch_yf(ticker: str, days: int = 30) -> dict:
         except Exception:
             pass
 
+        # ── Price momentum: 20-day relative strength vs SPY + volume trend ───────
+        result["price_momentum"] = {
+            "ticker_ret_20d": None, "spy_ret_20d": None,
+            "rs_20d": None,         # ticker - spy excess return
+            "vol_10d": None, "vol_90d": None, "vol_ratio": None,
+        }
+        try:
+            hist = tk.history(period="65d")
+            if hist is not None and not hist.empty and len(hist) >= 21:
+                closes = hist["Close"].dropna()
+                if len(closes) >= 21:
+                    ticker_ret = (float(closes.iloc[-1]) - float(closes.iloc[-21])) / float(closes.iloc[-21])
+                    result["price_momentum"]["ticker_ret_20d"] = round(ticker_ret * 100, 2)
+
+                    # SPY reference — fetch once per session date and cache
+                    today_str = str(datetime.date.today())
+                    if today_str not in _SPY_CACHE:
+                        spy_hist = yf.Ticker("SPY").history(period="65d")
+                        if spy_hist is not None and not spy_hist.empty:
+                            _SPY_CACHE[today_str] = spy_hist["Close"].dropna()
+                    spy_closes = _SPY_CACHE.get(today_str)
+                    if spy_closes is not None and len(spy_closes) >= 21:
+                        spy_ret = (float(spy_closes.iloc[-1]) - float(spy_closes.iloc[-21])) / float(spy_closes.iloc[-21])
+                        result["price_momentum"]["spy_ret_20d"] = round(spy_ret * 100, 2)
+                        rs = ticker_ret - spy_ret
+                        result["price_momentum"]["rs_20d"] = round(rs * 100, 2)
+        except Exception:
+            pass
+
+        try:
+            vol_10d = info.get("averageVolume10Day")
+            vol_90d = info.get("averageVolume")
+            if vol_10d and vol_90d and vol_90d > 0:
+                result["price_momentum"]["vol_10d"]   = int(vol_10d)
+                result["price_momentum"]["vol_90d"]   = int(vol_90d)
+                result["price_momentum"]["vol_ratio"] = round(vol_10d / vol_90d, 3)
+        except Exception:
+            pass
+
         # ── EPS estimate revision direction ────────────────────────────────────
         try:
             eps_trend_df = tk.eps_trend
@@ -1370,12 +1549,43 @@ def score_institutional(info: dict):
     # Formula: (pct - 0.65) / 0.25  → neutral at 65%, full bull at 90%, full bear at 40%.
     return round(max(-1.0, min(1.0, (float(pct) - 0.65) / 0.25)), 3)
 
+def score_squeeze_signal(info: dict):
+    """Contrarian bullish signal: high short interest = latent buying pressure.
+    Maps compute_squeeze 0-100 → 0..+1 (no negative: low squeeze is simply neutral).
+    Threshold at 15 to filter noise; 85 → +1.0 max."""
+    sq = compute_squeeze(info)
+    raw = sq.get("score", 0) or 0
+    if raw < 15:
+        return None
+    return round(min(1.0, (raw - 15) / 70), 3)
+
+
+def score_volume_trend(pm_data: dict):
+    """Accumulation/distribution signal from 10d vs 90d average volume.
+    Ratio 1.0 = neutral; 1.5 → +1.0; 0.5 → -1.0."""
+    ratio = pm_data.get("vol_ratio")
+    if ratio is None:
+        return None
+    return round(max(-1.0, min(1.0, (ratio - 1.0) / 0.5)), 3)
+
+
+def score_rel_strength(pm_data: dict):
+    """Price outperformance vs SPY over 20 trading days.
+    +10% alpha → +1.0; -10% alpha → -1.0."""
+    rs = pm_data.get("rs_20d")
+    if rs is None:
+        return None
+    return round(max(-1.0, min(1.0, rs / 10.0)), 3)
+
+
 def score_insider(txns: list):
     if not txns:
         return None
     buy_w = sell_w = 0
     for t in txns:
-        tx     = str(t.get("transaction", "")).lower()
+        # "Transaction" column is empty in newer yfinance — fall back to "Text"
+        # which contains descriptions like "Sale at price 182.47 per share."
+        tx     = str(t.get("transaction") or t.get("text") or "").lower()
         shares = abs(t.get("shares", 0) or 0)
         val    = abs(t.get("value", 0) or 0)
         weight = max(val, shares * 1)
@@ -1469,12 +1679,27 @@ def analyze_ticker(ticker: str, days: int, cik: str) -> dict:
     info = yf_data["info"]
 
     # Google Trends and Wikipedia (require company name from info)
-    long_name = info.get("longName", "")
-    gt_data   = fetch_google_trends(ticker, long_name)
-    wiki_data = fetch_wikipedia_views(long_name, ticker, days)
+    long_name    = info.get("longName", "")
+    gt_data      = fetch_google_trends(ticker, long_name)
+    wiki_data    = fetch_wikipedia_views(long_name, ticker, days)
+    finnhub_data = fetch_finnhub_sentiment(ticker)
 
+    # Blend yfinance VADER score with Finnhub body-level score
+    # If Finnhub is available: 40% VADER headlines + 60% Finnhub body NLP
+    # If not: fall back to VADER only
+    vader_score = score_news(yf_data["news"])
+    if finnhub_data.get("available") and finnhub_data.get("score") is not None:
+        fh_score = finnhub_data["score"]
+        if vader_score is not None:
+            blended_news = round(0.4 * vader_score + 0.6 * fh_score, 3)
+        else:
+            blended_news = fh_score
+    else:
+        blended_news = vader_score
+
+    pm_data = yf_data.get("price_momentum", {})
     scores = {
-        "news":          score_news(yf_data["news"]),
+        "news":          blended_news,
         "social":        score_social(reddit_data),
         "trends":        score_trends(gt_data, wiki_data),
         "short":         score_short(info),
@@ -1482,6 +1707,9 @@ def analyze_ticker(ticker: str, days: int, cik: str) -> dict:
         "insider":       score_insider(yf_data["insider_txns"]),
         "options":       score_options(yf_data["options"]),
         "analyst":       score_analyst(yf_data["rec_summary"]),
+        "squeeze":       score_squeeze_signal(info),
+        "rel_strength":  score_rel_strength(pm_data),
+        "volume":        score_volume_trend(pm_data),
     }
     comp = composite_score(scores)
 
@@ -1519,7 +1747,9 @@ def analyze_ticker(ticker: str, days: int, cik: str) -> dict:
         "sec_13f":         sec_13f,
         "gt":              gt_data,
         "wiki":            wiki_data,
+        "finnhub":         finnhub_data,
         "squeeze":         compute_squeeze(info),
+        "price_momentum":  pm_data,
         "news_velocity":   yf_data.get("news_velocity", {}),
         "polarization":    polarization,
         "signal_agreement": signal_agreement,
@@ -1794,6 +2024,63 @@ def _tab_overview(all_data: dict) -> str:
     return h
 
 
+def _news_gauge_svg(score, width=180) -> str:
+    """SVG semi-circle gauge for a sentiment score in the range −1…+1."""
+    import math
+    score = max(-1.0, min(1.0, score if score is not None else 0.0))
+
+    if   score >= 0.3:   col = "#00c896"
+    elif score >= 0.1:   col = "#68d391"
+    elif score > -0.1:   col = "#f0a500"
+    elif score > -0.3:   col = "#fc8181"
+    else:                col = "#e05c5c"
+
+    if   score >= 0.3:   lbl = "Bullish"
+    elif score >= 0.1:   lbl = "Slightly Bullish"
+    elif score > -0.1:   lbl = "Neutral"
+    elif score > -0.3:   lbl = "Slightly Bearish"
+    else:                lbl = "Bearish"
+
+    cx, cy, r = 100, 100, 72
+    # θ measured from +x axis: score=+1 → 0°, score=0 → 90°, score=−1 → 180°
+    theta = (1.0 - score) * math.pi / 2
+    ex = round(cx + r * math.cos(theta), 1)
+    ey = round(cy - r * math.sin(theta), 1)
+
+    # Needle
+    nr = r * 0.80
+    nx = round(cx + nr * math.cos(theta), 1)
+    ny = round(cy - nr * math.sin(theta), 1)
+
+    # Background arc: left (cx-r, cy) → right (cx+r, cy) through top, sweep=1
+    bg  = f"M {cx-r} {cy} A {r} {r} 0 0 1 {cx+r} {cy}"
+
+    # Colored arc: left → needle, sweep=1 (clockwise in screen = through top)
+    # Degenerate when score ≈ −1 (start = end); skip colored arc
+    if score <= -0.97:
+        col_arc = ""
+    elif score >= 0.97:
+        # Full semicircle — same endpoints as bg but colored
+        col_arc = f'<path d="M {cx-r} {cy} A {r} {r} 0 0 1 {cx+r} {cy}" fill="none" stroke="{col}" stroke-width="12" stroke-linecap="round"/>'
+    else:
+        col_arc = f'<path d="M {cx-r} {cy} A {r} {r} 0 0 1 {ex} {ey}" fill="none" stroke="{col}" stroke-width="12" stroke-linecap="round"/>'
+
+    sc_str = f"{score:+.2f}"
+    h = width
+    return (
+        f'<svg viewBox="0 0 200 125" width="{width}" height="{int(width*125/200)}" style="display:block;margin:0 auto 2px">'
+        f'<path d="{bg}" fill="none" stroke="#252a3a" stroke-width="12" stroke-linecap="round"/>'
+        f'{col_arc}'
+        f'<line x1="{cx}" y1="{cy}" x2="{nx}" y2="{ny}" stroke="#e8eaf2" stroke-width="2.5" stroke-linecap="round"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="4" fill="#e8eaf2"/>'
+        f'<text x="{cx}" y="{cy-18}" fill="{col}" font-size="17" text-anchor="middle" font-weight="bold" font-family="system-ui,sans-serif">{sc_str}</text>'
+        f'<text x="{cx-r+4}" y="118" fill="#6b7194" font-size="9" text-anchor="middle" font-family="system-ui,sans-serif">Bearish</text>'
+        f'<text x="{cx+r-4}" y="118" fill="#6b7194" font-size="9" text-anchor="middle" font-family="system-ui,sans-serif">Bullish</text>'
+        f'<text x="{cx}" y="118" fill="{col}" font-size="9" text-anchor="middle" font-family="system-ui,sans-serif">{lbl}</text>'
+        f'</svg>'
+    )
+
+
 def _tab_news_social(all_data: dict) -> str:
     h = ""
     for ticker, d in all_data.items():
@@ -1802,7 +2089,59 @@ def _tab_news_social(all_data: dict) -> str:
 
         # News column
         h += f'<div class="card"><div class="card-title">Recent News {help_btn("recent-news")}</div>'
-        news = d.get("news", [])
+
+        # ── Sentiment gauges ────────────────────────────────────────────────────
+        fh       = d.get("finnhub", {})
+        news     = d.get("news", [])
+        vader_sc = (sum(n["score"] for n in news) / len(news)) if news else None
+        fh_sc    = fh.get("score") if fh.get("available") else None
+        scores_d = d.get("scores", {})
+        blended  = scores_d.get("news")
+
+        if fh.get("available"):
+            # Two gauges side-by-side: VADER headline vs Finnhub body-level
+            h += ('<div style="display:flex;gap:8px;justify-content:center;'
+                  'align-items:flex-start;margin-bottom:12px;flex-wrap:wrap">')
+            h += '<div style="text-align:center">'
+            h += f'<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Yahoo Headlines (VADER)</div>'
+            h += _news_gauge_svg(vader_sc, width=155)
+            h += '</div>'
+            h += '<div style="text-align:center">'
+            h += f'<div style="font-size:10px;color:var(--muted);margin-bottom:4px">Finnhub Body-Level NLP</div>'
+            h += _news_gauge_svg(fh_sc, width=155)
+            h += '</div>'
+            h += '</div>'
+            # Finnhub buzz / breakdown strip
+            bull_pct = round(fh.get("bullish_pct", 0) * 100, 1)
+            bear_pct = round(fh.get("bearish_pct", 0) * 100, 1)
+            neut_pct = max(0.0, round(100 - bull_pct - bear_pct, 1))
+            art_wk   = fh.get("articles_week", 0)
+            bz       = fh.get("buzz_score", 0)
+            bz_col   = "#00c896" if bz > 1.2 else "#f0a500" if bz > 0.8 else "#6b7194"
+            sect_b   = round(fh.get("sector_avg_bull", 0) * 100, 1)
+            h += ('<div style="display:flex;gap:18px;flex-wrap:wrap;'
+                  'font-size:11px;color:var(--muted);margin-bottom:10px;'
+                  'padding:8px 10px;background:var(--surface);border-radius:6px">')
+            h += (f'<span><span style="color:#00c896">▲ {bull_pct}%</span> Bullish</span>'
+                  f'<span><span style="color:#e05c5c">▼ {bear_pct}%</span> Bearish</span>'
+                  f'<span><span style="color:#6b7194">◆ {neut_pct}%</span> Neutral</span>'
+                  f'<span style="margin-left:auto">'
+                  f'Buzz: <span style="color:{bz_col}">{bz:.2f}x</span> &nbsp;·&nbsp; '
+                  f'{art_wk} articles/wk &nbsp;·&nbsp; '
+                  f'Sector avg bullish: {sect_b}%</span>')
+            h += '</div>'
+        elif vader_sc is not None:
+            # Finnhub not configured — single VADER gauge
+            h += ('<div style="text-align:center;margin-bottom:12px">'
+                  '<div style="font-size:10px;color:var(--muted);margin-bottom:4px">'
+                  'Headline Sentiment (VADER)</div>')
+            h += _news_gauge_svg(vader_sc, width=180)
+            if not FINNHUB_KEY:
+                h += ('<p style="font-size:10px;color:var(--muted);text-align:center;margin-top:4px">'
+                      'Set <code>FINNHUB_API_KEY</code> env var for body-level NLP</p>')
+            h += '</div>'
+
+        # ── Article list ────────────────────────────────────────────────────────
         if news:
             h += '<ul class="news-list">'
             for n in news[:12]:
@@ -1915,8 +2254,12 @@ def _tab_news_social(all_data: dict) -> str:
         h += f'<div class="card"><div class="card-title">Google Trends {help_btn("google-trends")}</div>'
         if not PYTRENDS_AVAILABLE:
             h += '<p class="note">Install pytrends for Google Trends data: pip install pytrends</p>'
+        elif gt.get("blocked"):
+            h += ('<p class="note muted">Google is rate-limiting automated requests (HTTP 429). '
+                  'pytrends requires real browser cookies to bypass Google\'s block — '
+                  'this is a known limitation of the unofficial API.</p>')
         elif gt.get("trend_slope") is None:
-            h += '<p class="note muted">No Google Trends data available for this ticker.</p>'
+            h += '<p class="note muted">No Google Trends data returned for this ticker.</p>'
         else:
             gt_slope_val  = gt["trend_slope"]
             gt_now_val    = gt.get("interest_now")
@@ -2071,7 +2414,9 @@ def _tab_smart_money(all_data: dict) -> str:
         sc   = d["scores"].get("insider")
         for t in txns:
             any_insider = True
-            tx_lower = str(t.get("transaction", "")).lower()
+            # Use "text" as fallback when "transaction" is blank (newer yfinance)
+            tx_display = t.get("transaction") or t.get("text") or ""
+            tx_lower   = tx_display.lower()
             if "sale" in tx_lower or "sell" in tx_lower:
                 tc = "#e05c5c"
             elif "purchase" in tx_lower or "buy" in tx_lower or "acqui" in tx_lower:
@@ -2082,7 +2427,7 @@ def _tab_smart_money(all_data: dict) -> str:
                   f'<td>{sentiment_badge(sc)}</td>'
                   f'<td>{t.get("insider", "")}</td>'
                   f'<td class="muted">{t.get("position", "")}</td>'
-                  f'<td style="color:{tc};font-weight:600">{t.get("transaction", "")}</td>'
+                  f'<td style="color:{tc};font-weight:600">{tx_display}</td>'
                   f'<td class="num">{t.get("shares", "—"):,}</td>'
                   f'<td class="num">{fmt_money(t.get("value"))}</td>'
                   f'<td class="muted">{t.get("date", "")}</td></tr>')
@@ -2113,6 +2458,72 @@ def _tab_smart_money(all_data: dict) -> str:
               f'<td class="num">{dtc_str}</td>'
               f'<td class="num" style="font-weight:700">{sq_sc_str}</td>'
               f'<td style="color:{lv_color};font-weight:700">{sq_lv}</td></tr>')
+    h += '</tbody></table></div></div>'
+
+    # ── Price Momentum & Volume Trend ──────────────────────────────────────────
+    h += f'<div class="sec-hdr">Price Momentum &amp; Volume Trend {help_btn("price-momentum-section")}</div>'
+    h += '<div class="card"><div class="tbl-wrap"><table>'
+    h += ('<thead><tr>'
+          '<th>Ticker</th>'
+          '<th>20d Return</th>'
+          '<th>SPY 20d</th>'
+          '<th>Alpha vs SPY</th>'
+          '<th>RS Signal</th>'
+          '<th>Vol 10d Avg</th>'
+          '<th>Vol 90d Avg</th>'
+          '<th>Vol Ratio</th>'
+          '<th>Vol Signal</th>'
+          '</tr></thead><tbody>')
+    for ticker, d in all_data.items():
+        pm   = d.get("price_momentum", {})
+        tr   = pm.get("ticker_ret_20d")
+        sr   = pm.get("spy_ret_20d")
+        rs   = pm.get("rs_20d")
+        vr   = pm.get("vol_ratio")
+        v10  = pm.get("vol_10d")
+        v90  = pm.get("vol_90d")
+        rs_sc = d["scores"].get("rel_strength")
+        vl_sc = d["scores"].get("volume")
+
+        def _pct_cell(v, invert=False):
+            if v is None:
+                return '<span class="muted">—</span>'
+            c = "#00c896" if (v > 0) != invert else ("#e05c5c" if v < 0 else "#f0a500")
+            return f'<span style="color:{c};font-weight:600">{v:+.1f}%</span>'
+
+        def _sig_cell(sc):
+            if sc is None:
+                return '<span class="muted">—</span>'
+            c = sentiment_color(sc)
+            return f'<span style="color:{c};font-weight:700">{sc:+.2f}</span>'
+
+        def _vol_fmt(v):
+            if v is None:
+                return '<span class="muted">—</span>'
+            if v >= 1_000_000:
+                return f'{v/1_000_000:.1f}M'
+            if v >= 1_000:
+                return f'{v/1_000:.0f}K'
+            return str(v)
+
+        vr_str = '<span class="muted">—</span>'
+        if vr is not None:
+            vc = "#00c896" if vr >= 1.2 else ("#e05c5c" if vr <= 0.8 else "#f0a500")
+            lbl = "Accum." if vr >= 1.2 else ("Distrib." if vr <= 0.8 else "Neutral")
+            vr_str = (f'<span style="color:{vc};font-weight:600">{vr:.2f}×</span>'
+                      f'<span class="muted" style="font-size:10px;margin-left:4px">{lbl}</span>')
+
+        h += (f'<tr>'
+              f'<td class="ticker-cell">{ticker}</td>'
+              f'<td class="num">{_pct_cell(tr)}</td>'
+              f'<td class="num">{_pct_cell(sr)}</td>'
+              f'<td class="num">{_pct_cell(rs)}</td>'
+              f'<td class="num">{_sig_cell(rs_sc)}</td>'
+              f'<td class="num">{_vol_fmt(v10)}</td>'
+              f'<td class="num">{_vol_fmt(v90)}</td>'
+              f'<td class="num">{vr_str}</td>'
+              f'<td class="num">{_sig_cell(vl_sc)}</td>'
+              f'</tr>')
     h += '</tbody></table></div></div>'
 
     # ── Congressional Trading ───────────────────────────────────────────────────
@@ -2612,7 +3023,8 @@ def _tab_sec_filings(all_data: dict) -> str:
     h += '<div class="card" style="margin-top:8px">'
     h += '<div class="card-title">About the Data Sources</div>'
     rows = [
-        ("News Sentiment",    "yfinance news feed + VADER lexicon (or keyword fallback)"),
+        ("News Sentiment",    "yfinance headlines + VADER; blended with Finnhub body-level NLP when FINNHUB_API_KEY is set (60/40 weight)"),
+        ("Finnhub Sentiment", "Finnhub /news-sentiment — full-article NLP, bullish/bearish %, buzz score (optional — free tier 60 req/min)"),
         ("News Velocity",     "7d vs prior 7d article count ratio — computed from yfinance news timestamps"),
         ("Social Media",      "Reddit public JSON API — r/wallstreetbets, r/stocks, r/investing (no auth required)"),
         ("Google Trends",     "pytrends (optional) — Finance category, US, 3-month window, weekly data"),
@@ -2628,6 +3040,12 @@ def _tab_sec_filings(all_data: dict) -> str:
         ("Congressional",     "House & Senate STOCK Act disclosures via house-stock-watcher.com"),
         ("Bond/Credit",       "Direct bond pricing requires paid APIs (Bloomberg, FINRA TRACE). "
                               "Proxy metrics shown: debtToEquity, currentRatio, creditRating (yfinance)."),
+        ("Short Squeeze",     "Composite 0–100 score: short % of float (60%) + days-to-cover (40%) via yfinance info. "
+                              "Mapped to sentiment signal 0 → +1.0 (contrarian bullish; threshold at 15/100)."),
+        ("Relative Strength", "Ticker 20-day return minus SPY 20-day return — fetched via yfinance history(period='65d'). "
+                              "SPY data cached per-session. ±10% alpha maps to ±1.0 signal."),
+        ("Volume Trend",      "10-day avg volume ÷ 90-day avg volume via yfinance info (averageVolume10Day / averageVolume). "
+                              "Ratio 1.5× → +1.0 · 1.0× neutral · 0.5× → −1.0."),
     ]
     h += '<table style="font-size:12px"><tbody>'
     for src, desc in rows:

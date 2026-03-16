@@ -585,6 +585,12 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
     unranked = [r for r in results if r.get("mf_rank") is None]
     n = len(ranked)
 
+    all_sectors = sorted({r.get("sector", "") for r in results if r.get("sector")})
+    sector_btns = "".join(
+        f'<button class="sbtn" onclick="setSector({repr(s)}, this)">{s}</button>'
+        for s in all_sectors
+    )
+
     rows_html = []
     for r in results:
         is_ranked  = r.get("mf_rank") is not None
@@ -622,8 +628,9 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
                       if is_ranked else '<td style="color:#4a4f6a">—</td>')
         grade_td   = f'<td><span style="background:{gc}20;color:{gc};padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600">{grade}</span></td>'
 
+        sec_safe = r.get("sector", "").replace("'", "")
         rows_html.append(f"""
-        <tr>
+        <tr data-sector="{sec_safe}">
           <td class="cb-cell"><input type="checkbox" class="row-check" value="{r['ticker']}"></td>
           {mf_rank_td}
           <td class="mono" style="color:#e8eaf0;font-weight:600">{r["ticker"]}</td>
@@ -700,6 +707,12 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
   .filter-btn{{background:#1e2538;border:1px solid var(--border);border-radius:6px;
                padding:5px 12px;color:var(--mu);font-size:11px;cursor:pointer}}
   .filter-btn.active{{background:#4f8ef720;border-color:var(--bl);color:var(--bl)}}
+  .secbar{{margin:0 16px 10px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}}
+  .secbar .lbl{{color:var(--mu);font-size:11px;white-space:nowrap;margin-right:4px}}
+  .sbtn{{background:#1e2538;border:1px solid var(--border);border-radius:5px;
+         padding:4px 10px;color:var(--mu);font-size:11px;cursor:pointer}}
+  .sbtn:hover{{color:var(--text)}}
+  .sbtn.active{{background:#4f8ef720;border-color:var(--bl);color:var(--bl)}}
   .legend{{margin:14px 16px;padding:12px 16px;background:var(--card);border:1px solid var(--border);
            border-radius:8px;font-size:11px;color:var(--mu)}}
   .legend b{{color:var(--text)}}
@@ -750,6 +763,11 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
   <button class="filter-btn" id="btn-a" onclick="setGradeFilter('A')">A / A+ Only</button>
   <button class="filter-btn" id="btn-b" onclick="setGradeFilter('B')">B+ / B Only</button>
   <span style="margin-left:auto;color:var(--mu);font-size:11px" id="row-count">{n + len(unranked)} stocks</span>
+</div>
+<div class="secbar">
+  <span class="lbl">Sector</span>
+  <button class="sbtn all-btn active" onclick="setSector('', this)">All</button>
+  {sector_btns}
 </div>
 
 <div class="tbl-wrap">
@@ -805,6 +823,21 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
 
 <script>
 let _sortCol = -1, _sortAsc = true, _gradeFilter = 'all';
+const activeSectors = new Set();
+function setSector(sec, btn) {{
+  if (sec === '') {{
+    activeSectors.clear();
+  }} else {{
+    if (activeSectors.has(sec)) activeSectors.delete(sec);
+    else activeSectors.add(sec);
+  }}
+  document.querySelectorAll('.sbtn:not(.all-btn)').forEach(b =>
+    b.classList.toggle('active', activeSectors.has(b.textContent.trim()))
+  );
+  const allBtn = document.querySelector('.sbtn.all-btn');
+  if (allBtn) allBtn.classList.toggle('active', activeSectors.size === 0);
+  filterTable();
+}}
 
 function sortTable(col) {{
   const tbody = document.getElementById('mf-tbody');
@@ -843,11 +876,12 @@ function filterTable() {{
     const sector = row.cells[3]?.textContent?.toLowerCase() ?? '';
     const grade  = row.cells[11]?.textContent?.trim() ?? '';
     const matchQ = !q || ticker.includes(q) || sector.includes(q);
+    const matchS = activeSectors.size === 0 || activeSectors.has(row.dataset.sector ?? '');
     const matchG = _gradeFilter === 'all'
       || (_gradeFilter === 'A' && (grade==='A+' || grade==='A'))
       || (_gradeFilter === 'B' && (grade==='B+' || grade==='B'));
-    row.style.display = (matchQ && matchG) ? '' : 'none';
-    if (matchQ && matchG) shown++;
+    row.style.display = (matchQ && matchS && matchG) ? '' : 'none';
+    if (matchQ && matchS && matchG) shown++;
   }});
   document.getElementById('row-count').textContent = shown + ' stocks';
 }}
