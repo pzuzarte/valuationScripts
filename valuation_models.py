@@ -3474,3 +3474,222 @@ def calc_factor_exposure(portfolio_returns, start_date: str) -> dict:
     except Exception as e:
         result["error"] = str(e)
     return result
+
+
+# ── § 13  FINANCIAL HEALTH SCORES ─────────────────────────────────────────────
+
+def run_piotroski(d: dict) -> dict:
+    """
+    Piotroski F-Score — 9-point binary fundamental health score.
+
+    Profitability (4 signals):
+        F1  ROA > 0
+        F2  Operating CFO > 0
+        F3  ΔROA > 0  (improved year-over-year)
+        F4  Accruals: CFO/Assets > ROA  (cash earnings quality)
+
+    Leverage / Liquidity / Source of Funds (3 signals):
+        F5  ΔLong-term leverage < 0  (debt ratio decreased)
+        F6  ΔCurrent ratio > 0       (liquidity improved)
+        F7  No new shares issued     (dilution check)
+
+    Operating Efficiency (2 signals):
+        F8  ΔGross margin > 0
+        F9  ΔAsset turnover > 0
+
+    Score:  8–9 = Strong · 6–7 = Good · 4–5 = Average · 0–3 = Weak
+    """
+    fs  = d.get("fs", {})
+    ext = d.get("ext", {})
+
+    ta      = fs.get("total_assets")
+    ta_py   = fs.get("total_assets_py")
+    ni      = d.get("net_income")
+    ni_py   = fs.get("net_income_py")
+    op_cf   = fs.get("op_cf")
+    ca      = fs.get("cur_assets") or ext.get("total_current_assets")
+    ca_py   = fs.get("cur_assets_py")
+    cl      = fs.get("cur_liab")
+    cl_py   = fs.get("cur_liab_py")
+    ltd     = fs.get("lt_debt")
+    ltd_py  = fs.get("lt_debt_py")
+    gp      = fs.get("gross_profit")
+    gp_py   = fs.get("gross_profit_py")
+    rev     = d.get("revenue")
+    rev_py  = fs.get("revenue_py")
+    shares  = d.get("shares")
+    sh_py   = fs.get("shares_py")
+
+    def _sig(score, detail, label):
+        return {"score": score, "detail": detail, "label": label}
+
+    sigs = {}
+
+    # F1 — ROA > 0
+    roa    = (ni / ta)    if (ni is not None and ta and ta > 0)    else None
+    sigs["F1"] = _sig(
+        1 if roa is not None and roa > 0 else 0,
+        f"ROA = {roa*100:.2f}%" if roa is not None else "n/a",
+        "ROA > 0"
+    )
+
+    # F2 — CFO > 0
+    sigs["F2"] = _sig(
+        1 if op_cf is not None and op_cf > 0 else 0,
+        f"CFO = ${op_cf/1e9:.2f}B" if op_cf is not None else "n/a",
+        "Operating cash flow > 0"
+    )
+
+    # F3 — ΔROA > 0
+    roa_py    = (ni_py / ta_py) if (ni_py is not None and ta_py and ta_py > 0) else None
+    delta_roa = (roa - roa_py)  if (roa is not None and roa_py is not None) else None
+    sigs["F3"] = _sig(
+        1 if delta_roa is not None and delta_roa > 0 else 0,
+        f"ΔROA = {delta_roa*100:+.2f}%" if delta_roa is not None else "n/a",
+        "ROA improved YoY"
+    )
+
+    # F4 — Accruals: CFO/Assets > ROA
+    cfo_ratio = (op_cf / ta) if (op_cf is not None and ta and ta > 0) else None
+    accrual_pass = (cfo_ratio is not None and roa is not None and cfo_ratio > roa)
+    sigs["F4"] = _sig(
+        1 if accrual_pass else 0,
+        (f"CFO/Assets={cfo_ratio*100:.2f}% > ROA={roa*100:.2f}%"
+         if (cfo_ratio is not None and roa is not None) else "n/a"),
+        "CFO/Assets > ROA  (low accruals)"
+    )
+
+    # F5 — ΔLeverage < 0
+    lev    = (ltd    / ta)    if (ltd    is not None and ta    and ta    > 0) else None
+    lev_py = (ltd_py / ta_py) if (ltd_py is not None and ta_py and ta_py > 0) else None
+    d_lev  = (lev - lev_py)   if (lev is not None and lev_py is not None)    else None
+    sigs["F5"] = _sig(
+        1 if d_lev is not None and d_lev < 0 else 0,
+        f"ΔLeverage = {d_lev*100:+.2f}%" if d_lev is not None else "n/a",
+        "Long-term debt ratio decreased"
+    )
+
+    # F6 — ΔCurrent ratio > 0
+    cr    = (ca    / cl)    if (ca    and cl    and cl    > 0) else None
+    cr_py = (ca_py / cl_py) if (ca_py and cl_py and cl_py > 0) else None
+    d_cr  = (cr - cr_py)    if (cr is not None and cr_py is not None) else None
+    sigs["F6"] = _sig(
+        1 if d_cr is not None and d_cr > 0 else 0,
+        f"ΔCurrent ratio = {d_cr:+.3f}" if d_cr is not None else "n/a",
+        "Current ratio improved"
+    )
+
+    # F7 — No new shares issued  (1% tolerance for splits/rounding)
+    if shares is not None and sh_py is not None and sh_py > 0:
+        sigs["F7"] = _sig(
+            1 if shares <= sh_py * 1.01 else 0,
+            f"Shares: {shares/1e9:.3f}B vs {sh_py/1e9:.3f}B prior",
+            "No new shares issued"
+        )
+    else:
+        sigs["F7"] = _sig(0, "n/a — historical share count unavailable", "No new shares issued")
+
+    # F8 — ΔGross margin > 0
+    gm    = (gp    / rev)    if (gp    and rev    and rev    > 0) else None
+    gm_py = (gp_py / rev_py) if (gp_py and rev_py and rev_py > 0) else None
+    d_gm  = (gm - gm_py)     if (gm is not None and gm_py is not None) else None
+    sigs["F8"] = _sig(
+        1 if d_gm is not None and d_gm > 0 else 0,
+        f"ΔGross margin = {d_gm*100:+.2f}%" if d_gm is not None else "n/a",
+        "Gross margin improved"
+    )
+
+    # F9 — ΔAsset turnover > 0
+    at    = (rev    / ta)    if (rev    and ta    and ta    > 0) else None
+    at_py = (rev_py / ta_py) if (rev_py and ta_py and ta_py > 0) else None
+    d_at  = (at - at_py)     if (at is not None and at_py is not None) else None
+    sigs["F9"] = _sig(
+        1 if d_at is not None and d_at > 0 else 0,
+        f"ΔAsset turnover = {d_at:+.3f}" if d_at is not None else "n/a",
+        "Asset turnover improved"
+    )
+
+    score = sum(s["score"] for s in sigs.values())
+
+    if score >= 8:
+        interpretation = "Strong (8–9) — high-quality fundamentals"
+    elif score >= 6:
+        interpretation = "Good (6–7) — solid fundamentals"
+    elif score >= 4:
+        interpretation = "Average (4–5) — mixed signals"
+    else:
+        interpretation = "Weak (0–3) — deteriorating fundamentals"
+
+    return {
+        "score":          score,
+        "signals":        sigs,
+        "interpretation": interpretation,
+        "method":         "Piotroski F-Score",
+    }
+
+
+def run_altman(d: dict) -> dict:
+    """
+    Altman Z-Score — bankruptcy / financial distress model.
+
+    Original (manufacturing public companies):
+        Z = 1.2·X1 + 1.4·X2 + 3.3·X3 + 0.6·X4 + 1.0·X5
+        Safe: Z > 2.99 · Grey: 1.81–2.99 · Distress: Z < 1.81
+
+    Modified Z' (non-manufacturing / private — X4 uses book equity):
+        Z' = 0.717·X1 + 0.847·X2 + 3.107·X3 + 0.420·X4' + 0.998·X5
+        Safe: Z' > 2.90 · Grey: 1.23–2.90 · Distress: Z' < 1.23
+
+    X1 = Working Capital / Total Assets
+    X2 = Retained Earnings / Total Assets
+    X3 = EBIT / Total Assets
+    X4 = Market Cap / Total Liabilities         (original)
+    X4'= Book Equity / Total Liabilities        (modified)
+    X5 = Revenue / Total Assets
+    """
+    fs  = d.get("fs", {})
+    ext = d.get("ext", {})
+
+    ta   = fs.get("total_assets")
+    ca   = fs.get("cur_assets") or ext.get("total_current_assets")
+    cl   = fs.get("cur_liab")
+    re   = fs.get("retained_earn")
+    ebit = fs.get("ebit")
+    mc   = d.get("market_cap")
+    tl   = ext.get("total_liabilities") or d.get("total_liabilities")
+    rev  = d.get("revenue")
+    eq   = ext.get("stockholders_equity")
+
+    if not ta or ta <= 0:
+        return None
+
+    wc  = (ca - cl) if (ca is not None and cl is not None) else None
+    x1  = wc  / ta if wc  is not None else None
+    x2  = re  / ta if re  is not None else None
+    x3  = ebit/ ta if ebit is not None else None
+    x4m = mc  / tl if (mc  and tl and tl > 0) else None   # market-cap version
+    x4b = eq  / tl if (eq  and tl and tl > 0) else None   # book-equity version
+    x5  = rev / ta if rev  is not None else None
+
+    z_score = (1.2*x1 + 1.4*x2 + 3.3*x3 + 0.6*x4m + 1.0*x5
+               if all(v is not None for v in [x1, x2, x3, x4m, x5]) else None)
+    z_prime = (0.717*x1 + 0.847*x2 + 3.107*x3 + 0.420*x4b + 0.998*x5
+               if all(v is not None for v in [x1, x2, x3, x4b, x5]) else None)
+
+    def _zone(z, lo, hi):
+        if z is None:   return "n/a"
+        if z > hi:      return "Safe Zone"
+        if z >= lo:     return "Grey Zone"
+        return "Distress Zone"
+
+    return {
+        "z_score":    z_score,
+        "z_prime":    z_prime,
+        "z_zone":     _zone(z_score, 1.81, 2.99),
+        "zp_zone":    _zone(z_prime, 1.23, 2.90),
+        "x1": x1, "x2": x2, "x3": x3,
+        "x4_market": x4m, "x4_book": x4b, "x5": x5,
+        "total_assets": ta,
+        "working_capital": wc,
+        "method": "Altman Z-Score",
+    }

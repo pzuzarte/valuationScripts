@@ -318,7 +318,61 @@ def parse_row(row):
         rev_growth=rev_growth, eps_growth=eps_growth,
         perf_1m=perf_1m, perf_3m=perf_3m, pos52=pos52,
         de=de, p_b=p_b,
+        # Stored so supplement_ppe() can recompute ROC with exact Net PP&E
+        _curr_assets=curr_assets, _curr_liab=curr_liab,
     )
+
+
+# ── SUPPLEMENT: exact Net PP&E from yfinance ──────────────────────────────────
+def _fetch_ppe_yf(ticker):
+    """Return (ticker, net_ppe_float) from the most recent yfinance annual balance sheet.
+    Returns (ticker, None) on any failure."""
+    try:
+        import yfinance as yf
+        bs = yf.Ticker(ticker).balance_sheet
+        if bs is None or bs.empty or "Net PPE" not in bs.index:
+            return ticker, None
+        val = bs.loc["Net PPE"].iloc[0]   # most recent annual column
+        v = float(val) if val is not None and not (isinstance(val, float) and math.isnan(val)) else None
+        return ticker, v
+    except Exception:
+        return ticker, None
+
+
+def supplement_ppe(stocks, max_workers=12):
+    """Fetch exact Net PP&E from yfinance in parallel and recompute Greenblatt ROC.
+
+    Replaces the approximation (total_assets − current_assets − goodwill) with the
+    real Net PP&E line directly from the balance sheet.  Fallback to the approximation
+    is preserved for any ticker where yfinance cannot supply a value.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    tickers = [s["ticker"] for s in stocks]
+    print(f"  Fetching Net PP&E from yfinance for {len(tickers)} tickers", end="", flush=True)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        results = dict(pool.map(_fetch_ppe_yf, tickers))
+
+    exact = improved = 0
+    for s in stocks:
+        net_ppe = results.get(s["ticker"])
+        if net_ppe is None or net_ppe < 0:
+            continue
+        ebit = s.get("ebit")
+        if ebit is None or ebit <= 0:
+            continue
+        curr_assets = s.get("_curr_assets") or 0
+        curr_liab   = s.get("_curr_liab")   or 0
+        nwc = max(0.0, curr_assets - curr_liab)
+        invested = net_ppe + nwc
+        if invested > 0:
+            s["greenblatt_roc"] = (ebit / invested) * 100.0
+            s["_ppe_exact"] = True
+            exact += 1
+            improved += 1
+
+    print(f" — {exact}/{len(tickers)} updated with exact Net PP&E")
+    return stocks
 
 
 # ── RANK ──────────────────────────────────────────────────────────────────────
@@ -747,8 +801,9 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
   <b>Return on Capital</b> = EBIT ÷ (Net Fixed Assets + Net Working Capital) — tangible capital only,
   explicitly excluding goodwill &amp; intangibles so capital-light businesses score higher.
   Each stock receives a 1–N rank on both metrics; ranks are summed. <b>Lower combined rank = better blend of cheap + quality.</b>
-  <b>Data note:</b> ROC uses balance sheet fields when available (marked exact); otherwise falls back to
-  TV's ROIC as a proxy (marked <span style="color:#f0b429">~</span> in the table).
+  <b>Data note:</b> Net Fixed Assets uses exact Net PP&amp;E from yfinance where available (most stocks);
+  falls back to total non-current assets minus goodwill when yfinance data is missing.
+  ROC falls back to TV's ROIC as a proxy (marked <span style="color:#f0b429">~</span> in the table) when EBIT or balance sheet data is unavailable.
   <b>Excluded:</b> Financials, Utilities, ADRs/depositary receipts, stocks with market cap &lt; $100M, negative EBIT or EV.
 </div>
 
@@ -937,6 +992,10 @@ def main():
     excluded_sectors = [r for r in rows if r["sector"] in EXCLUDE_SECTORS]
     included = [r for r in rows if r["sector"] not in EXCLUDE_SECTORS]
     print(f"  Parsed: {len(rows)} | Sector-excluded: {len(excluded_sectors)} (Fin/Util) | Remaining: {len(included)}")
+
+    # ── Supplement: replace approximate Net Fixed Assets with exact Net PP&E
+    print("\n[2.5/4] Supplementing ROC with exact Net PP&E from yfinance...")
+    supplement_ppe(included)
 
     # ── Rank
     print("\n[3/4] Ranking by Earnings Yield + Return on Capital...")

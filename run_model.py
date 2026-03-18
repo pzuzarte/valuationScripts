@@ -128,6 +128,12 @@ ALIASES = {
     "mf":             "multifactor",
     "bayesian":       "bayesian",
     "wacc":           "wacc",
+    "piotroski":      "piotroski",
+    "fscore":         "piotroski",
+    "f-score":        "piotroski",
+    "altman":         "altman",
+    "zscore":         "altman",
+    "z-score":        "altman",
     "all":            "all",
 }
 
@@ -227,6 +233,43 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
     equity     = _first(bs, ["Stockholders Equity", "Common Stock Equity", "CommonStockEquity",
                               "Total Equity Gross Minority Interest"])
 
+    # ── Extra fields for Piotroski F-Score and Altman Z-Score ─────────────────
+    def _second(df, keys, default=None):
+        """Prior-year value (second column) from a financial statement DataFrame."""
+        if df is None or df.empty:
+            return default
+        for k in keys:
+            if k in df.index:
+                row = df.loc[k].dropna()
+                if len(row) > 1:
+                    try:
+                        return float(row.iloc[1])
+                    except (TypeError, ValueError):
+                        pass
+        return default
+
+    total_assets  = _first(bs, ["Total Assets"])
+    total_assets_py = _second(bs, ["Total Assets"])
+    cur_liab      = _first(bs, ["Current Liabilities", "Total Current Liabilities"])
+    cur_liab_py   = _second(bs, ["Current Liabilities", "Total Current Liabilities"])
+    cur_assets_py = _second(bs, ["Current Assets", "Total Current Assets"])
+    retained_earn = _first(bs, ["Retained Earnings"])
+    lt_debt       = _first(bs, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"])
+    lt_debt_py    = _second(bs, ["Long Term Debt", "Long Term Debt And Capital Lease Obligation"])
+    gross_profit  = _first(inc, ["Gross Profit"])
+    gross_profit_py = _second(inc, ["Gross Profit"])
+    revenue_py    = _second(inc, ["Total Revenue"])
+    net_income_py = _second(inc, ["Net Income", "Net Income Common Stockholders"])
+    ebit          = _first(inc, ["EBIT", "Operating Income"])
+    # yfinance quarterly shares for YoY dilution check
+    try:
+        q_bs    = tk.quarterly_balance_sheet
+        shares_py = _second(q_bs, ["Ordinary Shares Number", "Common Stock"])
+        if shares_py is None:
+            shares_py = _second(bs, ["Ordinary Shares Number", "Common Stock"])
+    except Exception:
+        shares_py = None
+
     print("OK")
 
     # ── Growth estimate
@@ -309,6 +352,25 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
             "hist_pfcf_5y":          None,
             "hist_eveb_5y":          None,
             "earnings_surprise_pct": None,
+        },
+        # Raw financial statement data for Piotroski / Altman
+        "fs": {
+            "total_assets":    total_assets,
+            "total_assets_py": total_assets_py,
+            "cur_assets":      cur_assets,
+            "cur_assets_py":   cur_assets_py,
+            "cur_liab":        cur_liab,
+            "cur_liab_py":     cur_liab_py,
+            "lt_debt":         lt_debt,
+            "lt_debt_py":      lt_debt_py,
+            "retained_earn":   retained_earn,
+            "ebit":            ebit,
+            "op_cf":           op_cf,
+            "gross_profit":    gross_profit,
+            "gross_profit_py": gross_profit_py,
+            "net_income_py":   net_income_py,
+            "revenue_py":      revenue_py,
+            "shares_py":       shares_py,
         },
     }
 
@@ -422,6 +484,50 @@ def _print_wacc(wacc_rate, source, d):
     _line("WACC = Ke×(E/V) + Kd×(1−t)×(D/V)", f"{wacc_rate*100:.2f}%")
     if d.get("wacc_override"):
         _warn("Using manual override — computed WACC shown above is illustrative only")
+
+
+def _print_piotroski(r):
+    _section("Piotroski F-Score")
+    groups = [
+        ("Profitability",              ["F1", "F2", "F3", "F4"]),
+        ("Leverage / Liquidity",       ["F5", "F6", "F7"]),
+        ("Operating Efficiency",       ["F8", "F9"]),
+    ]
+    for group_name, keys in groups:
+        print(f"\n  {group_name}")
+        for k in keys:
+            sig = r["signals"][k]
+            tick = "✓" if sig["score"] else "✗"
+            label_w = 38
+            print(f"    [{tick}] {k}  {sig['label']:<{label_w}}  {sig['detail']}")
+    print()
+    _line("Total score",    f"{r['score']} / 9")
+    _line("Interpretation", r["interpretation"])
+
+
+def _print_altman(r):
+    _section("Altman Z-Score")
+    ta = r.get("total_assets") or 1
+    _line("── Inputs", "")
+    _line("   X1  Working Capital / Assets",  f"{r['x1']:.3f}"  if r.get('x1')  is not None else "n/a")
+    _line("   X2  Retained Earnings / Assets",f"{r['x2']:.3f}"  if r.get('x2')  is not None else "n/a")
+    _line("   X3  EBIT / Assets",             f"{r['x3']:.3f}"  if r.get('x3')  is not None else "n/a")
+    _line("   X4  Mkt Cap / Total Liab",      f"{r['x4_market']:.3f}" if r.get('x4_market') is not None else "n/a")
+    _line("   X4' Book Equity / Total Liab",  f"{r['x4_book']:.3f}"   if r.get('x4_book')   is not None else "n/a")
+    _line("   X5  Revenue / Assets",          f"{r['x5']:.3f}"  if r.get('x5')  is not None else "n/a")
+    print()
+    z  = r.get("z_score")
+    zp = r.get("z_prime")
+    _line("Original Z  (manufacturing)",
+          f"{z:.2f}  →  {r['z_zone']}"   if z  is not None else "n/a (missing inputs)")
+    _line("Modified Z' (non-manufacturing)",
+          f"{zp:.2f}  →  {r['zp_zone']}" if zp is not None else "n/a (missing inputs)")
+    print()
+    thresholds = (
+        "  Original:  Safe > 2.99  ·  Grey 1.81–2.99  ·  Distress < 1.81\n"
+        "  Modified:  Safe > 2.90  ·  Grey 1.23–2.90  ·  Distress < 1.23"
+    )
+    print(thresholds)
 
 
 def _print_dcf(r, price):
@@ -666,6 +772,25 @@ def run_one(model_key, d, benchmarks):
         wacc_rate, source = calculate_wacc(d)
         _print_wacc(wacc_rate, source, d)
         return {"wacc": wacc_rate, "source": source}
+
+    # ── Financial health scores ───────────────────────────────────────────────
+    if model_key == "piotroski":
+        from valuation_models import run_piotroski
+        r = run_piotroski(d)
+        if r:
+            _print_piotroski(r)
+        else:
+            _skip("insufficient balance sheet / income statement data")
+        return r
+
+    if model_key == "altman":
+        from valuation_models import run_altman
+        r = run_altman(d)
+        if r:
+            _print_altman(r)
+        else:
+            _skip("total assets unavailable — cannot compute Z-Score")
+        return r
 
     # ── Classic ───────────────────────────────────────────────────────────────
     if model_key == "dcf":
@@ -1093,6 +1218,8 @@ _KEY_TO_METHOD = {
     "scurve":         "S-Curve TAM",    "pie":             "PIE",
     "ddm":            "DDM",            "graham":          "Graham Number",
     "multifactor":    "Multi-Factor",   "wacc":            "WACC",
+    "piotroski":      "Piotroski F-Score",
+    "altman":         "Altman Z-Score",
 }
 
 def _run_one_snap(model_key: str, d_h: dict, bm: dict) -> float:
