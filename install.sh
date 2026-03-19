@@ -192,9 +192,32 @@ info "pip install -r requirements.txt  (first run takes ~2 minutes) …"
     | grep -v "^$" \
     || true
 
+# ── PyTorch (CPU wheel) ───────────────────────────────────────────────────────
+# torch is already listed in requirements.txt but may have been satisfied by a
+# version without the 'torch' import working (e.g. meta-package).  Install
+# explicitly from the CPU wheel index so the binary is always present.
+# On macOS the PyPI wheel already includes MPS support; the whl/cpu index works
+# on both macOS and Linux and produces a smaller download on Linux.
+if ! "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
+    info "Installing PyTorch CPU wheel (~750 MB, one-time download) …"
+    "$VENV_PYTHON" -m pip install torch \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --quiet 2>&1 \
+        | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+        | grep -v "^$" \
+        || true
+    if "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
+        ok "PyTorch installed"
+    else
+        warn "PyTorch install failed — FinBERT will be unavailable (VADER still works)"
+    fi
+else
+    ok "PyTorch already present"
+fi
+
 # Spot-check critical imports.
 MISSING=()
-for pkg in flask yfinance tradingview_screener pandas numpy scipy matplotlib; do
+for pkg in flask yfinance tradingview_screener pandas numpy scipy matplotlib torch transformers; do
     "$VENV_PYTHON" -c "import $pkg" 2>/dev/null || MISSING+=("$pkg")
 done
 

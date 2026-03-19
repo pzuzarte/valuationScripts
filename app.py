@@ -342,6 +342,16 @@ SCRIPTS = {
                  required=False, default=""),
         ],
     },
+    "Topic Sentiment": {
+        "path": os.path.join(ROOT, "16_topicSentiment", "topicSentiment.py"),
+        "desc": "Multi-source sentiment analysis for any keyword, phrase, or topic — news, Reddit, Hacker News, Google Trends, word clouds & sentiment timeline.",
+        "icon": "🌡️",
+        "params": [
+            dict(id="query", label="Query / keyword", type="entry", flag="--query",
+                 required=True, default="",
+                 hint='Any topic, phrase, or ticker — e.g. "Federal Reserve" or "NVDA earnings"'),
+        ],
+    },
     "Price Forecast": {
         "path": os.path.join(ROOT, "11_priceForecast", "priceForecast.py"),
         "desc": "ARIMA + ETS price forecasting with walk-forward backtest — compares model accuracy against a naive random-walk baseline and surfaces uncertainty cones over the forecast horizon.",
@@ -375,7 +385,8 @@ SIDEBAR_GROUPS = [
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
     {"label": "WATCHLIST",         "scripts": ["Watchlist Tracker", "Deep Dive List"]},
-    {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer", "Classifier"]},
+    {"label": "RESEARCH",          "scripts": ["Research Scanner", "Topic Explorer",
+                                               "Topic Sentiment", "Classifier"]},
 ]
 
 # ── Active runs ───────────────────────────────────────────────────────────────
