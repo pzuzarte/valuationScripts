@@ -67,32 +67,6 @@ _FETCH_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
              "Chrome/122.0.0.0 Safari/537.36")
 
 
-def _get_spx() -> list[dict]:
-    """S&P 500 from Wikipedia (stable wikitable format)."""
-    print("  Fetching S&P 500 constituents from Wikipedia...")
-    try:
-        r = _requests.get(
-            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-            headers={"User-Agent": _FETCH_UA}, timeout=20
-        )
-        tbls = pd.read_html(io.StringIO(r.text), attrs={"class": "wikitable"})
-        df = tbls[0]
-        results = []
-        for _, row in df.iterrows():
-            t = str(row.get("Symbol", "")).strip()
-            if not t or t == "nan":
-                continue
-            results.append({
-                "ticker": t,
-                "name":   str(row.get("Security", t)),
-                "sector": str(row.get("GICS Sector", "Unknown")),
-            })
-        return results
-    except Exception as e:
-        print(f"  SPX fetch failed: {e}")
-        return []
-
-
 def _get_slickcharts(url: str, label: str) -> list[dict]:
     """Parse slickcharts.com index page — first table has Company/Symbol/Weight."""
     print(f"  Fetching {label} constituents from slickcharts.com...")
@@ -114,6 +88,10 @@ def _get_slickcharts(url: str, label: str) -> list[dict]:
     except Exception as e:
         print(f"  {label} slickcharts fetch failed: {e}")
         return []
+
+
+def _get_spx() -> list[dict]:
+    return _get_slickcharts("https://www.slickcharts.com/sp500", "S&P 500")
 
 
 def _get_ndx() -> list[dict]:
@@ -883,7 +861,7 @@ def build_html(metrics_list: list[dict], index_name: str) -> str:
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Growth Screeners — {index_name}</title>
+<title>Multi-Factor Growth — {index_name}</title>
 <style>
   *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
 
@@ -1136,7 +1114,7 @@ def build_html(metrics_list: list[dict], index_name: str) -> str:
 <!-- Header -->
 <div class="header">
   <div class="header-left">
-    <h1>Growth Screeners &mdash; {index_name}</h1>
+    <h1>Multi-Factor Growth &mdash; {index_name}</h1>
     <div class="subtitle">7-factor growth analysis &bull; {total} constituents &bull; {ts}</div>
   </div>
   <div class="header-right">
@@ -1404,7 +1382,7 @@ function exportCSV() {{
 # ── argparse ──────────────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Growth Screeners — 7-factor growth analysis")
+    p = argparse.ArgumentParser(description="Multi-Factor Growth — 7-factor growth analysis")
     p.add_argument("--index",   default="SPX",
                    choices=["SPX", "NDX", "DOW", "RUT", "TSX"],
                    help="Index to screen (default: SPX)")
@@ -1418,7 +1396,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    print(f"\n=== Growth Screeners === {args.index} ===")
+    print(f"\n=== Multi-Factor Growth === {args.index} ===")
 
     # 1. Get tickers
     if args.tickers.strip():

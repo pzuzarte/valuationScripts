@@ -329,7 +329,7 @@ SCRIPTS = {
                  required=False, default=True),
         ],
     },
-    "Growth Screeners": {
+    "Multi-Factor Growth": {
         "path": os.path.join(ROOT, "11_growthScreeners", "growthScreeners.py"),
         "desc": "7 growth screeners in one pass — RS Rating, EPS Acceleration, Estimate Revision, Beat Rate, GARP, FCF Compounder, Gross Margin Expansion.",
         "icon": "🌱",
@@ -380,7 +380,7 @@ SIDEBAR_GROUPS = [
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener",
                                                "Magic Formula", "Quality Screener",
                                                "CANSLIM", "Earnings Acceleration",
-                                               "Growth Screeners"]},
+                                               "Multi-Factor Growth"]},
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},

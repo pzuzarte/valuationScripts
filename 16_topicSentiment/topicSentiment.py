@@ -1448,10 +1448,10 @@ if (_tl.length > 1) {{
           fill:true, yAxisID:'y'
         }},
         {{
-          label:'Mentions', data:_tl.map(d => d.count > 0 ? d.count : null),
-          borderColor:'rgba(240,180,41,0.65)', backgroundColor:'rgba(240,180,41,0.04)',
-          borderWidth:1.5, tension:0.3, pointRadius:2, fill:false, yAxisID:'y2',
-          spanGaps:true
+          type:'bar',
+          label:'Mentions', data:_tl.map(d => d.count > 0 ? d.count : 0),
+          backgroundColor:'rgba(240,180,41,0.45)', borderColor:'rgba(240,180,41,0.8)',
+          borderWidth:1, yAxisID:'y2'
         }}
       ]
     }},
@@ -1466,15 +1466,15 @@ if (_tl.length > 1) {{
           title:{{ display:true, text:'Sentiment', color:'#475569', font:{{ size:11 }} }}
         }},
         y2:{{
-          type:'logarithmic',
+          type:'linear',
           position:'right',
-          min:0.9,
+          min:0,
           ticks:{{
             color:'#475569',
-            callback: function(v) {{ return Number.isInteger(Math.log10(v)) ? v : ''; }}
+            precision:0
           }},
           grid:{{ display:false }},
-          title:{{ display:true, text:'Mentions (log)', color:'#475569', font:{{ size:11 }} }}
+          title:{{ display:true, text:'Mentions', color:'#475569', font:{{ size:11 }} }}
         }}
       }}
     }}
