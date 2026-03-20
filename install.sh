@@ -260,7 +260,7 @@ else
 fi
 
 # Spot-check critical imports.
-CRITICAL=(flask yfinance pandas numpy scipy matplotlib requests feedparser vaderSentiment transformers)
+CRITICAL=(flask yfinance pandas numpy scipy matplotlib requests feedparser vaderSentiment transformers xgboost arch sklearn)
 MISSING=()
 for pkg in "${CRITICAL[@]}"; do
     "$VENV_PYTHON" -c "import ${pkg//-/_}" 2>/dev/null || MISSING+=("$pkg")
@@ -296,6 +296,13 @@ OUTPUT_DIRS=(
     14_canslim/canslimData
     15_earningsAccel/accelData
     16_topicSentiment/topicData
+    # predictive model output dirs
+    17_returnPredictor/predictorData
+    18_earningsPredictor/earningsPredData
+    19_regimeDetector/regimeData
+    20_riskModel/riskData
+    21_breakoutDetector/breakoutData
+    22_sentimentLead/sentimentLeadData
     deepDiveTickers
 )
 for dir in "${OUTPUT_DIRS[@]}"; do

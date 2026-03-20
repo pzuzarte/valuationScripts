@@ -47,6 +47,12 @@ plots/
 14_canslim/canslimData/
 15_earningsAccel/accelData/
 16_topicSentiment/topicData/
+17_returnPredictor/predictorData/
+18_earningsPredictor/earningsPredData/
+19_regimeDetector/regimeData/
+20_riskModel/riskData/
+21_breakoutDetector/breakoutData/
+22_sentimentLead/sentimentLeadData/
 
 # yfinance cache written by growthScreener
 2_growthScreener/.yf_cache.json
