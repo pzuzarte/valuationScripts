@@ -38,8 +38,8 @@ vaderSentiment>=3.3.2      # VADER rule-based scoring (topicSentiment)
 
 # ── NLP / Transformers ────────────────────────────────────────────────────────
 # Required for FinBERT (ProsusAI/finbert) in topicSentiment.
-# torch ~750 MB; install once, model weights cached in ~/.cache/huggingface.
-# install.sh installs torch via the CPU wheel index (works on macOS + Linux).
-# For GPU (CUDA) support replace whl/cpu with whl/cu121 and re-run install.sh.
+# torch is intentionally NOT listed here — install.sh installs it separately
+# via the official CPU wheel index (avoids a double 750 MB download and ensures
+# the correct binary is used on both macOS and Linux).
+# Model weights are cached in ~/.cache/huggingface on first use.
 transformers>=4.38.0       # Hugging Face model hub + pipeline API (topicSentiment FinBERT)
-torch>=2.0.0               # PyTorch backend for FinBERT — installed via CPU wheel in install.sh

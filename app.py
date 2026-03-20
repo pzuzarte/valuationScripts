@@ -458,19 +458,27 @@ def _reader_thread(run_id: str) -> None:
         if _last_candidate and not output_path and os.path.isfile(_last_candidate):
             output_path = _last_candidate
 
-        # Open the output file from the Flask process — has reliable macOS Aqua access.
-        # Scripts' own webbrowser.open() calls fail silently when run as subprocesses
-        # with start_new_session=True (disconnected from the window server session).
-        #
-        # Use macOS 'open' for all file types: routes PNGs → Preview, HTML → browser.
-        # webbrowser.open("file://...") uses osascript 'open location' which only
-        # works for HTML — it silently fails for images (.png, .jpg, etc.).
+        # Open output file.  HTML reports are served through Flask at
+        # /view?path=... so the page shares the same origin as the API —
+        # this avoids Safari/Chrome blocking file:// → localhost fetches
+        # (which broke the "Add to Deep Dive" button).
+        # Non-HTML outputs (PNG/PDF) still use the native 'open' command.
         if output_path and rc == 0:
             import platform as _platform
-            if _platform.system() == "Darwin":
-                subprocess.Popen(["open", output_path])
+            import urllib.parse as _up
+            if output_path.lower().endswith(".html"):
+                url = (f"http://localhost:{_SERVER_PORT}/view"
+                       f"?path={_up.quote(output_path, safe='')}")
+                if _platform.system() == "Darwin":
+                    subprocess.Popen(["open", url])
+                else:
+                    webbrowser.open(url)
             else:
-                webbrowser.open("file://" + output_path)
+                # Images / PDFs — open with native viewer
+                if _platform.system() == "Darwin":
+                    subprocess.Popen(["open", output_path])
+                else:
+                    webbrowser.open("file://" + output_path)
 
     except Exception as exc:
         q.put(f"\nERROR: {exc}\n")
@@ -490,15 +498,41 @@ def _reader_thread(run_id: str) -> None:
 
 # ── API routes ────────────────────────────────────────────────────────────────
 
+@app.after_request
 def _cors(resp):
-    """Add permissive CORS header — used by data API routes."""
-    resp.headers["Access-Control-Allow-Origin"] = "*"
+    """Add CORS + Private Network Access headers to every response.
+
+    Chrome's Private Network Access policy (chrome 94+) requires
+    Access-Control-Allow-Private-Network: true when a file:// page fetches
+    http://localhost — without it the pre-flight is blocked and the
+    'Add to Deep Dive' button silently falls back to a CSV download.
+    """
+    resp.headers["Access-Control-Allow-Origin"]          = "*"
+    resp.headers["Access-Control-Allow-Methods"]         = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"]         = "Content-Type"
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
     return resp
 
 
 @app.route("/")
 def index():
     return HTML
+
+
+@app.route("/view")
+def view_report():
+    """Serve a generated HTML report through Flask so it shares the same origin
+    as the API — avoids browser blocking of file:// → localhost fetches."""
+    import urllib.parse as _up
+    path = _up.unquote(request.args.get("path", ""))
+    # Security: only serve files that live inside the project directory
+    real = os.path.realpath(path)
+    if not real.startswith(os.path.realpath(ROOT)):
+        return "Forbidden", 403
+    if not os.path.isfile(real) or not real.lower().endswith(".html"):
+        return "Not found", 404
+    with open(real, encoding="utf-8") as f:
+        return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 @app.route("/api/scripts")
@@ -642,13 +676,9 @@ def api_exit():
 def api_watchlist_add():
     """Append checked tickers to deepDiveTickers/deepDiveTickers.csv (append-only, deduped).
     Supports CORS so the endpoint is reachable from file:// HTML reports."""
-    # Pre-flight for browsers calling from file:// origin
+    # Pre-flight — CORS/PNA headers are added by the global @after_request hook
     if request.method == "OPTIONS":
-        resp = make_response("", 204)
-        resp.headers["Access-Control-Allow-Origin"]  = "*"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-        return resp
+        return make_response("", 204)
 
     data        = request.get_json(force=True, silent=True) or {}
     new_tickers = [t.upper().strip() for t in data.get("tickers", []) if str(t).strip()]
@@ -675,10 +705,8 @@ def api_watchlist_add():
             for t in to_add:
                 w.writerow([t, 0, today])
 
-    resp = jsonify({"added": len(to_add), "skipped": skipped,
+    return jsonify({"added": len(to_add), "skipped": skipped,
                     "total": len(existing) + len(to_add)})
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    return resp
 
 
 @app.route("/api/deep-dive/list")

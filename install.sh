@@ -16,11 +16,12 @@
 #    --help               Show this help text
 #
 #  What this does:
-#    1. Clones the repository — or detects that it's already present
-#    2. Finds Python 3.9+ (system Python, Homebrew, pyenv — anything works)
+#    1. Checks prerequisites (git, Python 3.9+, Xcode CLT on macOS)
+#    2. Clones the repository — or detects that it's already present
 #    3. Creates an isolated .venv inside the project
 #    4. Installs all dependencies from requirements.txt into the venv
-#    5. Creates launchers:
+#    5. Installs PyTorch (CPU wheel — works on macOS + Linux without CUDA)
+#    6. Creates launchers:
 #         • start.sh           — run from the project directory
 #         • valuation-suite    — global CLI command in ~/bin
 #         • ValuationSuite.app — macOS double-click launcher (macOS only)
@@ -33,7 +34,7 @@ REPO_URL="https://github.com/pzuzarte/valuationScripts.git"
 DEFAULT_INSTALL_DIR="$HOME/valuationScripts"
 VENV_DIR_NAME=".venv"
 MIN_PYTHON_MINOR=9          # require Python 3.9+
-TOTAL=5
+TOTAL=6
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GRN='\033[0;32m'; YLW='\033[1;33m'
@@ -66,8 +67,40 @@ echo -e "\n${BLD}${CYN}  ValuationSuite — Installer${RST}"
 echo -e "  ${CYN}────────────────────────────────────────${RST}"
 echo -e "  Stock valuation and portfolio analysis toolkit\n"
 
-# ── Step 1: Locate or clone the repository ─────────────────────────────────────
-step 1 "Repository"
+IS_MACOS=false
+[[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=true
+
+# ── Step 1: Prerequisites ─────────────────────────────────────────────────────
+step 1 "Prerequisites"
+
+# macOS: check for Xcode Command Line Tools (needed to compile C extensions
+# such as hdbscan, wordcloud, dtaidistance, etc.)
+if $IS_MACOS; then
+    if ! xcode-select -p >/dev/null 2>&1; then
+        warn "Xcode Command Line Tools are not installed."
+        warn "Some packages (hdbscan, wordcloud, etc.) require a C compiler."
+        echo ""
+        echo -e "  ${BLD}Installing Xcode Command Line Tools now…${RST}"
+        echo -e "  A dialog will appear — click ${BLD}Install${RST} and wait for it to finish."
+        echo -e "  Then re-run this script.\n"
+        xcode-select --install 2>/dev/null || true
+        echo -e "\n${YLW}Re-run install.sh after the Xcode tools finish installing.${RST}"
+        exit 0
+    else
+        ok "Xcode Command Line Tools: $(xcode-select -p)"
+    fi
+fi
+
+# git
+command -v git >/dev/null 2>&1 || fail \
+    "git is required but not installed.\n\
+  macOS:  xcode-select --install   (installs Xcode Command Line Tools)\n\
+  Ubuntu: sudo apt install git\n\
+  Other:  https://git-scm.com/downloads"
+ok "git: $(git --version)"
+
+# ── Step 2: Locate or clone the repository ─────────────────────────────────────
+step 2 "Repository"
 
 # Detect whether we are running from inside an already-cloned repo.
 #
@@ -94,7 +127,6 @@ if [[ -z "$PROJECT_ROOT" ]]; then
 
     if [[ -d "$PROJECT_ROOT/.git" ]]; then
         info "Repository already exists at $PROJECT_ROOT — pulling latest changes"
-        # Use || true so a dirty working tree doesn't abort the install
         _pull_out="$(git -C "$PROJECT_ROOT" pull --ff-only 2>&1)" || {
             warn "Could not fast-forward — local changes may be present."
             warn "If you want the latest code, commit or stash your changes and re-run."
@@ -102,12 +134,6 @@ if [[ -z "$PROJECT_ROOT" ]]; then
         echo "$_pull_out" | tail -1 | sed 's/^/    /'
         ok "Repository up to date"
     else
-        command -v git >/dev/null 2>&1 || fail \
-            "git is required but not installed.\n\
-  macOS:  xcode-select --install   (installs Xcode Command Line Tools)\n\
-  Ubuntu: sudo apt install git\n\
-  Other:  https://git-scm.com/downloads"
-
         info "Cloning into $PROJECT_ROOT …"
         git clone --depth=1 "$REPO_URL" "$PROJECT_ROOT"
         ok "Cloned $REPO_URL"
@@ -118,8 +144,8 @@ fi
 
 cd "$PROJECT_ROOT"
 
-# ── Step 2: Find Python 3.9+ ──────────────────────────────────────────────────
-step 2 "Python 3.9+"
+# ── Step 3: Find Python 3.9+ ──────────────────────────────────────────────────
+step 3 "Python 3.9+"
 
 # Try specific version binaries first (most precise), then generic names.
 PYTHON_CANDIDATES=(
@@ -160,8 +186,8 @@ ok "$PYTHON_VER  ($(command -v "$PYTHON_CMD"))"
   Ubuntu/Debian: sudo apt install python3-venv\n\
   Fedora:        sudo dnf install python3-venv"
 
-# ── Step 3: Virtual environment ───────────────────────────────────────────────
-step 3 "Virtual environment"
+# ── Step 4: Virtual environment ───────────────────────────────────────────────
+step 4 "Virtual environment"
 
 VENV_PATH="$PROJECT_ROOT/$VENV_DIR_NAME"
 
@@ -179,25 +205,43 @@ VENV_PIP="$VENV_PATH/bin/pip"
 info "Upgrading pip …"
 "$VENV_PYTHON" -m pip install --upgrade pip --quiet
 
-# ── Step 4: Install packages ──────────────────────────────────────────────────
-step 4 "Installing packages"
+# ── Step 5: Install packages ──────────────────────────────────────────────────
+step 5 "Installing packages"
 
 REQ_FILE="$PROJECT_ROOT/requirements.txt"
 [[ -f "$REQ_FILE" ]] || fail "requirements.txt not found at $REQ_FILE"
 
-info "pip install -r requirements.txt  (first run takes ~2 minutes) …"
-# Suppress the per-line install noise but show any real warnings/errors.
-"$VENV_PYTHON" -m pip install -r "$REQ_FILE" --upgrade --quiet 2>&1 \
+info "pip install -r requirements.txt  (first run takes ~2-5 minutes) …"
+# --prefer-binary: use pre-built wheels instead of compiling from source.
+# This avoids C-compiler failures for packages like hdbscan, wordcloud, etc.
+# on machines where Xcode CLT was just installed or pip wheels are available.
+"$VENV_PYTHON" -m pip install -r "$REQ_FILE" \
+    --prefer-binary \
+    --upgrade \
+    --quiet 2>&1 \
     | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
     | grep -v "^$" \
     || true
 
+# Some packages (hdbscan, wordcloud, tslearn) occasionally fail even with
+# --prefer-binary on unusual Python versions.  Try each separately so that
+# one failure doesn't block everything else.
+COMPILE_PKGS=("hdbscan>=0.8.33" "wordcloud>=1.9.0" "tslearn>=0.6.0" "dtaidistance>=2.3.0")
+for pkg in "${COMPILE_PKGS[@]}"; do
+    pkg_name="${pkg%%[>=<]*}"
+    if ! "$VENV_PYTHON" -c "import ${pkg_name//-/_}" 2>/dev/null; then
+        info "Re-trying $pkg_name with binary-only install …"
+        "$VENV_PYTHON" -m pip install "$pkg" \
+            --prefer-binary --only-binary=:all: \
+            --quiet 2>&1 | grep -v "^$" || \
+        warn "$pkg_name could not be installed — classifier clustering features may be limited"
+    fi
+done
+
 # ── PyTorch (CPU wheel) ───────────────────────────────────────────────────────
-# torch is already listed in requirements.txt but may have been satisfied by a
-# version without the 'torch' import working (e.g. meta-package).  Install
-# explicitly from the CPU wheel index so the binary is always present.
-# On macOS the PyPI wheel already includes MPS support; the whl/cpu index works
-# on both macOS and Linux and produces a smaller download on Linux.
+# torch is NOT in requirements.txt — we install it here from the official CPU
+# wheel index so the correct binary is always used (avoids the 2 GB CUDA
+# download on Linux, and avoids a double-install on macOS).
 if ! "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
     info "Installing PyTorch CPU wheel (~750 MB, one-time download) …"
     "$VENV_PYTHON" -m pip install torch \
@@ -209,38 +253,73 @@ if ! "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
     if "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
         ok "PyTorch installed"
     else
-        warn "PyTorch install failed — FinBERT will be unavailable (VADER still works)"
+        warn "PyTorch install failed — FinBERT sentiment will be unavailable (VADER still works)"
     fi
 else
     ok "PyTorch already present"
 fi
 
 # Spot-check critical imports.
+CRITICAL=(flask yfinance pandas numpy scipy matplotlib requests feedparser vaderSentiment transformers)
 MISSING=()
-for pkg in flask yfinance tradingview_screener pandas numpy scipy matplotlib torch transformers; do
-    "$VENV_PYTHON" -c "import $pkg" 2>/dev/null || MISSING+=("$pkg")
+for pkg in "${CRITICAL[@]}"; do
+    "$VENV_PYTHON" -c "import ${pkg//-/_}" 2>/dev/null || MISSING+=("$pkg")
 done
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then
     warn "Could not import: ${MISSING[*]}"
     warn "Try re-running this script, or: $VENV_PIP install ${MISSING[*]}"
 else
-    ok "All packages verified"
+    ok "All critical packages verified"
 fi
 
-# ── Step 5: Launchers ─────────────────────────────────────────────────────────
-step 5 "Creating launchers"
+# ── Step 6: Launchers + project setup ─────────────────────────────────────────
+step 6 "Project setup & launchers"
 
-# Ensure expected output directories exist (scripts write here at runtime).
-for dir in valueData growthData valuationData portfolioData plots \
-           8_watchlist/watchlistData; do
+# ── 6a. Output directories ────────────────────────────────────────────────────
+# Scripts create these at runtime via os.makedirs(exist_ok=True), but creating
+# them here ensures a clean first run without any directory-not-found errors.
+OUTPUT_DIRS=(
+    # root-level (legacy scripts write here)
+    valueData growthData valuationData portfolioData scatterData plots
+    # per-script output dirs
+    5_scatterPlots/scatterData
+    6_sentimentAnalyzer/sentimentData
+    7_macroDashboard/macroData
+    8_watchlist/watchlistData
+    9_researchScanner/researchData
+    10_classifier/classifierData
+    11_growthScreeners/output
+    11_priceForecast/forecastData
+    12_magicFormula/formulaData
+    13_qualityScreener/qualityData
+    14_canslim/canslimData
+    15_earningsAccel/accelData
+    16_topicSentiment/topicData
+    deepDiveTickers
+)
+for dir in "${OUTPUT_DIRS[@]}"; do
     mkdir -p "$PROJECT_ROOT/$dir"
 done
-ok "Output directories verified"
+ok "Output directories verified (${#OUTPUT_DIRS[@]} dirs)"
 
-# ── 5a. start.sh ──────────────────────────────────────────────────────────────
-# Simple wrapper in the project root — works as long as the project folder
-# hasn't moved. Re-running install.sh regenerates it if needed.
+# ── 6b. Default CSV stubs ─────────────────────────────────────────────────────
+# Create empty-but-valid CSV stubs for files that scripts expect to exist.
+# Only written if the file does not already exist so user data is preserved.
+_write_csv_stub() {
+    local path="$1" header="$2"
+    if [[ ! -f "$path" ]]; then
+        echo "$header" > "$path"
+        info "Created default: $path"
+    fi
+}
+
+_write_csv_stub "$PROJECT_ROOT/deepDiveTickers/deepDiveTickers.csv"     "ticker,shares,added_date"
+_write_csv_stub "$PROJECT_ROOT/4_portfolioAnalyzer/deepDiveTickers.csv" "ticker,shares,added_date"
+_write_csv_stub "$PROJECT_ROOT/4_portfolioAnalyzer/currentlyOwnded.csv" "ticker,shares"
+ok "Default CSV stubs ready"
+
+# ── 6c. start.sh ──────────────────────────────────────────────────────────────
 START_SH="$PROJECT_ROOT/start.sh"
 cat > "$START_SH" <<STARTSH
 #!/usr/bin/env bash
@@ -252,7 +331,7 @@ STARTSH
 chmod +x "$START_SH"
 ok "start.sh written"
 
-# ── 5b. ~/bin/valuation-suite ─────────────────────────────────────────────────
+# ── 6d. ~/bin/valuation-suite ─────────────────────────────────────────────────
 BIN_DIR="$HOME/bin"
 mkdir -p "$BIN_DIR"
 CLI_SCRIPT="$BIN_DIR/valuation-suite"
@@ -284,17 +363,13 @@ else
     info "  $PATH_LINE"
 fi
 
-# ── 5c. macOS: rebuild ValuationSuite.app ────────────────────────────────────
-IS_MACOS=false
-[[ "$(uname -s)" == "Darwin" ]] && IS_MACOS=true
-
+# ── 6e. macOS: rebuild ValuationSuite.app ────────────────────────────────────
 if $IS_MACOS; then
     APP_DIR="$PROJECT_ROOT/ValuationSuite.app"
     MACOS_DIR="$APP_DIR/Contents/MacOS"
     RES_DIR="$APP_DIR/Contents/Resources"
     mkdir -p "$MACOS_DIR" "$RES_DIR"
 
-    # Info.plist — quoted heredoc so no variable expansion inside.
     cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -317,24 +392,18 @@ if $IS_MACOS; then
 </plist>
 PLIST
 
-    # Copy icon if present.
     ICNS_SRC="$PROJECT_ROOT/AppIcon.icns"
     if [[ -f "$ICNS_SRC" ]]; then
         cp "$ICNS_SRC" "$RES_DIR/AppIcon.icns"
-        touch "$APP_DIR"   # nudges Finder to refresh its icon cache
+        touch "$APP_DIR"
         ok "App icon applied"
     else
         warn "AppIcon.icns not found — app will use default icon"
     fi
 
-    # The launcher bakes in the absolute venv Python path.
-    # Copy the .app anywhere — it will always find the correct interpreter.
-    # Re-run install.sh if you move the project directory.
     cat > "$MACOS_DIR/ValuationSuite" <<LAUNCHER
 #!/usr/bin/env bash
 # ValuationSuite.app launcher — generated by install.sh on $(date "+%Y-%m-%d").
-# Baked-in paths: venv Python and project root.
-# Re-run install.sh if you move the project directory.
 
 if [[ ! -f "${PROJECT_ROOT}/app.py" ]]; then
     osascript -e 'display alert "ValuationSuite — Project Not Found" message "The project was not found at its installed location.\n\nRe-run install.sh to rebuild this launcher." as critical' 2>/dev/null || true
@@ -358,7 +427,7 @@ echo -e "  ${BLD}How to launch:${RST}"
 if $IS_MACOS; then
 echo -e "  ${CYN}①${RST}  Double-click  ${BLD}ValuationSuite.app${RST}  (copy to Desktop or Dock)"
 fi
-echo -e "  ${CYN}②${RST}  Terminal:     ${BLD}valuation-suite${RST}  (after opening a new shell)"
+echo -e "  ${CYN}②${RST}  Terminal:     ${BLD}valuation-suite${RST}  (after opening a new terminal tab)"
 echo -e "  ${CYN}③${RST}  Terminal:     ${BLD}bash ${PROJECT_ROOT}/start.sh${RST}"
 echo ""
 echo -e "  ${BLD}Updating later:${RST}   re-run ${CYN}bash install.sh${RST} — pulls latest code, upgrades packages."

@@ -25,6 +25,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import io
 import math
 import os
 import re
@@ -34,6 +35,8 @@ import urllib.request
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+
+import requests as _requests
 
 import numpy as np
 import pandas as pd
@@ -57,120 +60,113 @@ RED     = "#f87171"
 GOLD    = "#fbbf24"
 BLUE    = "#60a5fa"
 
-# ── Index constituent fetchers (copied from classifier.py) ─────────────────────
+# ── Index constituent fetchers ─────────────────────────────────────────────────
 
-def _wiki_table(url: str, ticker_col: str, name_col: str | None = None,
-                sector_col: str | None = None) -> list[dict]:
-    """Parse first wikitable from a Wikipedia URL."""
-    try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "GrowthScreenerBot/1.0 (educational)"}
-        )
-        with urllib.request.urlopen(req, timeout=20) as r:
-            html = r.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  Wikipedia fetch failed: {e}")
-        return []
-
-    table_m = re.search(r'<table[^>]*wikitable[^>]*>(.*?)</table>',
-                        html, re.DOTALL | re.IGNORECASE)
-    if not table_m:
-        return []
-
-    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_m.group(1), re.DOTALL | re.IGNORECASE)
-    if not rows:
-        return []
-
-    header_cells = re.findall(r'<th[^>]*>(.*?)</th>', rows[0], re.DOTALL | re.IGNORECASE)
-    headers = [re.sub(r'<[^>]+>', '', c).strip().replace('\n', ' ') for c in header_cells]
-
-    def col_idx(name: str | None) -> int | None:
-        if name is None:
-            return None
-        for i, h in enumerate(headers):
-            if name.lower() in h.lower():
-                return i
-        return None
-
-    ti = col_idx(ticker_col)
-    ni = col_idx(name_col)
-    si = col_idx(sector_col)
-
-    if ti is None:
-        return []
-
-    results = []
-    for row in rows[1:]:
-        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
-        cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
-        if len(cells) <= ti:
-            continue
-        ticker = cells[ti].split('\n')[0].strip()
-        if not ticker or not ticker.replace('.', '').replace('-', '').isalnum():
-            continue
-        results.append({
-            "ticker": ticker,
-            "name":   cells[ni].split('\n')[0].strip() if (ni is not None and len(cells) > ni) else ticker,
-            "sector": cells[si].split('\n')[0].strip() if (si is not None and len(cells) > si) else "Unknown",
-        })
-    return results
+_FETCH_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/122.0.0.0 Safari/537.36")
 
 
 def _get_spx() -> list[dict]:
+    """S&P 500 from Wikipedia (stable wikitable format)."""
     print("  Fetching S&P 500 constituents from Wikipedia...")
-    return _wiki_table(
-        "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
-        ticker_col="Symbol", name_col="Security", sector_col="GICS Sector"
-    )
+    try:
+        r = _requests.get(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            headers={"User-Agent": _FETCH_UA}, timeout=20
+        )
+        tbls = pd.read_html(io.StringIO(r.text), attrs={"class": "wikitable"})
+        df = tbls[0]
+        results = []
+        for _, row in df.iterrows():
+            t = str(row.get("Symbol", "")).strip()
+            if not t or t == "nan":
+                continue
+            results.append({
+                "ticker": t,
+                "name":   str(row.get("Security", t)),
+                "sector": str(row.get("GICS Sector", "Unknown")),
+            })
+        return results
+    except Exception as e:
+        print(f"  SPX fetch failed: {e}")
+        return []
+
+
+def _get_slickcharts(url: str, label: str) -> list[dict]:
+    """Parse slickcharts.com index page — first table has Company/Symbol/Weight."""
+    print(f"  Fetching {label} constituents from slickcharts.com...")
+    try:
+        r = _requests.get(url, headers={"User-Agent": _FETCH_UA}, timeout=20)
+        tbls = pd.read_html(io.StringIO(r.text))
+        df = tbls[0]  # first table is always the constituent list
+        results = []
+        for _, row in df.iterrows():
+            t = str(row.get("Symbol", "")).strip()
+            if not t or t == "nan":
+                continue
+            results.append({
+                "ticker": t,
+                "name":   str(row.get("Company", t)),
+                "sector": "Unknown",   # slickcharts has no sector; filled by yfinance later
+            })
+        return results
+    except Exception as e:
+        print(f"  {label} slickcharts fetch failed: {e}")
+        return []
 
 
 def _get_ndx() -> list[dict]:
-    print("  Fetching Nasdaq-100 constituents from Wikipedia...")
-    rows = _wiki_table(
-        "https://en.wikipedia.org/wiki/Nasdaq-100",
-        ticker_col="Ticker", name_col="Company", sector_col="Sector"
-    )
-    if not rows:
-        rows = _wiki_table(
-            "https://en.wikipedia.org/wiki/Nasdaq-100",
-            ticker_col="Symbol", name_col="Company", sector_col="Sector"
-        )
-    return rows
+    return _get_slickcharts("https://www.slickcharts.com/nasdaq100", "Nasdaq-100")
 
 
 def _get_dow() -> list[dict]:
-    print("  Fetching Dow Jones 30 constituents from Wikipedia...")
-    return _wiki_table(
-        "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
-        ticker_col="Symbol", name_col="Company", sector_col="Industry"
-    )
+    return _get_slickcharts("https://www.slickcharts.com/dowjones", "Dow Jones 30")
 
 
-def _get_tradingview(index_id: str, label: str) -> list[dict]:
-    print(f"  Fetching {label} constituents via TradingView screener...")
+def _get_rut() -> list[dict]:
+    """Russell 2000 from iShares IWM ETF holdings CSV — authoritative and current."""
+    print("  Fetching Russell 2000 constituents from iShares IWM holdings...")
+    url = ("https://www.ishares.com/us/products/239710/ishares-russell-2000-etf"
+           "/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund")
+    try:
+        r = _requests.get(url, headers={"User-Agent": _FETCH_UA}, timeout=30)
+        lines = r.text.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.startswith("Ticker"))
+        df = pd.read_csv(io.StringIO("\n".join(lines[start:])))
+        df = df[df["Asset Class"] == "Equity"]
+        results = []
+        for _, row in df.iterrows():
+            t = str(row.get("Ticker", "")).strip()
+            if not t or t == "nan" or t == "-":
+                continue
+            results.append({
+                "ticker": t,
+                "name":   str(row.get("Name", t)),
+                "sector": str(row.get("Sector", "Unknown")),
+            })
+        return results
+    except Exception as e:
+        print(f"  RUT iShares fetch failed: {e}")
+        return []
+
+
+def _get_tsx() -> list[dict]:
+    """S&P/TSX Composite via TradingView screener (Canada market)."""
+    print("  Fetching S&P/TSX constituents via TradingView screener...")
     try:
         from tradingview_screener import Query, Column
-        if index_id == "RUT":
-            q = (Query()
-                 .set_markets("america")
-                 .where(Column("is_primary") == True)
-                 .where(Column("index_membership").isin(["Russell 2000"]))
-                 .select("name", "full_name", "sector")
-                 .limit(2100))
-        else:  # TSX
-            q = (Query()
-                 .set_markets("canada")
-                 .where(Column("is_primary") == True)
-                 .select("name", "full_name", "sector")
-                 .limit(600))
-
+        q = (Query()
+             .set_markets("canada")
+             .where(Column("is_primary") == True)
+             .select("name", "full_name", "sector")
+             .limit(600))
         _, df = q.get_scanner_data()
         if df is None or df.empty:
             return []
-
         results = []
         for _, row in df.iterrows():
-            ticker = str(row.get("name", "")).replace("AMEX:", "").replace("NYSE:", "").replace("NASDAQ:", "")
+            ticker = str(row.get("name", "")).replace("TSX:", "")
             results.append({
                 "ticker": ticker,
                 "name":   str(row.get("full_name", ticker)),
@@ -178,7 +174,7 @@ def _get_tradingview(index_id: str, label: str) -> list[dict]:
             })
         return results
     except Exception as e:
-        print(f"  TradingView screener failed: {e}")
+        print(f"  TSX TradingView fetch failed: {e}")
         return []
 
 
@@ -191,9 +187,9 @@ def get_index_tickers(index: str) -> list[dict]:
     if index == "DOW":
         return _get_dow()
     if index == "RUT":
-        return _get_tradingview("RUT", "Russell 2000")
+        return _get_rut()
     if index == "TSX":
-        return _get_tradingview("TSX", "S&P/TSX")
+        return _get_tsx()
     return []
 
 
@@ -666,13 +662,95 @@ def _bool_badge(v):
     return '<span class="pass">&#10003;</span>' if v else '<span class="fail">&#8212;</span>'
 
 
+# ── Deep-dive watchlist bar (mirrors magicFormula.py / growthScreener.py) ─────
+_WL_CSS = """
+#wl-bar{display:flex;align-items:center;gap:10px;padding:7px 16px;
+  background:#1a1e2e;border-top:1px solid #252a3a;
+  position:sticky;bottom:0;z-index:100;}
+#wl-add-btn{background:#4f8ef7;color:#fff;border:none;border-radius:5px;
+  padding:6px 14px;font-size:12px;font-weight:600;cursor:pointer;}
+#wl-add-btn:hover{background:#6ba3ff;}
+#wl-clear-btn{background:transparent;color:#6b7194;border:1px solid #252a3a;
+  border-radius:5px;padding:6px 12px;font-size:12px;cursor:pointer;}
+#wl-clear-btn:hover{color:#e8eaf0;}
+.wl-toast{position:fixed;bottom:58px;right:20px;background:#1e2538;
+  border:1px solid #252a3a;color:#e8eaf0;padding:10px 16px;border-radius:6px;
+  font-size:12px;opacity:0;transition:opacity .3s;z-index:10000;max-width:340px;}
+.wl-toast.show{opacity:1;}
+.wl-toast.warn{border-color:#f0a500;color:#f0a500;}
+"""
+
+_WL_BAR = (
+    '<div id="wl-bar" style="opacity:.5;pointer-events:none;">'
+    '<span id="wl-count">0 selected</span>'
+    '<button id="wl-add-btn">+ Add to Deep Dive</button>'
+    '<button id="wl-clear-btn">Clear</button>'
+    '</div>'
+)
+
+_WL_JS_TMPL = r"""
+(function(){
+var WL_PORT=__PORT__;
+function wlTickers(){return[...document.querySelectorAll('input.row-check:checked')].map(function(c){return c.value;});}
+function wlUpdate(){
+  var n=wlTickers().length,cnt=document.getElementById('wl-count'),bar=document.getElementById('wl-bar');
+  if(cnt)cnt.textContent=n+' selected';
+  if(bar){bar.style.opacity=n>0?'1':'0.5';bar.style.pointerEvents=n>0?'auto':'none';}
+}
+function wlToast(msg,warn){
+  var t=document.createElement('div');
+  t.className='wl-toast'+(warn?' warn':'');
+  t.textContent=msg;document.body.appendChild(t);
+  setTimeout(function(){t.classList.add('show');},10);
+  setTimeout(function(){t.classList.remove('show');setTimeout(function(){t.remove();},400);},3500);
+}
+document.addEventListener('DOMContentLoaded',function(){
+  var allCb=document.getElementById('cb-all');
+  if(allCb)allCb.addEventListener('change',function(){
+    document.querySelectorAll('input.row-check').forEach(function(c){c.checked=allCb.checked;});
+    wlUpdate();
+  });
+  document.addEventListener('change',function(e){if(e.target.classList.contains('row-check'))wlUpdate();});
+  var addBtn=document.getElementById('wl-add-btn');
+  if(addBtn)addBtn.addEventListener('click',function(){
+    var tickers=wlTickers();if(!tickers.length)return;
+    fetch('http://localhost:'+WL_PORT+'/api/watchlist/add',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({tickers:tickers})
+    }).then(function(r){return r.ok?r.json():Promise.reject('HTTP '+r.status);})
+    .then(function(d){
+      wlToast('\u2713 '+d.added+' added to deep dive list'+(d.skipped?' \u00b7 '+d.skipped+' already present':'')+'  ('+d.total+' total)');
+      document.querySelectorAll('input.row-check,#cb-all').forEach(function(c){c.checked=false;});
+      wlUpdate();
+    }).catch(function(){
+      var csv='ticker,shares\n'+tickers.map(function(t){return t+',0';}).join('\n');
+      var a=document.createElement('a');
+      a.href='data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+      a.download='deepDiveTickers_export.csv';document.body.appendChild(a);a.click();a.remove();
+      wlToast('Suite offline \u2014 downloaded as CSV',true);
+    });
+  });
+  var clrBtn=document.getElementById('wl-clear-btn');
+  if(clrBtn)clrBtn.addEventListener('click',function(){
+    document.querySelectorAll('input.row-check,#cb-all').forEach(function(c){c.checked=false;});
+    wlUpdate();
+  });
+  wlUpdate();
+});
+})();
+"""
+
+def _wl_js(port: int) -> str:
+    return _WL_JS_TMPL.replace("__PORT__", str(port))
+
+
 # ── HTML report builder ────────────────────────────────────────────────────────
 
 def build_html(metrics_list: list[dict], index_name: str) -> str:
     import os as _os
     ts      = datetime.now().strftime("%Y-%m-%d %H:%M")
     total   = len(metrics_list)
-    wl_port = int(_os.environ.get("VALUATION_SUITE_PORT", 5050))
+    suite_port = int(_os.environ.get("VALUATION_SUITE_PORT", 5050))
 
     # Screener pass counts
     sc = {
@@ -1046,38 +1124,12 @@ def build_html(metrics_list: list[dict], index_name: str) -> str:
   ::-webkit-scrollbar-thumb {{ background: var(--border); border-radius: 3px; }}
   ::-webkit-scrollbar-thumb:hover {{ background: var(--accent); }}
 
-  /* ── Deep-dive checkboxes & sticky bar ── */
+  /* ── Deep-dive checkboxes ── */
   .cb-th  {{ width: 28px; text-align: center; padding: 4px 2px; }}
   .cb-cell {{ width: 28px; text-align: center; padding: 4px 2px; }}
   input.row-check {{ cursor: pointer; width: 14px; height: 14px; accent-color: #7c6af7; }}
-  #wl-bar {{
-    display: flex; align-items: center; gap: 10px;
-    padding: 7px 16px;
-    background: var(--panel); border-top: 1px solid var(--border);
-    position: sticky; bottom: 0; z-index: 100;
-  }}
-  #wl-add-btn {{
-    background: var(--accent); color: #fff; border: none;
-    border-radius: 5px; padding: 6px 14px;
-    font-size: 12px; font-weight: 600; cursor: pointer;
-  }}
-  #wl-add-btn:hover {{ background: #9b8cff; }}
-  #wl-clear-btn {{
-    background: transparent; color: var(--subtext);
-    border: 1px solid var(--border); border-radius: 5px;
-    padding: 6px 12px; font-size: 12px; cursor: pointer;
-  }}
-  #wl-clear-btn:hover {{ color: var(--text); }}
-  .wl-toast {{
-    position: fixed; bottom: 58px; right: 20px;
-    background: #1e2538; border: 1px solid var(--border);
-    color: var(--text); padding: 10px 16px; border-radius: 6px;
-    font-size: 12px; opacity: 0; transition: opacity .3s;
-    z-index: 10000; max-width: 340px;
-  }}
-  .wl-toast.show {{ opacity: 1; }}
-  .wl-toast.warn  {{ border-color: #f0a500; color: #f0a500; }}
 </style>
+<style>{_WL_CSS}</style>
 </head>
 <body>
 
@@ -1341,92 +1393,8 @@ function exportCSV() {{
 }})();
 </script>
 
-<!-- ── Deep-dive sticky bar ───────────────────────────────────────────────── -->
-<div id="wl-bar" style="opacity:.5;pointer-events:none;">
-  <span id="wl-count">0 selected</span>
-  <button id="wl-add-btn">+ Add to Deep Dive</button>
-  <button id="wl-clear-btn">Clear</button>
-</div>
-
-<script>
-(function(){{
-  var WL_PORT = {wl_port};
-
-  function wlTickers() {{
-    return [...document.querySelectorAll('input.row-check:checked')].map(c => c.value);
-  }}
-
-  function wlUpdate() {{
-    var n   = wlTickers().length;
-    var cnt = document.getElementById('wl-count');
-    var bar = document.getElementById('wl-bar');
-    if (cnt) cnt.textContent = n + ' selected';
-    if (bar) {{
-      bar.style.opacity       = n > 0 ? '1'    : '0.5';
-      bar.style.pointerEvents = n > 0 ? 'auto' : 'none';
-    }}
-  }}
-
-  function wlToast(msg, warn) {{
-    var t = document.createElement('div');
-    t.className = 'wl-toast' + (warn ? ' warn' : '');
-    t.textContent = msg;
-    document.body.appendChild(t);
-    setTimeout(() => t.classList.add('show'), 10);
-    setTimeout(() => {{ t.classList.remove('show'); setTimeout(() => t.remove(), 400); }}, 3500);
-  }}
-
-  document.addEventListener('DOMContentLoaded', function() {{
-    // Select-all checkbox — only toggles visible rows
-    var allCb = document.getElementById('cb-all');
-    if (allCb) allCb.addEventListener('change', function() {{
-      document.querySelectorAll('#table-body tr:not(.hidden) input.row-check')
-        .forEach(c => c.checked = allCb.checked);
-      wlUpdate();
-    }});
-
-    document.addEventListener('change', function(e) {{
-      if (e.target.classList.contains('row-check')) wlUpdate();
-    }});
-
-    document.getElementById('wl-add-btn').addEventListener('click', function() {{
-      var tickers = wlTickers();
-      if (!tickers.length) return;
-      fetch('http://localhost:' + WL_PORT + '/api/watchlist/add', {{
-        method:  'POST',
-        headers: {{'Content-Type': 'application/json'}},
-        body:    JSON.stringify({{tickers: tickers}}),
-      }})
-      .then(r => r.ok ? r.json() : Promise.reject('HTTP ' + r.status))
-      .then(d => {{
-        wlToast('\u2713 ' + d.added + ' added to deep dive'
-          + (d.skipped ? ' \u00b7 ' + d.skipped + ' already present' : '')
-          + '  (' + d.total + ' total)');
-        document.querySelectorAll('input.row-check, #cb-all')
-          .forEach(c => c.checked = false);
-        wlUpdate();
-      }})
-      .catch(() => {{
-        // Suite offline — fall back to CSV download
-        var csv = 'ticker,shares\n' + tickers.map(t => t + ',0').join('\n');
-        var a   = document.createElement('a');
-        a.href  = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csv);
-        a.download = 'deepDiveTickers_export.csv';
-        document.body.appendChild(a); a.click(); a.remove();
-        wlToast('Suite offline \u2014 downloaded as CSV', true);
-      }});
-    }});
-
-    document.getElementById('wl-clear-btn').addEventListener('click', function() {{
-      document.querySelectorAll('input.row-check, #cb-all')
-        .forEach(c => c.checked = false);
-      wlUpdate();
-    }});
-
-    wlUpdate();
-  }});
-}})();
-</script>
+<script>{_wl_js(suite_port)}</script>
+{_WL_BAR}
 </body>
 </html>"""
 

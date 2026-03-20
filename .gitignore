@@ -15,11 +15,41 @@ venv/
 env/
 .env
 
-# Output data directories (generated HTML/CSV reports)
+# ── Generated output directories (HTML reports, CSV exports, cached data) ──────
+# These are created at runtime by each script and should not be committed.
+valueData/
+growthData/
+valuationData/
+portfolioData/
+scatterData/
+sentimentData/
+macroData/
+forecastData/
+topicData/
+researchData/
+classifierData/
+plots/
+
 1_valueScreener/valueData/
 2_growthScreener/growthData/
 3_valuationTool/valuationData/
 4_portfolioAnalyzer/portfolioData/
+5_scatterPlots/scatterData/
+6_sentimentAnalyzer/sentimentData/
+7_macroDashboard/macroData/
+8_watchlist/watchlistData/
+9_researchScanner/researchData/
+10_classifier/classifierData/
+11_priceForecast/forecastData/
+11_growthScreeners/output/
+12_magicFormula/formulaData/
+13_qualityScreener/qualityData/
+14_canslim/canslimData/
+15_earningsAccel/accelData/
+16_topicSentiment/topicData/
+
+# yfinance cache written by growthScreener
+2_growthScreener/.yf_cache.json
 
 # macOS
 .DS_Store
