@@ -384,9 +384,13 @@ FEATURE_COLS = [
 
 def _build_training_rows(ticker_data_list: list[dict]) -> pd.DataFrame:
     """
-    For each ticker that has earnings_history, use the aggregate features
-    (computed from current info snapshot) as a proxy feature row and label
-    each historical quarter beat/miss individually.
+    One row per ticker.  Label = beat in the most-recent quarter (holdout).
+    beat_rate feature = computed on the remaining quarters (leave-one-out)
+    so there is no label leakage from the feature.
+
+    This avoids the fatal flaw of the previous approach where every ticker
+    contributed N identical feature rows (current-day snapshot × N quarters),
+    which caused the model to predict the unconditional base-rate for everyone.
     """
     rows = []
     for td in ticker_data_list:
@@ -394,7 +398,7 @@ def _build_training_rows(ticker_data_list: list[dict]) -> pd.DataFrame:
         if eh is None or (hasattr(eh, "empty") and eh.empty):
             continue
         try:
-            cols_lower = {c.lower(): c for c in eh.columns}
+            cols_lower   = {c.lower(): c for c in eh.columns}
             actual_col   = cols_lower.get("epsactual",   cols_lower.get("reported eps", None))
             estimate_col = cols_lower.get("epsestimate", cols_lower.get("eps estimate", None))
             if actual_col is None or estimate_col is None:
@@ -402,18 +406,37 @@ def _build_training_rows(ticker_data_list: list[dict]) -> pd.DataFrame:
             df_eh = eh[[actual_col, estimate_col]].dropna().head(8)
             if df_eh.empty:
                 continue
-            for idx_pos in range(len(df_eh)):
-                row = {}
-                for f in FEATURE_COLS:
-                    row[f] = td.get(f, np.nan)
-                # Override beat_rate / avg_surprise with leave-one-out or all
-                actual_arr   = df_eh[actual_col].astype(float).values
-                estimate_arr = df_eh[estimate_col].astype(float).values
-                label = int(actual_arr[idx_pos] >= estimate_arr[idx_pos])
-                row["label"] = label
-                rows.append(row)
+
+            actual_arr   = df_eh[actual_col].astype(float).values
+            estimate_arr = df_eh[estimate_col].astype(float).values
+
+            # Label: did the company beat in its most-recent reported quarter?
+            label = int(actual_arr[0] >= estimate_arr[0])
+
+            # Leave-one-out beat_rate: computed on quarters 1-N (exclude most-recent)
+            if len(actual_arr) >= 2:
+                rest_beats  = (actual_arr[1:] >= estimate_arr[1:]).astype(float)
+                loo_beat_rate = float(rest_beats.mean())
+                loo_avg_surp  = float(
+                    np.nanmean((actual_arr[1:] - estimate_arr[1:]) /
+                               np.abs(estimate_arr[1:]).clip(min=1e-6) * 100)
+                )
+            else:
+                loo_beat_rate = np.nan
+                loo_avg_surp  = np.nan
+
+            row = {}
+            for f in FEATURE_COLS:
+                row[f] = td.get(f, np.nan)
+            # Override with leave-one-out versions (no leakage)
+            row["beat_rate"]      = loo_beat_rate
+            row["avg_surprise_pct"] = loo_avg_surp
+            row["label"] = label
+            rows.append(row)
+
         except Exception:
             continue
+
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
@@ -727,6 +750,9 @@ def main() -> None:
                         help="Suite port for WL endpoint (default: 5050)")
     args = parser.parse_args()
 
+    import logging as _logging
+    _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
+
     index_name     = "CUSTOM" if (args.csv_file or args.tickers) else args.index
     today          = datetime.now(timezone.utc).date()
     cutoff         = today + timedelta(days=args.days)
@@ -789,6 +815,9 @@ def main() -> None:
             print(f"  WARNING: only {n_train} training samples — predictions may be unreliable.", flush=True)
 
         from xgboost import XGBClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.pipeline import Pipeline
         from sklearn.model_selection import StratifiedKFold, cross_validate
         from sklearn.metrics import make_scorer, roc_auc_score, accuracy_score
 
@@ -800,15 +829,30 @@ def main() -> None:
             med = X[col].median()
             X[col] = X[col].fillna(med if np.isfinite(med) else 0.0)
 
-        model = XGBClassifier(
-            n_estimators=200, max_depth=4, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
-            scale_pos_weight=1.0,
-            eval_metric="logloss", random_state=42, n_jobs=-1,
-        )
+        # With small training sets XGBoost collapses to the base rate.
+        # Use logistic regression (L2) for <150 samples — it generalises
+        # better and produces calibrated, differentiated probabilities.
+        USE_XGB = n_train >= 150
+        if USE_XGB:
+            model = XGBClassifier(
+                n_estimators=100, max_depth=3, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, min_child_weight=3,
+                scale_pos_weight=1.0,
+                eval_metric="logloss", random_state=42, n_jobs=-1,
+            )
+            model_name = "XGBoost"
+        else:
+            model = Pipeline([
+                ("scaler", StandardScaler()),
+                ("clf",    LogisticRegression(
+                    C=0.5, max_iter=1000, random_state=42,
+                    class_weight="balanced",
+                )),
+            ])
+            model_name = "Logistic Regression"
 
         # ── 4. Cross-validate ──────────────────────────────────────────────
-        print("  Training XGBoost (CV)...", flush=True)
+        print(f"  Training {model_name} (CV, {n_train} samples)...", flush=True)
         skf = StratifiedKFold(n_splits=min(5, int(y.value_counts().min())), shuffle=True, random_state=42)
         try:
             cv_res = cross_validate(
@@ -830,7 +874,17 @@ def main() -> None:
 
         # Retrain on full data
         model.fit(X, y)
-        fi_dict = dict(zip(FEATURE_COLS, model.feature_importances_.tolist()))
+        # Extract feature importances — method differs by model type
+        try:
+            if USE_XGB:
+                importances = model.feature_importances_.tolist()
+            else:
+                # Logistic regression: use absolute coefficient magnitudes
+                coefs = model.named_steps["clf"].coef_[0]
+                importances = np.abs(coefs).tolist()
+            fi_dict = dict(zip(FEATURE_COLS, importances))
+        except Exception:
+            fi_dict = {}
 
     # ── 5. Identify upcoming earnings ─────────────────────────────────────
     print(f"  Identifying upcoming earnings ({args.days}-day window)...", flush=True)

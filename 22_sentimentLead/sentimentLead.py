@@ -6,7 +6,7 @@ sentiment with forward returns, fits a predictive regression, and outputs a
 signal quality dashboard as an HTML report.
 
 Usage:
-    python sentimentLead.py --ticker AAPL [--lookback 180] [--lags 10]
+    python sentimentLead.py --ticker AAPL [--lookback 30] [--lags 10]
 """
 
 import sys
@@ -26,6 +26,27 @@ import yfinance as yf
 import requests as _req
 
 warnings.filterwarnings("ignore")
+
+# ---------------------------------------------------------------------------
+# Load .env from project root (if present) — never commit .env to git
+# ---------------------------------------------------------------------------
+def _load_env() -> None:
+    """Parse KEY=value lines from .env in the project root directory."""
+    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and val and key not in os.environ:
+                os.environ[key] = val
+
+_load_env()
 
 # ---------------------------------------------------------------------------
 # VADER sentiment
@@ -145,13 +166,67 @@ def _fetch_gnews_rss(ticker: str) -> list[dict]:
     return items
 
 
-def collect_news(ticker: str, lookback: int) -> pd.DataFrame:
-    """Collect, deduplicate, and return news as a DataFrame."""
+def _fetch_finnhub_news(ticker: str, lookback: int, api_key: str) -> list[dict]:
+    """
+    Fetch historical company news from Finnhub.
+    Free tier: 60 calls/min, ~1 year of history, true per-ticker filtering.
+    Sign up free at https://finnhub.io — no credit card required.
+    """
+    items = []
+    try:
+        end_dt   = datetime.utcnow()
+        start_dt = end_dt - timedelta(days=lookback + 5)
+        url = (
+            "https://finnhub.io/api/v1/company-news"
+            f"?symbol={ticker}"
+            f"&from={start_dt.strftime('%Y-%m-%d')}"
+            f"&to={end_dt.strftime('%Y-%m-%d')}"
+            f"&token={api_key}"
+        )
+        r = _req.get(url, timeout=10)
+        if r.status_code != 200:
+            return items
+        for article in (r.json() or []):
+            ts = article.get("datetime", 0)
+            if not ts:
+                continue
+            dt      = datetime.utcfromtimestamp(int(ts))
+            headline = article.get("headline", "")
+            summary  = article.get("summary", "")
+            text     = f"{headline} {summary}".strip()
+            if not text:
+                continue
+            items.append({
+                "title":  headline,
+                "text":   text,
+                "dt":     dt,
+                "source": article.get("source", "finnhub"),
+            })
+    except Exception:
+        pass
+    return items
+
+
+def collect_news(ticker: str, lookback: int,
+                 finnhub_key: str = "") -> pd.DataFrame:
+    """
+    Collect, deduplicate, and return news as a DataFrame.
+    If a Finnhub API key is provided, it is used as the primary source
+    (genuine historical data up to 1 year back).  Falls back to yfinance
+    + Google News RSS when no key is given (limited to ~2 weeks of recency).
+    """
     cutoff = datetime.utcnow() - timedelta(days=lookback + 5)
 
     all_items: list[dict] = []
-    all_items.extend(_fetch_yfinance_news(ticker))
-    all_items.extend(_fetch_gnews_rss(ticker))
+    if finnhub_key:
+        fh_items = _fetch_finnhub_news(ticker, lookback, finnhub_key)
+        all_items.extend(fh_items)
+        if fh_items:
+            print(f"  Finnhub: {len(fh_items)} articles fetched", flush=True)
+    if not all_items:
+        # Free fallback — only covers ~2 weeks regardless of lookback setting
+        all_items.extend(_fetch_yfinance_news(ticker))
+        all_items.extend(_fetch_gnews_rss(ticker))
 
     if not all_items:
         return pd.DataFrame(columns=["dt", "title", "text", "source"])
@@ -187,20 +262,22 @@ def score_news(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def daily_sentiment(news_df: pd.DataFrame, lookback: int) -> pd.Series:
-    """Aggregate compound scores to daily average. Fill missing days with 0."""
+    """Aggregate compound scores to daily average.
+    Only returns days that actually have news — do NOT fill gaps with 0.
+    Filling with 0 adds fake 'neutral' signal on no-news days, diluting
+    correlations and causing the regression to predict the base rate.
+    """
     if news_df.empty:
         return pd.Series(dtype=float)
 
     news_df = news_df.copy()
     news_df["date"] = pd.to_datetime(news_df["dt"]).dt.normalize()
     daily = news_df.groupby("date")["compound"].mean()
-
-    # Build full date range
-    end = pd.Timestamp.utcnow().normalize().tz_localize(None)
-    start = end - pd.Timedelta(days=lookback + 5)
-    idx = pd.date_range(start, end, freq="D")
-    daily = daily.reindex(idx, fill_value=0.0)
-    return daily
+    daily.index = pd.to_datetime(daily.index).tz_localize(None)
+    # Keep only dates within the lookback window
+    cutoff = pd.Timestamp.utcnow().normalize().tz_localize(None) - pd.Timedelta(days=lookback + 5)
+    daily = daily[daily.index >= cutoff]
+    return daily.sort_index()
 
 
 # ===========================================================================
@@ -236,61 +313,102 @@ def fetch_returns(ticker: str, lookback: int) -> pd.Series:
 def lead_lag_analysis(sentiment: pd.Series, returns: pd.Series,
                       max_lag: int) -> pd.DataFrame:
     """
-    Compute Pearson and Spearman correlations for lag k in [-max_lag, max_lag].
-    Positive k  → sentiment leads returns (sentiment at t predicts return at t+k).
-    Negative k  → sentiment lags returns (return at t+k was driven by return at t).
+    Compute Spearman correlations for lag k in [-max_lag, max_lag].
+    Operates only on news days (where sentiment is non-zero / actually observed).
+    Positive k → sentiment at t predicts return at t+k (sentiment leads).
+    Negative k → return moved first, sentiment followed (sentiment lags).
+    Uses Spearman (rank) correlation — more robust with small N and non-normal data.
     """
-    # Align on common dates (business days in returns)
-    common = sentiment.index.intersection(returns.index)
-    s = sentiment.loc[common]
-    r = returns.loc[common]
+    # Build a returns lookup for any date offset
+    ret_idx = returns.index
 
     records = []
     for k in range(-max_lag, max_lag + 1):
-        if k == 0:
-            # k=0: contemporaneous
-            paired = pd.DataFrame({"s": s, "r": r}).dropna()
-        elif k > 0:
-            # sentiment at t predicts return at t+k
-            s_shifted = s.shift(-k)
-            paired = pd.DataFrame({"s": s_shifted, "r": r}).dropna()
-        else:
-            # k<0: return at t+k was followed by sentiment at t (sentiment lags)
-            s_shifted = s.shift(-k)
-            paired = pd.DataFrame({"s": s_shifted, "r": r}).dropna()
+        pairs_s, pairs_r = [], []
+        for dt, s_val in sentiment.items():
+            target_dt = dt + pd.Timedelta(days=k)
+            # Find the nearest trading day within ±2 calendar days
+            candidates = ret_idx[np.abs((ret_idx - target_dt).days) <= 2]
+            if len(candidates) == 0:
+                continue
+            nearest = candidates[np.abs((candidates - target_dt).days).argmin()]
+            pairs_s.append(s_val)
+            pairs_r.append(float(returns.loc[nearest]))
 
-        if len(paired) < 10:
-            records.append({"lag": k, "pearson": np.nan, "spearman": np.nan,
-                            "n": len(paired)})
+        n = len(pairs_s)
+        if n < 5:
+            records.append({"lag": k, "pearson": np.nan, "spearman": np.nan, "n": n})
             continue
 
-        pearson = paired["s"].corr(paired["r"], method="pearson")
-        spearman = paired["s"].corr(paired["r"], method="spearman")
-        records.append({"lag": k, "pearson": pearson, "spearman": spearman,
-                        "n": len(paired)})
+        arr_s = np.array(pairs_s)
+        arr_r = np.array(pairs_r)
+        pearson  = float(pd.Series(arr_s).corr(pd.Series(arr_r), method="pearson"))
+        spearman = float(pd.Series(arr_s).corr(pd.Series(arr_r), method="spearman"))
+        records.append({"lag": k, "pearson": pearson, "spearman": spearman, "n": n})
 
     return pd.DataFrame(records).set_index("lag")
 
 
 def find_best_lead(corr_df: pd.DataFrame) -> tuple[int, float]:
-    """Return (lag, pearson_r) for the best positive-lag correlation."""
-    pos = corr_df[corr_df.index > 0]["pearson"].dropna()
+    """Return (lag, spearman_r) for the best positive-lag correlation."""
+    pos = corr_df[corr_df.index > 0]["spearman"].dropna()
     if pos.empty:
         return 1, 0.0
     best_lag = int(pos.idxmax())
-    best_r = float(pos.max())
+    best_r   = float(pos.max())
     return best_lag, best_r
 
 
+def event_study(sentiment: pd.Series, returns: pd.Series,
+                horizons: list[int] | None = None) -> pd.DataFrame:
+    """
+    For each news day, bucket by sentiment sign and compute average
+    cumulative return over forward horizons (1, 3, 5, 10 days).
+    Returns DataFrame with columns: horizon, pos_ret, neg_ret, diff.
+    """
+    if horizons is None:
+        horizons = [1, 3, 5, 10]
+    ret_idx = returns.index
+    pos_days = sentiment[sentiment >  0.05]
+    neg_days = sentiment[sentiment < -0.05]
+
+    def _cum_ret(days_series, horizon):
+        vals = []
+        for dt in days_series.index:
+            future = dt + pd.Timedelta(days=horizon)
+            cands  = ret_idx[(ret_idx > dt) & (ret_idx <= future + pd.Timedelta(days=3))]
+            if len(cands) == 0:
+                continue
+            r_slice = returns.loc[cands[cands <= future + pd.Timedelta(days=3)]]
+            cum = float(r_slice.sum()) * 100
+            vals.append(cum)
+        return np.nanmean(vals) if vals else np.nan
+
+    rows = []
+    for h in horizons:
+        rows.append({
+            "horizon":  h,
+            "pos_ret":  _cum_ret(pos_days,  h),
+            "neg_ret":  _cum_ret(neg_days,  h),
+            "n_pos":    len(pos_days),
+            "n_neg":    len(neg_days),
+        })
+    df = pd.DataFrame(rows)
+    df["diff"] = df["pos_ret"] - df["neg_ret"]
+    return df
+
+
 # ===========================================================================
-# Walk-forward regression
+# Walk-forward regression (news-days only)
 # ===========================================================================
 
 def walk_forward_regression(sentiment: pd.Series, returns: pd.Series,
                              lag: int) -> dict:
     """
-    Train OLS on first 70%, evaluate on last 30%.
-    Feature: sentiment(t - lag), Target: return(t).
+    OLS regression using ONLY news days (non-zero sentiment).
+    Feature: sentiment(t), Target: cumulative return over next `lag` trading days.
+    This avoids the sparse-zero-filling problem that causes the model to predict
+    the unconditional mean for every ticker.
     """
     result = {
         "beta": np.nan, "tstat": np.nan, "pvalue": np.nan,
@@ -304,52 +422,60 @@ def walk_forward_regression(sentiment: pd.Series, returns: pd.Series,
         result["note"] = "statsmodels not available — regression skipped."
         return result
 
-    common = sentiment.index.intersection(returns.index)
-    s = sentiment.loc[common]
-    r = returns.loc[common]
+    ret_idx = returns.index
 
-    # Lag the sentiment: feature at time t is sentiment from t-lag days ago
-    s_lagged = s.shift(lag)
-    df_reg = pd.DataFrame({"feat": s_lagged, "target": r}).dropna()
+    # Build (sentiment, forward_return) pairs — only on news days
+    pairs = []
+    for dt, s_val in sentiment.items():
+        future = dt + pd.Timedelta(days=lag)
+        cands  = ret_idx[(ret_idx > dt) & (ret_idx <= future + pd.Timedelta(days=3))]
+        if len(cands) == 0:
+            continue
+        r_slice = returns.loc[cands[cands <= future + pd.Timedelta(days=3)]]
+        cum_ret = float(r_slice.sum())
+        pairs.append({"feat": s_val, "target": cum_ret, "dt": dt})
 
-    if len(df_reg) < 20:
-        result["note"] = "Insufficient overlapping data for regression."
+    if len(pairs) < 8:
+        result["note"] = f"Only {len(pairs)} news days — insufficient for regression."
         return result
 
-    n = len(df_reg)
-    n_train = int(n * 0.70)
-    n_test = n - n_train
+    df_reg = pd.DataFrame(pairs).sort_values("dt").reset_index(drop=True)
+    n       = len(df_reg)
+    n_train = max(int(n * 0.70), n - 5)   # keep at least 5 OOS points
+    n_test  = n - n_train
+
+    if n_test < 3:
+        result["note"] = "Too few out-of-sample points — showing in-sample only."
+        n_train = n
+        n_test  = 0
 
     train = df_reg.iloc[:n_train]
-    test = df_reg.iloc[n_train:]
-
+    test  = df_reg.iloc[n_train:]
     result["n_train"] = n_train
-    result["n_test"] = n_test
-
-    X_train = sm.add_constant(train["feat"])
-    y_train = train["target"]
+    result["n_test"]  = n_test
 
     try:
-        model = sm.OLS(y_train, X_train).fit()
+        X_train = sm.add_constant(train["feat"])
+        model   = sm.OLS(train["target"], X_train).fit()
         result["beta"]   = float(model.params.get("feat", np.nan))
         result["tstat"]  = float(model.tvalues.get("feat", np.nan))
         result["pvalue"] = float(model.pvalues.get("feat", np.nan))
         result["r2_is"]  = float(model.rsquared)
 
-        # OOS evaluation
-        X_test = sm.add_constant(test["feat"])
-        y_test = test["target"]
-        y_pred = model.predict(X_test)
-
-        ss_res = float(((y_test - y_pred) ** 2).sum())
-        ss_tot = float(((y_test - y_test.mean()) ** 2).sum())
-        oos_r2 = 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
-        result["r2_oos"] = float(oos_r2)
-
-        if not np.isnan(oos_r2) and oos_r2 >= 0:
-            result["is_predictive"] = True
+        if n_test >= 3:
+            X_test = sm.add_constant(test["feat"])
+            y_pred = model.predict(X_test)
+            y_test = test["target"]
+            ss_res = float(((y_test - y_pred) ** 2).sum())
+            ss_tot = float(((y_test - y_test.mean()) ** 2).sum())
+            oos_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+            result["r2_oos"]       = float(oos_r2)
+            result["is_predictive"] = bool(np.isfinite(oos_r2) and oos_r2 >= 0)
+            if not result["is_predictive"]:
+                result["note"] = "Sentiment not predictive in OOS period."
         else:
-            result["note"] = "Sentiment signal not predictive in out-of-sample period"
+            result["r2_oos"]        = np.nan
+            result["is_predictive"] = result["r2_is"] > 0.02 and result["pvalue"] < 0.10
 
     except Exception as exc:
         result["note"] = f"Regression error: {exc}"
@@ -361,17 +487,139 @@ def walk_forward_regression(sentiment: pd.Series, returns: pd.Series,
 # Signal quality badge
 # ===========================================================================
 
-def signal_badge(oos_r2: float, beta: float) -> tuple[str, str]:
-    """Return (label, color) for signal quality badge."""
-    if np.isnan(oos_r2):
+def signal_badge(best_r: float, beta: float, oos_r2: float) -> tuple[str, str]:
+    """
+    Return (label, color).  Primary signal: Spearman r at best lead lag.
+    OOS R² is secondary — only available when N is large enough for a split.
+    Thresholds:
+      |r| ≥ 0.35 → meaningful correlation for sentiment data
+      |r| ≥ 0.20 → weak but present
+    """
+    if np.isnan(best_r):
         return "No Signal", MUTED
-    if oos_r2 >= 0.02 and beta > 0:
-        return "Strong Signal", GREEN
-    if 0.0 <= oos_r2 < 0.02 and beta > 0:
+    # OOS R² is the gold standard when available
+    if np.isfinite(oos_r2):
+        if oos_r2 >= 0.03 and beta > 0:
+            return "Strong Signal ✓", GREEN
+        if oos_r2 >= 0.01 and beta > 0:
+            return "Weak Signal", YELLOW
+        if oos_r2 >= 0 and beta < 0:
+            return "Contrarian Signal", ACCENT
+    # Fall back to Spearman r at best lead lag
+    if best_r >= 0.35:
+        return "Strong Signal ✓", GREEN
+    if best_r >= 0.20:
         return "Weak Signal", YELLOW
-    if oos_r2 >= 0 and beta < 0:
+    if best_r <= -0.20:
         return "Contrarian Signal", ACCENT
     return "No Signal", MUTED
+
+
+# ===========================================================================
+# Plain-language interpretation
+# ===========================================================================
+
+def build_interpretation(
+    ticker: str,
+    best_lag: int,
+    best_r: float,
+    reg: dict,
+    badge_label: str,
+    today_sentiment: float,
+    n_days: int,
+    lookback: int,
+) -> str:
+    """
+    Generate a plain-English paragraph explaining what the numbers mean,
+    including the apparent contradiction between a positive Spearman r
+    and a negative OOS R².
+    """
+    lines: list[str] = []
+
+    # ── Lead-lag finding ─────────────────────────────────────────────────────
+    r_str    = f"{best_r:.2f}"
+    lag_str  = f"{best_lag} trading day{'s' if best_lag != 1 else ''}"
+    r_word   = "strong" if best_r >= 0.40 else ("moderate" if best_r >= 0.25 else "weak")
+    lines.append(
+        f"<b>Lead-lag relationship.</b> The analysis found a {r_word} cross-correlation "
+        f"(Spearman r&nbsp;=&nbsp;{r_str}) between {ticker} news sentiment and price returns "
+        f"at a <b>{lag_str} forward lag</b>. This means that on the news days captured in "
+        f"this window, sentiment tended to point in the same direction as the stock's move "
+        f"{lag_str} later."
+    )
+
+    # ── Explain Strong Signal vs negative OOS R² ─────────────────────────────
+    oos_r2   = reg.get("r2_oos", float("nan"))
+    n_train  = reg.get("n_train", 0)
+    n_test   = reg.get("n_test",  0)
+    is_r2    = reg.get("r2_is",   float("nan"))
+
+    if "Strong Signal" in badge_label or "Weak Signal" in badge_label:
+        if math.isfinite(oos_r2) and oos_r2 < 0:
+            lines.append(
+                f"<b>Why does the badge say '{badge_label}' but OOS R² is negative?</b> "
+                f"These two metrics measure different things. The <i>Spearman correlation</i> "
+                f"asks: &ldquo;across all {n_days} news days, does higher sentiment tend to precede "
+                f"higher returns {lag_str} later?&rdquo; It answers yes (r&nbsp;=&nbsp;{r_str}). "
+                f"The <i>OOS R&sup2;</i> asks something stricter: &ldquo;if we train a regression on the "
+                f"first {n_train} news days and predict the last {n_test}, does the model beat "
+                f"simply guessing the average?&rdquo; With only {n_test} test-set observations, a "
+                f"single outlier day can swing OOS R² from positive to strongly negative — "
+                f"it is statistically unreliable at this sample size. "
+                f"The correlation ({r_str}) is the more trustworthy signal here; "
+                f"OOS R² becomes meaningful with 50+ news days."
+            )
+        elif math.isfinite(oos_r2) and oos_r2 >= 0:
+            lines.append(
+                f"<b>Signal consistency.</b> The positive OOS R² ({oos_r2:.3f}) confirms "
+                f"that the relationship held in the held-out test period (last {n_test} news days), "
+                f"not just in the training window. This increases confidence that the "
+                f"{lag_str} lead is genuine rather than a chance correlation."
+            )
+
+    # ── Today's sentiment implication ────────────────────────────────────────
+    if math.isfinite(today_sentiment):
+        sent_word = (
+            "strongly positive" if today_sentiment >  0.30 else
+            "mildly positive"   if today_sentiment >  0.05 else
+            "neutral"           if today_sentiment >= -0.05 else
+            "mildly negative"   if today_sentiment >= -0.30 else
+            "strongly negative"
+        )
+        direction = "upward" if today_sentiment > 0.05 else ("downward" if today_sentiment < -0.05 else "flat")
+        if "Signal" in badge_label and "No Signal" not in badge_label:
+            lines.append(
+                f"<b>Today's signal.</b> Today's sentiment for {ticker} is "
+                f"<b>{sent_word} ({today_sentiment:+.3f})</b>. If the historical "
+                f"{lag_str} lead holds, this is consistent with <b>{direction} price pressure "
+                f"over the next {lag_str}</b>. Treat this as one probabilistic input — "
+                f"not a forecast."
+            )
+        else:
+            lines.append(
+                f"<b>Today's sentiment</b> is {sent_word} ({today_sentiment:+.3f}), "
+                f"but the overall signal quality is insufficient to draw directional conclusions."
+            )
+
+    # ── Data coverage caveat ─────────────────────────────────────────────────
+    lines.append(
+        f"<b>Data coverage.</b> This analysis used <b>{n_days} news days</b> from a "
+        f"{lookback}-day lookback window. "
+        + (
+            "News data sourced from <b>Finnhub</b> — up to 1 year of genuine historical "
+            "per-ticker coverage on the free tier."
+            if n_days >= 20 and lookback >= 60
+            else
+            "Free news sources (Google News RSS, yfinance) carry roughly 2–3 weeks of "
+            "recency regardless of the lookback setting. For stable signals, pass "
+            "<code>--finnhub-key &lt;key&gt;</code> (free at finnhub.io) to unlock "
+            "up to 1 year of historical data."
+        )
+    )
+
+    # Wrap each paragraph
+    paras = "".join(f'<p style="margin:0 0 12px 0">{l}</p>' for l in lines)
+    return paras
 
 
 # ===========================================================================
@@ -408,8 +656,15 @@ def build_html(
 
     date_range_start = (datetime.utcnow() - timedelta(days=lookback)).strftime("%Y-%m-%d")
     date_range_end   = datetime.utcnow().strftime("%Y-%m-%d")
-    n_news = len(news_df)
-    badge_label, badge_color = signal_badge(reg["r2_oos"], reg.get("beta", np.nan))
+    n_news  = len(news_df)
+    n_days  = len(daily_sent)
+    badge_label, badge_color = signal_badge(best_r, reg.get("beta", np.nan), reg.get("r2_oos", np.nan))
+
+    interpretation_html = build_interpretation(
+        ticker=ticker, best_lag=best_lag, best_r=best_r, reg=reg,
+        badge_label=badge_label, today_sentiment=today_sentiment,
+        n_days=n_days, lookback=lookback,
+    )
 
     # ---- Chart data ----
     # Lead-lag bar chart
@@ -417,24 +672,36 @@ def build_html(
     lag_pearson  = [round(v, 6) if not math.isnan(v) else 0 for v in corr_df["pearson"].tolist()]
     lag_colors   = [f'"{GREEN}"' if k > 0 else f'"{MUTED}"' for k in lag_labels]
 
-    # Sentiment vs price chart: last lookback trading days
-    common_idx = daily_sent.index.intersection(returns.index)
-    # Use last lookback calendar days
-    start_plot = pd.Timestamp.utcnow().normalize().tz_localize(None) - pd.Timedelta(days=lookback)
-    plot_idx = common_idx[common_idx >= start_plot]
+    # Sentiment vs price chart
+    # Price: all trading days in lookback window (continuous line)
+    # Sentiment: sparse — only actual news days; null on all other days
+    start_plot  = pd.Timestamp.utcnow().normalize().tz_localize(None) - pd.Timedelta(days=lookback + 5)
+    all_trade_idx = returns.index[returns.index >= start_plot]
 
-    sent_plot = daily_sent.loc[plot_idx]
-    ret_plot  = returns.loc[plot_idx]
-
-    # Reconstruct price from returns (index to 100)
+    # Reconstruct price index (base 100) from cumulative log returns
+    ret_plot    = returns.loc[all_trade_idx]
     price_recon = (ret_plot.cumsum().apply(math.exp) * 100).round(4)
 
-    # 7-day rolling avg sentiment
-    sent_roll = sent_plot.rolling(7, min_periods=1).mean().round(6)
+    # Build sentiment series aligned to all trading days: null where no news
+    sent_aligned = pd.Series(
+        [round(float(daily_sent.loc[d]), 6) if d in daily_sent.index else None
+         for d in all_trade_idx],
+        index=all_trade_idx,
+    )
 
-    chart_dates = [str(d.date()) for d in plot_idx]
+    chart_dates = [str(d.date()) for d in all_trade_idx]
     chart_price = price_recon.tolist()
-    chart_sent  = sent_roll.tolist()
+    # JSON-safe: NaN/None → null in JS (pandas converts None to float NaN in Series)
+    def _js_val(v):
+        if v is None:
+            return "null"
+        try:
+            if math.isnan(v) or math.isinf(v):
+                return "null"
+            return str(round(float(v), 6))
+        except (TypeError, ValueError):
+            return "null"
+    chart_sent = [_js_val(v) for v in sent_aligned.tolist()]
 
     # News timeline (last 30 items)
     news_tail = news_df.tail(30).iloc[::-1].reset_index(drop=True)
@@ -613,8 +880,8 @@ def build_html(
 <div class="card section">
   <h2>Sentiment vs Price (last {lookback} days)</h2>
   <div style="color:{MUTED};font-size:12px;margin-bottom:12px;">
-    Blue line: reconstructed price index (left axis).
-    Purple line: 7-day rolling average VADER sentiment (right axis).
+    Blue line: price index rebased to 100 (left axis).
+    Purple dots: daily VADER sentiment score on days with actual news coverage (right axis).
   </div>
   <div class="chart-wrap">
     <canvas id="sentPriceChart"></canvas>
@@ -642,6 +909,14 @@ def build_html(
         {news_rows()}
       </tbody>
     </table>
+  </div>
+</div>
+
+<!-- ===== Interpretation ===== -->
+<div class="card section">
+  <h2>Interpretation</h2>
+  <div style="color:{TEXT};font-size:14px;line-height:1.75;">
+    {interpretation_html}
   </div>
 </div>
 
@@ -723,7 +998,8 @@ def build_html(
 (function() {{
   const dates = {chart_dates};
   const prices = {chart_price};
-  const sentiments = {chart_sent};
+  // sentiments: null on non-news days, value on news days
+  const sentiments = [{",".join(chart_sent)}];
 
   const ctx = document.getElementById('sentPriceChart').getContext('2d');
   new Chart(ctx, {{
@@ -739,18 +1015,21 @@ def build_html(
           yAxisID: 'yPrice',
           tension: 0.3,
           pointRadius: 0,
-          borderWidth: 2,
+          borderWidth: 1.5,
+          spanGaps: true,
         }},
         {{
-          label: '7d Avg Sentiment',
+          label: 'Daily Sentiment',
           data: sentiments,
           borderColor: '{ACCENT}',
-          backgroundColor: '{ACCENT}22',
+          backgroundColor: '{ACCENT}99',
           yAxisID: 'ySent',
-          tension: 0.3,
-          pointRadius: 0,
-          borderWidth: 2,
-          fill: true,
+          tension: 0,
+          pointRadius: 5,
+          pointHoverRadius: 7,
+          borderWidth: 0,
+          showLine: false,
+          spanGaps: false,
         }}
       ]
     }},
@@ -808,9 +1087,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Sentiment Lead Indicator — tests whether news sentiment leads price returns."
     )
-    parser.add_argument("--ticker",   required=True, type=str, help="Ticker symbol, e.g. AAPL")
-    parser.add_argument("--lookback", default=180,   type=int, help="Days of history (default: 180)")
-    parser.add_argument("--lags",     default=10,    type=int, help="Max lag to test in days (default: 10)")
+    parser.add_argument("--ticker",      required=True,  type=str, help="Ticker symbol, e.g. AAPL")
+    parser.add_argument("--lookback",    default=30,     type=int, help="Days of history (default: 30)")
+    parser.add_argument("--lags",        default=10,     type=int, help="Max lag to test in days (default: 10)")
+    parser.add_argument("--finnhub-key", default="",     type=str,
+                        help="Finnhub API key for historical news (free at finnhub.io). "
+                             "Without this, falls back to Google News RSS (~2 weeks only).")
     args = parser.parse_args()
 
     ticker   = args.ticker.upper().strip()
@@ -828,8 +1110,14 @@ def main():
     out_path = os.path.join(out_dir, out_filename)
 
     # ---- News ----
-    print(f"  Fetching news headlines ({lookback}d lookback)...", flush=True)
-    news_df = collect_news(ticker, lookback)
+    # Key priority: CLI arg → FINNHUB_API_KEY env var → .env file (loaded above)
+    finnhub_key = args.finnhub_key.strip() or os.environ.get("FINNHUB_API_KEY", "").strip()
+    if finnhub_key:
+        print(f"  Fetching news from Finnhub ({lookback}d lookback)...", flush=True)
+    else:
+        print(f"  Fetching news headlines ({lookback}d lookback, free sources)...", flush=True)
+        print("  Tip: add FINNHUB_API_KEY=<key> to .env for historical data (free at finnhub.io)", flush=True)
+    news_df = collect_news(ticker, lookback, finnhub_key=finnhub_key)
     n_items = len(news_df)
     print(f"  {n_items} news items found", flush=True)
     has_few_news = n_items < 30
@@ -846,7 +1134,7 @@ def main():
 
     news_df = score_news(news_df)
     daily_sent = daily_sentiment(news_df, lookback)
-    n_days = int((daily_sent != 0).sum())
+    n_days = len(daily_sent)
     print(f"  {n_days} days with sentiment data", flush=True)
 
     # ---- Price returns ----
@@ -857,11 +1145,12 @@ def main():
         sys.exit(1)
 
     # ---- Overlap check ----
+    # With sparse news data we may only have 5-15 actual news days — that's fine.
     common = daily_sent.index.intersection(returns.index)
-    if len(common) < 20:
+    if len(common) < 5:
         print(
             f"  ERROR: Only {len(common)} overlapping days between sentiment and returns. "
-            f"Need at least 20. Try a larger --lookback value or check ticker.",
+            f"Need at least 5. Try a larger --lookback value or check ticker.",
             flush=True,
         )
         sys.exit(1)

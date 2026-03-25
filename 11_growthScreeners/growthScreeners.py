@@ -1318,15 +1318,21 @@ function sortTable(colIdx, type) {{
     _sortAsc = !_sortAsc;
   }} else {{
     _sortCol = colIdx;
-    _sortAsc = true;
+    // Numeric columns default to descending (highest first) on first click
+    _sortAsc = (type !== 'num');
   }}
 
   rows.sort((a, b) => {{
-    const ac = a.cells[colIdx] ? a.cells[colIdx].textContent.trim() : '';
-    const bc = b.cells[colIdx] ? b.cells[colIdx].textContent.trim() : '';
+    // +1 offset: cells[0] is the checkbox, data starts at cells[1]
+    const cellIdx = colIdx + 1;
+    const ac = a.cells[cellIdx] ? a.cells[cellIdx].textContent.trim() : '';
+    const bc = b.cells[cellIdx] ? b.cells[cellIdx].textContent.trim() : '';
     if (type === 'num') {{
-      const an = parseFloat(ac.replace(/[^0-9.\-]/g, '')) || (ac === '—' ? (_sortAsc ? Infinity : -Infinity) : 0);
-      const bn = parseFloat(bc.replace(/[^0-9.\-]/g, '')) || (bc === '—' ? (_sortAsc ? Infinity : -Infinity) : 0);
+      // For "X/7" badges, strip the "/7" so we sort on X not "X7"
+      const cleanA = ac.replace(/\/\d+/, '').replace(/[^0-9.\-]/g, '');
+      const cleanB = bc.replace(/\/\d+/, '').replace(/[^0-9.\-]/g, '');
+      const an = cleanA !== '' ? parseFloat(cleanA) : (_sortAsc ? Infinity : -Infinity);
+      const bn = cleanB !== '' ? parseFloat(cleanB) : (_sortAsc ? Infinity : -Infinity);
       return _sortAsc ? an - bn : bn - an;
     }} else {{
       return _sortAsc ? ac.localeCompare(bc) : bc.localeCompare(ac);
@@ -1395,6 +1401,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Suppress yfinance's "No earnings dates found, symbol may be delisted"
+    # logger — fires for every ticker without a scheduled upcoming earnings date,
+    # which is the majority of the index at any given time.
+    import logging as _logging
+    _logging.getLogger("yfinance").setLevel(_logging.CRITICAL)
 
     print(f"\n=== Multi-Factor Growth === {args.index} ===")
 
