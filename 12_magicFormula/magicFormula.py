@@ -634,6 +634,60 @@ def _pct_color(val, lo=0, hi=None, reverse=False):
     else:               return "#fc8181"
 
 
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL_MF = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Magic Formula &mdash; How It Works</h2>
+<p class="help-desc">Implements Joel Greenblatt&rsquo;s Magic Formula: simultaneously rank every stock by <b>Earnings Yield</b> (EBIT &divide; Enterprise Value &mdash; higher = cheaper) and <b>Return on Capital</b> (EBIT &divide; (Net PP&amp;E + Net Working Capital) &mdash; higher = better quality). The combined rank is the sum of both ranks. <b>Rank 1 = simultaneously cheapest AND highest quality.</b> Financials and Utilities are excluded as their capital structures make EY/ROIC non-comparable.</p>
+<div class="help-sec">How Ranking Works</div>
+<table class="help-tbl">
+<tr><td>EY Rank</td><td>Rank by Earnings Yield descending. Rank 1 = highest EBIT/EV (cheapest stock).</td></tr>
+<tr><td>ROIC Rank</td><td>Rank by Return on Capital descending. Rank 1 = highest ROIC (best quality).</td></tr>
+<tr><td>Combined Rank</td><td>EY Rank + ROIC Rank. Lower is better. Rank 1 = best blend of cheap + quality.</td></tr>
+<tr><td>MF Rank</td><td>Final position after sorting by Combined Rank. This is the main sorting column.</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>EY %</td><td>Earnings Yield = EBIT &divide; Enterprise Value. Higher = stock is cheaper vs. operating earnings.</td></tr>
+<tr><td>ROIC %</td><td>Return on Invested Capital = EBIT &divide; (Net PP&amp;E + Net Working Capital). Higher = more efficient capital use.</td></tr>
+<tr><td>EV/EBITDA</td><td>Enterprise Value &divide; EBITDA. Shown as a cross-check valuation metric.</td></tr>
+<tr><td>Grade</td><td>Letter grade based on combined rank percentile across the screened universe.</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">A+ / A (green)</td><td>Top-quartile combined rank &mdash; best value + quality stocks</td></tr>
+<tr><td style="color:#4895ef">B (blue)</td><td>Above-median rank</td></tr>
+<tr><td style="color:#ffd166">C (yellow)</td><td>Below-median rank</td></tr>
+<tr><td style="color:#ff4d6d">D (red)</td><td>Bottom-quartile &mdash; expensive or low-quality relative to universe</td></tr>
+</table>
+</div></div>
+"""
+
+
 def build_html(results, ts, total_in, index_label, suite_port=5050):
     ranked = [r for r in results if r.get("mf_rank") is not None]
     unranked = [r for r in results if r.get("mf_rank") is None]
@@ -777,6 +831,7 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
   .sort-desc::after{{content:" ▼"}}
   #excluded-note{{margin:8px 16px;font-size:11px;color:var(--mu)}}
 {_WL_CSS}
+{_HELP_CSS}
 </style>
 </head>
 <body>
@@ -815,6 +870,7 @@ def build_html(results, ts, total_in, index_label, suite_port=5050):
 <div class="controls">
   <input class="search-box" id="search" placeholder="Filter ticker or sector…" oninput="filterTable()">
   <button class="filter-btn" id="btn-all" onclick="setGradeFilter('all')" style="border-color:var(--bl);color:var(--bl)">All Grades</button>
+  <button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button>
   <button class="filter-btn" id="btn-a" onclick="setGradeFilter('A')">A / A+ Only</button>
   <button class="filter-btn" id="btn-b" onclick="setGradeFilter('B')">B+ / B Only</button>
   <span style="margin-left:auto;color:var(--mu);font-size:11px" id="row-count">{n + len(unranked)} stocks</span>
@@ -942,7 +998,9 @@ function filterTable() {{
 }}
 </script>
 <script>{_wl_js(suite_port)}</script>
+<script>{_HELP_JS}</script>
 {_WL_BAR}
+{_HELP_MODAL_MF}
 </body>
 </html>"""
 
@@ -970,7 +1028,7 @@ def main():
 
     # ── Fetch
     print("\n[1/4] Fetching stocks from TradingView...")
-    df = fetch_stocks(index_code, limit=args.top)
+    df = fetch_stocks(index_code)
     total_in = len(df)
     print(f"  Total fetched: {total_in}")
 
@@ -1002,6 +1060,9 @@ def main():
     ranked_all = rank_and_score(included)
     ranked     = [r for r in ranked_all if r.get("mf_rank") is not None]
     unranked   = [r for r in ranked_all if r.get("mf_rank") is None]
+    if args.top:
+        ranked = ranked[:args.top]
+        print(f"\n  Trimmed to top {args.top} by Magic Formula rank ({len(ranked)} stocks in report).")
     print(f"  Ranked: {len(ranked)} | Missing data: {len(unranked)}")
 
     # Print top 10

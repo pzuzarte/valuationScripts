@@ -452,6 +452,63 @@ def write_csv(results: list, path: str):
             row["rank"] = i
             w.writerow(row)
 
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL_CS = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; CANSLIM Screener &mdash; How It Works</h2>
+<p class="help-desc">Scores stocks on William O&rsquo;Neil&rsquo;s 6-factor CANSLIM system. Each factor contributes ~16&ndash;17pts to the 0&ndash;100 total. The method identifies institutional-quality growth stocks near price breakouts.</p>
+<div class="help-sec">The 6 CANSLIM Factors</div>
+<table class="help-tbl">
+<tr><td>C &mdash; Current EPS</td><td>Most-recent-quarter EPS growth year-over-year. The primary earnings freshness signal. O&rsquo;Neil sought &ge;25% growth.</td></tr>
+<tr><td>A &mdash; Annual EPS</td><td>3-year annualised EPS growth track record. Measures earnings durability over time.</td></tr>
+<tr><td>N &mdash; Near New High</td><td>Price proximity to 52-week high. Breakout setups (price near highs) score higher &mdash; O&rsquo;Neil favoured buying near all-time highs.</td></tr>
+<tr><td>S &mdash; Supply/Size</td><td>Float and volume proxy for supply/demand dynamics. Smaller floats with high volume score well.</td></tr>
+<tr><td>L &mdash; Leader RS</td><td>Relative strength vs. the index &mdash; measures price leadership. Top RS stocks outperform.</td></tr>
+<tr><td>I &mdash; Institutional</td><td>Institutional sponsorship proxy derived from volume/float patterns. Rising institutional interest is bullish.</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>Score</td><td>0&ndash;100 total CANSLIM composite. Sum of all 6 factor scores.</td></tr>
+<tr><td>Grade</td><td>A+ (&ge;80), A (&ge;65), B (&ge;50), C (&ge;35), D (&lt;35)</td></tr>
+<tr><td>EPS Growth</td><td>Current-quarter EPS growth YoY &mdash; the &ldquo;C&rdquo; factor</td></tr>
+<tr><td>Ann EPS</td><td>3-year annualised EPS growth &mdash; the &ldquo;A&rdquo; factor</td></tr>
+<tr><td>Near 52wH</td><td>Price &divide; 52-week high. 1.0 = at all-time high (ideal CANSLIM setup)</td></tr>
+<tr><td>RS</td><td>Relative strength vs. index &mdash; the &ldquo;L&rdquo; factor</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">A+ / A (green)</td><td>Score &ge;65 &mdash; strong CANSLIM setup, multiple factors aligned</td></tr>
+<tr><td style="color:#4895ef">B (blue)</td><td>Score 50&ndash;64 &mdash; solid but not all factors aligned</td></tr>
+<tr><td style="color:#ffd166">C (yellow)</td><td>Score 35&ndash;49 &mdash; mixed signals</td></tr>
+<tr><td style="color:#ff4d6d">D (red)</td><td>Score &lt;35 &mdash; weak CANSLIM characteristics</td></tr>
+</table>
+</div></div>
+"""
+
 # ── HTML ───────────────────────────────────────────────────────────────────────
 def build_html(results: list, ts: str, total_in: int,
                index_name: str, suite_port: int = 5050) -> str:
@@ -561,6 +618,7 @@ tr:hover td{{background:var(--sf2)}}
 .pts{{color:var(--mt);font-size:10px;letter-spacing:.3px}}
 .legend{{padding:10px 24px;color:var(--mt);font-size:11px;line-height:1.8}}
 {_WL_CSS}
+{_HELP_CSS}
 </style>
 </head>
 <body>
@@ -583,6 +641,7 @@ tr:hover td{{background:var(--sf2)}}
 <div class="controls">
   <input class="search" id="search" type="text" placeholder="Search ticker / sector…" oninput="filterTable()">
   <button class="filter-btn" id="btn-all" onclick="setGradeFilter('all')">All</button>
+  <button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button>
   <button class="filter-btn" id="btn-A"   onclick="setGradeFilter('A')">A+ / A</button>
   <button class="filter-btn" id="btn-B"   onclick="setGradeFilter('B')">B+ / B</button>
   <span class="cnt" id="row-count">{n_scored} stocks</span>
@@ -692,7 +751,9 @@ function filterTable() {{
 }}
 </script>
 <script>{_wl_js(suite_port)}</script>
+<script>{_HELP_JS}</script>
 {_WL_BAR}
+{_HELP_MODAL_CS}
 </body>
 </html>"""
 
@@ -720,7 +781,7 @@ def main():
     print("=" * 60)
 
     print("\n[1/4] Fetching stocks from TradingView...")
-    df = fetch_stocks(index_code, limit=args.top)
+    df = fetch_stocks(index_code)
     total_in = len(df)
     print(f"  Total fetched: {total_in}")
 
@@ -750,6 +811,9 @@ def main():
 
     min_sc = args.min_score
     display = [r for r in scored_all if r["score"] >= min_sc]
+    if args.top:
+        display = display[:args.top]
+        print(f"\n  Trimmed to top {args.top} by CANSLIM score ({len(display)} stocks in report).")
     print(f"  Qualifying: {len(scored_all)} | Below min-score ({min_sc}): "
           f"{len(scored_all)-len(display)} | Sector-excluded/below-gate: {len(below_min)}")
 

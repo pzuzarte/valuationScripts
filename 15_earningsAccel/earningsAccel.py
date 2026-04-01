@@ -424,6 +424,63 @@ def write_csv(results: list, path: str):
             row["rank"] = i
             w.writerow(row)
 
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL_EA = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Earnings Acceleration &mdash; How It Works</h2>
+<p class="help-desc">Screens for stocks combining high-magnitude earnings growth with margin quality. A minimum gate is applied: EPS growth &ge;10%, revenue growth &ge;5%, gross margin &ge;20%. Stocks below the gate appear dimmed.</p>
+<div class="help-sec">Scoring Pillars</div>
+<table class="help-tbl">
+<tr><td>EPS Growth Rate (35pts)</td><td>Accelerating quarterly EPS growth year-over-year &mdash; the primary signal</td></tr>
+<tr><td>Revenue Growth (30pts)</td><td>Consistent top-line expansion &mdash; checks if growth is broad-based</td></tr>
+<tr><td>Margin Quality (20pts)</td><td>Gross and operating margin levels &mdash; ensures growth is profitable</td></tr>
+<tr><td>Capital Quality (15pts)</td><td>ROE + ROIC &mdash; confirms efficient capital deployment behind the growth</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>Score</td><td>0&ndash;100 composite across all 4 pillars</td></tr>
+<tr><td>Grade</td><td>A+ (&ge;85), A (&ge;70), B (&ge;55), C (&ge;40), D (&lt;40)</td></tr>
+<tr><td>EPS Growth</td><td>Most-recent-quarter EPS growth year-over-year</td></tr>
+<tr><td>Rev Growth</td><td>Revenue growth year-over-year</td></tr>
+<tr><td>Gross Margin</td><td>Gross profit &divide; revenue &mdash; structural margin signal</td></tr>
+<tr><td>Op Margin</td><td>Operating income &divide; revenue &mdash; operational leverage signal</td></tr>
+<tr><td>ROE / ROIC</td><td>Capital quality signals contributing to the Capital Quality pillar</td></tr>
+<tr><td>Gate</td><td>Pass/fail on minimum thresholds. Below-gate stocks are shown dimmed &mdash; they lack sufficient growth quality for the accelerator thesis.</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">A+ / A (green)</td><td>Score &ge;70 &mdash; high-conviction earnings acceleration</td></tr>
+<tr><td style="color:#4895ef">B (blue)</td><td>Score 55&ndash;69 &mdash; solid growth with quality margins</td></tr>
+<tr><td style="color:#ffd166">C (yellow)</td><td>Score 40&ndash;54 &mdash; moderate acceleration, mixed quality</td></tr>
+<tr><td style="color:#ff4d6d">D / dimmed (red)</td><td>Score &lt;40 or below minimum gate &mdash; insufficient acceleration</td></tr>
+</table>
+</div></div>
+"""
+
 # ── HTML ───────────────────────────────────────────────────────────────────────
 def build_html(results: list, ts: str, total_in: int,
                index_name: str, suite_port: int = 5050) -> str:
@@ -535,6 +592,7 @@ tr:hover td{{background:var(--sf2)}}
 .pts{{color:var(--mt);font-size:10px;letter-spacing:.3px}}
 .legend{{padding:10px 24px;color:var(--mt);font-size:11px;line-height:1.8}}
 {_WL_CSS}
+{_HELP_CSS}
 </style>
 </head>
 <body>
@@ -557,6 +615,7 @@ tr:hover td{{background:var(--sf2)}}
 <div class="controls">
   <input class="search" id="search" type="text" placeholder="Search ticker / sector…" oninput="filterTable()">
   <button class="filter-btn" id="btn-all" onclick="setGradeFilter('all')">All</button>
+  <button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button>
   <button class="filter-btn" id="btn-A"   onclick="setGradeFilter('A')">A+ / A</button>
   <button class="filter-btn" id="btn-B"   onclick="setGradeFilter('B')">B+ / B</button>
   <span class="cnt" id="row-count">{n_scored} stocks</span>
@@ -667,7 +726,9 @@ function filterTable() {{
 }}
 </script>
 <script>{_wl_js(suite_port)}</script>
+<script>{_HELP_JS}</script>
 {_WL_BAR}
+{_HELP_MODAL_EA}
 </body>
 </html>"""
 
@@ -695,7 +756,7 @@ def main():
     print("=" * 60)
 
     print("\n[1/4] Fetching stocks from TradingView...")
-    df = fetch_stocks(index_code, limit=args.top)
+    df = fetch_stocks(index_code)
     total_in = len(df)
     print(f"  Total fetched: {total_in}")
 
@@ -725,6 +786,9 @@ def main():
 
     min_sc  = args.min_score
     display = [r for r in scored_all if r["score"] >= min_sc]
+    if args.top:
+        display = display[:args.top]
+        print(f"\n  Trimmed to top {args.top} by earnings acceleration score ({len(display)} stocks in report).")
     print(f"  Qualifying: {len(scored_all)} | Below min-score ({min_sc}): "
           f"{len(scored_all)-len(display)} | Sector-excluded/below-gate: {len(below_min)}")
 

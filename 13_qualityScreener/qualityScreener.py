@@ -697,6 +697,64 @@ def _wl_js(port: int) -> str:
 
 
 # ── HTML ──────────────────────────────────────────────────────────────────────
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL_QS = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Quality Screener &mdash; How It Works</h2>
+<p class="help-desc">Scores each stock 0&ndash;100 across 4 quality pillars. The score measures <b>durable business quality</b> &mdash; independent of near-term growth or valuation. A minimum gate is applied: stocks with negative operating margin are shown dimmed.</p>
+<div class="help-sec">Scoring Pillars</div>
+<table class="help-tbl">
+<tr><td>Return on Capital (35pts)</td><td>ROIC, ROE, ROA &mdash; how efficiently management deploys capital</td></tr>
+<tr><td>Profitability (25pts)</td><td>Gross, operating, and net margins &mdash; structural pricing power and cost discipline</td></tr>
+<tr><td>Balance Sheet (25pts)</td><td>Debt/Equity ratio, current ratio, interest coverage &mdash; financial resilience</td></tr>
+<tr><td>Capital Efficiency (15pts)</td><td>Asset turnover, FCF conversion, buyback activity &mdash; capital allocation discipline</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>Score</td><td>0&ndash;100 composite quality score</td></tr>
+<tr><td>Grade</td><td>A+ (&ge;85), A (&ge;75), B+ (&ge;65), B (&ge;55), C (&ge;40), D (&lt;40)</td></tr>
+<tr><td>ROIC</td><td>Return on Invested Capital &mdash; the single most important capital efficiency metric</td></tr>
+<tr><td>Gross Margin</td><td>Gross profit &divide; revenue &mdash; structural pricing power indicator</td></tr>
+<tr><td>Op Margin</td><td>Operating income &divide; revenue &mdash; operational efficiency</td></tr>
+<tr><td>Net Margin</td><td>Net income &divide; revenue &mdash; bottom-line profitability</td></tr>
+<tr><td>Debt/Equity</td><td>Total debt &divide; equity &mdash; higher = more leveraged balance sheet</td></tr>
+<tr><td>Pillar Bars</td><td>Visual breakdown of score contribution per pillar (hover for point breakdown)</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">A+ / A (green)</td><td>Score &ge;75 &mdash; elite compounder quality</td></tr>
+<tr><td style="color:#4895ef">B+ / B (blue)</td><td>Score 55&ndash;74 &mdash; solid quality business</td></tr>
+<tr><td style="color:#ffd166">C (yellow)</td><td>Score 40&ndash;54 &mdash; average quality, some weaknesses</td></tr>
+<tr><td style="color:#ff4d6d">D (red)</td><td>Score &lt;40 &mdash; poor capital efficiency or weak financials</td></tr>
+</table>
+</div></div>
+"""
+
+
 def build_html(results, ts, total_in, index_label, failed_gate=0, suite_port=5050):
     n = len(results)
     a_plus = sum(1 for r in results if r.get("grade") == "A+")
@@ -850,6 +908,7 @@ def build_html(results, ts, total_in, index_label, failed_gate=0, suite_port=505
   .sort-desc::after{{content:" ▼"}}
   @media (max-width:900px){{.pillars{{grid-template-columns:repeat(2,1fr)}}}}
 {_WL_CSS}
+{_HELP_CSS}
 </style>
 </head>
 <body>
@@ -907,6 +966,7 @@ def build_html(results, ts, total_in, index_label, failed_gate=0, suite_port=505
 <div class="controls">
   <input class="search-box" id="search" placeholder="Filter ticker or sector…" oninput="filterTable()">
   <button class="filter-btn" id="btn-all"  onclick="setFilter('all')"  style="border-color:var(--bl);color:var(--bl)">All</button>
+  <button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button>
   <button class="filter-btn" id="btn-aplus" onclick="setFilter('aplus')">A+ Only</button>
   <button class="filter-btn" id="btn-a"    onclick="setFilter('a')">A / A+</button>
   <button class="filter-btn" id="btn-b"    onclick="setFilter('b')">B+ and Above</button>
@@ -1032,7 +1092,9 @@ function filterTable() {{
 }}
 </script>
 <script>{_wl_js(suite_port)}</script>
+<script>{_HELP_JS}</script>
 {_WL_BAR}
+{_HELP_MODAL_QS}
 </body>
 </html>"""
 
@@ -1061,7 +1123,7 @@ def main():
 
     # ── Fetch
     print("\n[1/4] Fetching stocks from TradingView...")
-    df = fetch_stocks(index_code, limit=args.top)
+    df = fetch_stocks(index_code)
     total_in = len(df)
     print(f"  Total fetched: {total_in}")
 
@@ -1095,6 +1157,9 @@ def main():
 
     # Sort by quality score descending
     results.sort(key=lambda x: -x["quality_score"])
+    if args.top:
+        results = results[:args.top]
+        print(f"\n  Trimmed to top {args.top} by quality score ({len(results)} stocks in report).")
     print(f"  Scored: {len(results)} | Failed quality gate: {failed_gate}")
 
     # Print top 10

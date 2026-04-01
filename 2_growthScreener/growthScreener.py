@@ -2029,6 +2029,20 @@ footer {
   cursor: pointer; transition: opacity .15s, transform .1s; white-space: nowrap;
 }
 .gloss-btn:hover { opacity: .8; transform: translateY(-1px); }
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
 """
 
 
@@ -2174,6 +2188,8 @@ function closeGlossary() {
   document.getElementById('glossPanel').classList.remove('open');
   document.body.style.overflow = '';
 }
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
 function glossFilter() {
   const q = document.getElementById('glossSearch').value.toLowerCase();
   document.querySelectorAll('.gloss-item').forEach(el => {
@@ -2185,7 +2201,7 @@ function glossFilter() {
     sec.style.display = visible ? '' : 'none';
   });
 }
-document.addEventListener('keydown', e => { if(e.key === 'Escape') closeGlossary(); });
+document.addEventListener('keydown', e => { if(e.key === 'Escape') { closeGlossary(); closeHelp(); } });
 """
 
 
@@ -2711,7 +2727,7 @@ def build_html(results, ts, total, index_name="S&P 500",
   <span class="lg-item" style="color:#a78bfa">&#9632; Bull (PEG {PEG_BULL}x)</span>
 </div>
 
-<nav class="nav"><span class="nl">Jump to</span>{nav_html}<button class="gloss-btn" onclick="openGlossary()">&#128214; Glossary</button></nav>
+<nav class="nav"><span class="nl">Jump to</span>{nav_html}<button class="gloss-btn" onclick="openGlossary()">&#128214; Glossary</button><button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button></nav>
 
 <div class="secbar">
   <span class="sbl">Sector</span>
@@ -2863,6 +2879,36 @@ def build_html(results, ts, total, index_name="S&P 500",
   <b>Accumulation:</b> Institutional buying proxy &mdash; MACD histogram + Momentum + Relative volume trend + ADX/DI + MoneyFlow &mdash; hover any cell for signal breakdown<br>
   &#9888; Educational use only &mdash; not investment advice. Forward EPS estimates may be inaccurate. Always verify against SEC filings.
 </footer>
+
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Growth Screener &mdash; How It Works</h2>
+<p class="help-desc">Scores each stock 0&ndash;100 across 4 pillars: <b>Quality</b> (35pts) &mdash; ROIC, ROE, margins, FCF; <b>Growth Momentum</b> (35pts) &mdash; EPS + revenue growth across multiple timeframes; <b>Technical Signal</b> (20pts) &mdash; price momentum, RSI, MoneyFlow; <b>Valuation</b> (10pts) &mdash; PEG, P/FCF, EV/EBITDA. Each risk flag deducts 4 points. Bear/Base/Bull targets use a multi-method valuation engine. See the Glossary for full field definitions.</p>
+<div class="help-sec">Growth Tiers</div>
+<table class="help-tbl">
+<tr><td style="color:#00e096">Hypergrowth</td><td>Score &ge;70 &mdash; exceptional growth with strong quality and momentum</td></tr>
+<tr><td style="color:#00c97b">Strong Growth</td><td>Score 50&ndash;69 &mdash; robust growth across multiple dimensions</td></tr>
+<tr><td style="color:#4895ef">Growth</td><td>Score 35&ndash;49 &mdash; solid but not exceptional growth profile</td></tr>
+<tr><td style="color:#ffd166">Moderate Growth</td><td>Score 20&ndash;34 &mdash; limited growth or mixed signals</td></tr>
+<tr><td style="color:#ff4d6d">Slow / No Growth</td><td>Score &lt;20 &mdash; declining or negligible growth</td></tr>
+</table>
+<div class="help-sec">Scoring Pillars</div>
+<table class="help-tbl">
+<tr><td>Quality (35pts)</td><td>ROIC, ROE, gross margin, op margin, FCF generation, current ratio</td></tr>
+<tr><td>Growth Momentum (35pts)</td><td>Revenue + EPS growth across quarterly and annual timeframes, gross profit growth, FCF growth</td></tr>
+<tr><td>Technical Signal (20pts)</td><td>TradingView rating, MoneyFlow, RSI, price performance (1M/3M/6M/YTD), 52-week position</td></tr>
+<tr><td>Valuation (10pts)</td><td>Upside to model target, forward PEG, P/FCF, EV/EBITDA</td></tr>
+</table>
+<div class="help-sec">Key Columns</div>
+<table class="help-tbl">
+<tr><td>EPS Growth</td><td>Most-recent-quarter EPS growth year-over-year &mdash; the freshest earnings signal</td></tr>
+<tr><td>Rev Growth</td><td>Forward-blended revenue growth rate</td></tr>
+<tr><td>PEG</td><td>Forward P/E &divide; estimated growth rate. &lt;1 = attractive, &lt;1.5 = reasonable</td></tr>
+<tr><td>Bear / Base / Bull</td><td>Conservative / expected / optimistic 12-month price targets</td></tr>
+<tr><td>Backtest Top-3</td><td>Mean of the 3 valuation methods with lowest historical MAPE (run with --backtest)</td></tr>
+<tr><td>Upside %</td><td>(Base target &minus; price) &divide; price</td></tr>
+</table>
+</div></div>
 
 <div id="glossOverlay" class="gloss-overlay" onclick="closeGlossary()"></div>
 <div id="glossPanel" class="gloss-panel">

@@ -968,6 +968,64 @@ document.querySelectorAll('.tier').forEach((el,i) => {
 """
 
 
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Value Screener &mdash; How It Works</h2>
+<p class="help-desc">Fetches all index constituents, then values each stock using up to 8 models: DCF, P/FCF, P/E, EV/EBITDA, EV/Sales, Graham, PEG, and Dividend Discount. The mean of valid models gives a <b>Composite Fair Value</b>. Comparing that to the current price yields a <b>Discount %</b>, which drives the tier. A 0&ndash;100 <b>Rank Score</b> blends discount, conviction, quality (ROE, growth), momentum, and dividend yield &mdash; and penalises value-trap flags.</p>
+<div class="help-sec">Valuation Tiers</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">Deep Value</td><td>&ge;35% below composite fair value &mdash; highest margin of safety</td></tr>
+<tr><td style="color:#4895ef">Undervalued</td><td>15&ndash;35% below fair value</td></tr>
+<tr><td style="color:#ffd166">Fairly Valued</td><td>Within &plusmn;15% of fair value</td></tr>
+<tr><td style="color:#ff9f43">Stretched</td><td>15&ndash;35% above fair value</td></tr>
+<tr><td style="color:#ff4d6d">Overvalued</td><td>&gt;35% above fair value</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>Rank Score</td><td>0&ndash;100 composite. Green &ge;60, yellow 35&ndash;59, red &lt;35.</td></tr>
+<tr><td>Conviction</td><td>How tightly the valuation models agree. HIGH = models cluster near the same price; LOW = wide spread.</td></tr>
+<tr><td>Discount %</td><td>(Fair Value &minus; Price) &divide; Fair Value. Positive = stock trades below fair value.</td></tr>
+<tr><td>Composite FV</td><td>Mean fair value across all valid models for this stock.</td></tr>
+<tr><td>MoS Price</td><td>Margin-of-safety entry price = Composite FV &times; 0.75.</td></tr>
+<tr><td>PEG</td><td>P/E &divide; Growth Rate. &lt;1 suggests the stock may be cheap relative to its growth.</td></tr>
+<tr><td>ROE</td><td>Return on Equity (%). A quality signal; low ROE weighs against the rank score.</td></tr>
+<tr><td>Trap Flags</td><td>Risk warnings: NEG FCF &middot; NEG MARGIN &middot; HIGH DEBT (D/E&gt;3) &middot; REV DECLINE &middot; TINY CAP. Flagged stocks score lower.</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td>Green rank score</td><td>&ge;60 &mdash; strong opportunity signal</td></tr>
+<tr><td>Yellow rank score</td><td>35&ndash;59 &mdash; moderate signal</td></tr>
+<tr><td>Red rank score</td><td>&lt;35 &mdash; weak or overvalued</td></tr>
+<tr><td>Red trap badge</td><td>At least one value-trap warning triggered</td></tr>
+</table>
+</div></div>
+"""
+
 # ── Watchlist helpers ─────────────────────────────────────────────────────────
 _WL_CSS = """
 #wl-bar{position:fixed;bottom:0;left:0;right:0;background:#1a1f35;
@@ -1237,7 +1295,7 @@ def build_html(results, bm, ts, total, suite_port: int = 5050):
         '<title>Value Screener</title>'
         '<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue'
         '&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">'
-        '<style>' + CSS + _WL_CSS + '</style></head><body>'
+        '<style>' + CSS + _WL_CSS + _HELP_CSS + '</style></head><body>'
 
         '<div class="hero">'
         '<div class="hero-eye">// Valuation Intelligence v2</div>'
@@ -1277,7 +1335,7 @@ def build_html(results, bm, ts, total, suite_port: int = 5050):
         '<div class="chips">' + chip_html + '</div>'
         '</div>'
 
-        '<nav class="nav"><span class="nl">Jump to</span>' + nav_html + '</nav>'
+        '<nav class="nav"><span class="nl">Jump to</span>' + nav_html + '<button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button></nav>'
 
         '<div class="secbar">'
         '<span class="sbl">Sector</span>'
@@ -1306,8 +1364,9 @@ def build_html(results, bm, ts, total, suite_port: int = 5050):
         'EV&minus;Debt: pure equity value = (Live Enterprise Value &minus; Total Debt) &divide; Shares<br>&#9888; Educational use only &mdash; not investment advice. Always verify against SEC filings (10-K / 10-Q).'
         '</footer>'
 
+        + _HELP_MODAL
         + _WL_BAR +
-        '<script>' + JS + _wl_js(suite_port) + '</script>'
+        '<script>' + JS + _HELP_JS + _wl_js(suite_port) + '</script>'
         '</body></html>'
     )
     return page
@@ -1336,7 +1395,7 @@ def main():
     print("="*60)
 
     print("\n[1/4] Fetching stocks...")
-    df = fetch_stocks(index_code, limit)
+    df = fetch_stocks(index_code)
 
     print("\n[2/4] Fetching market benchmarks...")
     bm_market, bm_sector = fetch_benchmarks()
@@ -1372,8 +1431,13 @@ def main():
         c = tier_map[name]
         if c: print("    " + name.ljust(30) + str(c).rjust(3) + "  " + "\u2588"*min(c,50))
 
+    results.sort(key=lambda x: -x["rank_score"])
+    if limit:
+        results = results[:limit]
+        print(f"\n  Trimmed to top {limit} by rank score ({len(results)} stocks in report).")
+
     print("\n  Top 10 by Rank Score:")
-    top10 = sorted(results, key=lambda x: -x["rank_score"])[:10]
+    top10 = results[:10]
     for i, r in enumerate(top10, 1):
         flags = " [" + ",".join(r["trap_flags"]) + "]" if r["trap_flags"] else ""
         print(f"    {i:>2}. {r['ticker']:<6}  Score={frank(r['rank_score']):>5}  Discount={fpc(r['discount']):>7}  ROE={fpct(r['roe']):>6}  PEG={fpeg(r['peg']):>5}{flags}")

@@ -722,6 +722,65 @@ def _wl_js(port: int) -> str:
     return _WL_JS_TMPL.replace("__PORT__", str(port))
 
 
+# ── Help modal ────────────────────────────────────────────────────────────────
+_HELP_CSS = """
+.help-overlay{display:none;position:fixed;inset:0;z-index:9990;background:rgba(0,0,0,.65);backdrop-filter:blur(4px)}
+.help-overlay.open{display:flex;align-items:center;justify-content:center}
+.help-modal{background:#1a1e2e;border:1px solid #2d3348;border-radius:12px;width:660px;max-width:95vw;max-height:85vh;overflow-y:auto;padding:28px 32px;position:relative;box-shadow:0 24px 64px rgba(0,0,0,.6)}
+.help-modal h2{font-size:16px;font-weight:700;color:#e2e8f0;margin:0 0 8px}
+.help-desc{font-size:12px;color:#94a3b8;line-height:1.7;margin-bottom:16px}
+.help-sec{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#6366f1;margin:18px 0 8px;border-bottom:1px solid #252a3a;padding-bottom:6px;font-weight:700}
+.help-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.help-tbl td{padding:6px 8px;border-bottom:1px solid #1e2234;vertical-align:top}
+.help-tbl td:first-child{color:#e2e8f0;font-weight:600;white-space:nowrap;min-width:130px;padding-right:14px}
+.help-tbl td:last-child{color:#94a3b8;line-height:1.6}
+.help-close{position:absolute;top:14px;right:14px;background:none;border:1px solid #2d3348;border-radius:6px;color:#94a3b8;font-size:14px;cursor:pointer;padding:3px 10px}
+.help-close:hover{color:#e2e8f0;border-color:#6366f1}
+.help-btn{display:inline-flex;align-items:center;gap:5px;padding:5px 13px;border-radius:20px;font-size:11px;font-weight:600;background:rgba(99,102,241,.1);border:1px solid rgba(99,102,241,.35);color:#a5b4fc;cursor:pointer;transition:opacity .15s;white-space:nowrap}
+.help-btn:hover{opacity:.8}
+"""
+
+_HELP_JS = """
+function openHelp(){document.getElementById('helpOverlay').classList.add('open')}
+function closeHelp(){document.getElementById('helpOverlay').classList.remove('open')}
+document.addEventListener('keydown',function(e){if(e.key==='Escape')closeHelp()});
+"""
+
+_HELP_MODAL_MFG = """
+<div id="helpOverlay" class="help-overlay" onclick="if(event.target===this)closeHelp()"><div class="help-modal">
+<button class="help-close" onclick="closeHelp()">&#x2715;</button>
+<h2>&#x24D8; Multi-Factor Growth &mdash; How It Works</h2>
+<p class="help-desc">Runs 7 independent growth screeners simultaneously. Each is a separate pass/fail test; the <b>Passes</b> column shows how many a stock satisfies. Higher passes = more convergent growth signals across momentum, fundamentals, and valuation.</p>
+<div class="help-sec">The 7 Screeners</div>
+<table class="help-tbl">
+<tr><td>1. RS Rating</td><td>Relative Strength &ge;70 vs. the index &mdash; stock is outperforming at least 70% of peers</td></tr>
+<tr><td>2. EPS Acceleration</td><td>Quarter-over-quarter EPS growth trending upward &mdash; earnings momentum is building</td></tr>
+<tr><td>3. Estimate Revision</td><td>Analyst consensus estimates revised upward recently &mdash; Wall St is raising its outlook</td></tr>
+<tr><td>4. Beat Rate</td><td>Stock historically beats EPS estimates &ge;60% of the time &mdash; management guidance is conservative</td></tr>
+<tr><td>5. GARP</td><td>Growth at a Reasonable Price: PEG &lt;2 and EPS growth &gt;15% &mdash; growth is not overpriced</td></tr>
+<tr><td>6. FCF Compounder</td><td>Free cash flow growing and FCF margin &ge;10% &mdash; growth is backed by real cash generation</td></tr>
+<tr><td>7. Gross Margin Expansion</td><td>Gross margin improving year-over-year &mdash; pricing power or improving unit economics</td></tr>
+</table>
+<div class="help-sec">Column Guide</div>
+<table class="help-tbl">
+<tr><td>Passes</td><td>Number of the 7 screeners passed. 6&ndash;7 = strong multi-factor convergence.</td></tr>
+<tr><td>RS Rating</td><td>0&ndash;99 relative strength score vs. index peers</td></tr>
+<tr><td>EPS Accel</td><td>EPS growth acceleration trend indicator</td></tr>
+<tr><td>Rev Growth</td><td>Year-over-year revenue growth (%)</td></tr>
+<tr><td>PEG</td><td>Forward P/E &divide; growth rate. &lt;1 = attractive, &lt;2 = acceptable</td></tr>
+<tr><td>FCF Margin</td><td>Free cash flow &divide; revenue (%)</td></tr>
+<tr><td>GM Delta</td><td>Year-over-year gross margin change &mdash; positive = expanding margins</td></tr>
+</table>
+<div class="help-sec">Color Coding</div>
+<table class="help-tbl">
+<tr><td style="color:#00d68f">6&ndash;7 passes (green)</td><td>Strong multi-factor convergence &mdash; growth signals are broad-based</td></tr>
+<tr><td style="color:#4895ef">4&ndash;5 passes (blue)</td><td>Solid &mdash; most growth factors aligned</td></tr>
+<tr><td style="color:#ffd166">2&ndash;3 passes (yellow)</td><td>Mixed signals &mdash; some growth present but not confirmed across factors</td></tr>
+<tr><td style="color:#ff4d6d">0&ndash;1 passes (red)</td><td>Failing most screeners &mdash; weak growth profile</td></tr>
+</table>
+</div></div>
+"""
+
 # ── HTML report builder ────────────────────────────────────────────────────────
 
 def build_html(metrics_list: list[dict], index_name: str) -> str:
@@ -1107,7 +1166,7 @@ def build_html(metrics_list: list[dict], index_name: str) -> str:
   .cb-cell {{ width: 28px; text-align: center; padding: 4px 2px; }}
   input.row-check {{ cursor: pointer; width: 14px; height: 14px; accent-color: #7c6af7; }}
 </style>
-<style>{_WL_CSS}</style>
+<style>{_WL_CSS}{_HELP_CSS}</style>
 </head>
 <body>
 
@@ -1144,6 +1203,7 @@ def build_html(metrics_list: list[dict], index_name: str) -> str:
 <!-- Controls row -->
 <div class="controls-row">
   <button class="btn" onclick="exportCSV()">Export CSV</button>
+  <button class="help-btn" onclick="openHelp()">&#x24D8; How it works</button>
   <span class="row-count" id="row-count">Showing {total} of {total}</span>
 </div>
 
@@ -1378,7 +1438,9 @@ function exportCSV() {{
 </script>
 
 <script>{_wl_js(suite_port)}</script>
+<script>{_HELP_JS}</script>
 {_WL_BAR}
+{_HELP_MODAL_MFG}
 </body>
 </html>"""
 
