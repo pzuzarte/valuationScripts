@@ -193,6 +193,31 @@ def growth_adjusted_multiples(growth: float) -> dict:
 
 # ── § 4  CLASSIC VALUATION METHODS ───────────────────────────────────────────
 
+def _dcf_at_params(fcf: float, g: float, nd: float, shares: float,
+                   wacc: float, tg: float) -> float:
+    """
+    Single 2-stage 10-year DCF evaluation at specific wacc and terminal growth.
+    Used by run_dcf to compute the sensitivity table without duplicating stage logic.
+    Returns equity fair value per share, or 0.0 if equity is negative.
+    """
+    if wacc <= tg or fcf <= 0 or shares <= 0:
+        return 0.0
+    cf, pvs, g1 = fcf, [], g
+    for yr in range(1, 6):
+        g1 = max(g1 * (1 - DECAY_RATE), tg * 2)
+        cf = cf * (1 + g1)
+        pvs.append(cf / (1 + wacc) ** yr)
+    s1_exit = g1
+    for yr in range(6, 11):
+        t  = (yr - 5) / 5
+        g2 = s1_exit * (1 - t) + tg * t
+        cf = cf * (1 + g2)
+        pvs.append(cf / (1 + wacc) ** yr)
+    tv    = cf * (1 + tg) / (wacc - tg)
+    pv_tv = tv / (1 + wacc) ** 10
+    eq    = sum(pvs) + pv_tv - nd
+    return round(eq / shares, 2) if eq > 0 else 0.0
+
 def run_dcf(d: dict) -> dict:
     """
     2-stage 10-year FCF DCF:
@@ -200,12 +225,17 @@ def run_dcf(d: dict) -> dict:
       Stage 2 (years 6-10): linear interpolation from stage-1 exit to terminal
       Terminal: Gordon growth model at TERMINAL_GROWTH_RATE
 
-    Returns a rich dict with fair_value, mos_value, reliability flags, and details.
-    Source: 10-year logic from portfolioAnalyzer.py; rich-dict return from valuationMaster.py.
+    Uses SBC-adjusted FCF (fcf_adj) when available — SBC is a real economic
+    dilution cost that reported FCF ignores.  Uses adjusted net debt (net_debt_adj)
+    when available — includes operating lease liabilities and minority interest.
+
+    Returns a rich dict with fair_value, mos_value, reliability flags, sensitivity
+    table (3×3 WACC × terminal-growth grid), and terminal-value-as-%-of-EV.
     """
-    fcf    = d.get("fcf")
+    fcf    = d.get("fcf_adj") or d.get("fcf")   # prefer SBC-adjusted
     shares = d.get("shares")
-    nd     = (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0)
+    nd     = (d["net_debt_adj"] if d.get("net_debt_adj") is not None
+              else (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0))
     g      = d.get("est_growth") or 0.05
 
     if not (fcf and fcf > 0 and shares and shares > 0):
@@ -250,6 +280,16 @@ def run_dcf(d: dict) -> dict:
         iv = round(eq_val / shares, 2)
         warning = "Debt load is significant — treat DCF with caution." if debt_heavy else None
 
+    # ── Terminal value as % of EV (key risk disclosure) ─────────────────────
+    tv_pct = round(pv_term / ev * 100, 1) if ev > 0 else 0.0
+
+    # ── 3×3 sensitivity table: WACC ±1pp × terminal growth {2%, 2.5%, 3%} ──
+    wacc_lo, wacc_hi = round(wacc - 0.01, 4), round(wacc + 0.01, 4)
+    sensitivity = {}
+    for w in [wacc_lo, wacc, wacc_hi]:
+        for tg in [0.020, 0.025, TERMINAL_GROWTH_RATE]:
+            sensitivity[(round(w, 4), tg)] = _dcf_at_params(fcf, g, nd, shares, w, tg)
+
     return {
         "method":      "DCF",
         "fair_value":  iv,
@@ -261,12 +301,14 @@ def run_dcf(d: dict) -> dict:
         "debt_heavy":  debt_heavy,
         "warning":     warning,
         "net_debt":    nd,
+        "sbc_adjusted": d.get("fcf_adj") is not None,
         "details": {
-            "sum_pv":   sum_pv,
-            "pv_term":  pv_term,
-            "ev":       ev,
-            "eq_val":   max(eq_val, 0.0),
-            "term_pct": (pv_term / ev * 100) if ev > 0 else 0,
+            "sum_pv":      sum_pv,
+            "pv_term":     pv_term,
+            "ev":          ev,
+            "eq_val":      max(eq_val, 0.0),
+            "term_pct":    tv_pct,
+            "sensitivity": sensitivity,
         },
     }
 
@@ -296,7 +338,11 @@ def run_pfcf(d: dict, benchmarks: dict) -> dict:
 
 
 def run_pe(d: dict, benchmarks: dict) -> dict:
-    eps     = d["eps"]
+    # Prefer forward (NTM) EPS for a forward-looking P/E; fall back to TTM.
+    eps     = d.get("fwd_eps") or d["eps"]
+    if not eps or eps <= 0:
+        return None
+    eps_source = "NTM" if d.get("fwd_eps") and d["fwd_eps"] > 0 else "TTM"
     mkt_pe  = benchmarks["pe"]
     mults   = growth_adjusted_multiples(d["est_growth"])
     peer_label = benchmarks.get("sector_name", "Sector Median")
@@ -317,6 +363,7 @@ def run_pe(d: dict, benchmarks: dict) -> dict:
         "target_mult":  mults["target_pe"],
         "conserv_mult": mults["conserv_pe"],
         "peer_label":   peer_label,
+        "eps_source":   eps_source,
     }
 
 
@@ -386,13 +433,12 @@ def calibrate_erg_multiple(peer_data: dict, d: dict) -> tuple:
         }
 
     # Subject quality metrics
-    subj_gm   = d.get("gross_margin") or 50.0
-    # FCF margin from data dict
-    fcf       = d.get("fcf") or 0.0
-    rev       = d.get("revenue") or 1.0
-    rev_g     = (d.get("rev_growth_pct") or d.get("est_growth", 0.10) * 100)
-    fcf_m_pct = (fcf / rev * 100) if (fcf and rev > 0) else 0.0
-    subj_ro40 = rev_g + fcf_m_pct
+    subj_gm       = d.get("gross_margin") or 50.0
+    rev_g         = (d.get("rev_growth_pct") or d.get("est_growth", 0.10) * 100)
+    # Use operating margin (standard Rule-of-40 definition) so the subject is
+    # compared on the same basis as peers, whose ro40 is also op-margin based.
+    op_margin_pct = d.get("op_margin") or 0.0   # already in % (e.g. 20.0 = 20%)
+    subj_ro40     = rev_g + op_margin_pct
 
     # Peer distribution arrays
     peer_gm_vals   = sorted(r["gm"]   for r in peers if r["gm"]   > 0)
@@ -455,11 +501,16 @@ def run_reverse_dcf(d):
     # NOTE: Uses a simpler 5-year constant-growth DCF (not the 10-year two-stage
     # decay model in run_dcf). The implied growth rate returned here is therefore
     # NOT directly comparable as an input to run_dcf.
-    price=d["price"]; fcf=d["fcf"]; shares=d["shares"]
+    price=d["price"]
+    fcf=d.get("fcf_adj") or d.get("fcf")   # prefer SBC-adjusted
+    shares=d["shares"]
     if not(price and fcf and fcf>0 and shares and shares>0): return None
-    nd=d["total_debt"]-d["cash"]
+    nd=(d["net_debt_adj"] if d.get("net_debt_adj") is not None
+        else d["total_debt"]-d["cash"])
     wacc, _ = calculate_wacc(d)
     def dcf_at(g):
+        if wacc <= TERMINAL_GROWTH_RATE:
+            return 0.0
         cf,pvs=fcf,[]
         for yr in range(1,PROJECTION_YEARS+1):
             cf*=(1+g); pvs.append(cf/(1+wacc)**yr)
@@ -472,10 +523,22 @@ def run_reverse_dcf(d):
         if dcf_at(mid)<price: lo=mid
         else: hi=mid
     ig=round((lo+hi)/2,4); sg=d["est_growth"]
+    # Growth gap: how far analyst estimate diverges from market-implied growth.
+    # Large positive gap → analyst is more bullish than the market prices in.
+    growth_gap      = round(sg - ig, 4)
+    growth_gap_pct  = round(growth_gap * 100, 1)
+    gap_flag = None
+    if abs(growth_gap) > 0.15:
+        direction = "above" if growth_gap > 0 else "below"
+        gap_flag  = ("Analyst est ({:.0f}%) is {:.0f}pp {} market-implied growth ({:.0f}%) — "
+                     "{}").format(sg*100, abs(growth_gap)*100, direction, ig*100,
+                                  "model may be optimistic" if growth_gap > 0 else "model may be conservative")
     scen=[{"label":"Bear","g":max(0.0,ig-0.10)},{"label":"Implied","g":ig},
           {"label":"Street","g":sg},{"label":"Bull","g":min(1.50,ig+0.15)}]
     for s in scen: s["fv"]=dcf_at(s["g"]); s["upside"]=((s["fv"]-price)/price*100) if price else 0
-    return{"method":"Reverse DCF","implied_growth":ig,"street_growth":sg,"wacc":wacc,"scenarios":scen}
+    return{"method":"Reverse DCF","implied_growth":ig,"street_growth":sg,"wacc":wacc,
+           "growth_gap":growth_gap,"growth_gap_pct":growth_gap_pct,"gap_flag":gap_flag,
+           "scenarios":scen}
 
 
 def run_forward_peg(d: dict) -> dict:
@@ -639,8 +702,9 @@ def run_tam_scenario(d):
     # Priority: (1) actual net income / revenue, (2) gross-margin proxy.
     ni = d.get("net_income")
     if ni and rev and rev > 0 and ni / rev > 0.03:
-        # Use actual net margin, clipped to a reasonable range [5%, 60%]
-        actual_nm = max(0.05, min(0.60, ni / rev))
+        # Use actual net margin, clipped to a reasonable range [3%, 60%].
+        # Floor matches the entry threshold so a 3.5% NM isn't silently inflated.
+        actual_nm = max(0.03, min(0.60, ni / rev))
         base_nm = actual_nm
         nm_source = "actual TTM"
     else:
@@ -686,19 +750,40 @@ def run_tam_scenario(d):
                      "net_margin":base_nm*mm*100,"yr5_earn":yr5e,"fv":fv,
                      "upside":((fv-price)/price*100) if price else 0})
     bf=scen[1]["fv"]
+
+    # ── Reverse-TAM: find what market share the current price already prices in ─
+    # Binary search: what share_pct makes fv(share_pct) = price?
+    implied_share_at_price = None
+    if price and price > 0 and tam > 0:
+        def _tam_fv(share):
+            yr5e = tam * share * base_nm          # base margin multiplier = 1.0
+            return max(0.0, yr5e * TERM_PE / (1 + wacc) ** 5 / shares)
+        # Only valid if bull scenario exceeds price (otherwise all scenarios are below)
+        if _tam_fv(bull_share) >= price:
+            lo_s, hi_s = 0.0001, bull_share
+            for _ in range(60):
+                mid_s = (lo_s + hi_s) / 2
+                if _tam_fv(mid_s) < price: lo_s = mid_s
+                else: hi_s = mid_s
+            implied_share_at_price = round((lo_s + hi_s) / 2 * 100, 2)  # in %
+        else:
+            implied_share_at_price = None  # price implies share beyond bull case
+
     return{"method":"TAM Scenario","fair_value":bf,"mos_value":bf*(1-MARGIN_OF_SAFETY),
            "tam_est":tam,"tam_mult":round(tam_m,1),"base_net_margin":base_nm*100,
            "nm_source":nm_source,"implied_share_pct":round(implied_share*100,1),
+           "implied_share_at_price":implied_share_at_price,
            "wacc":wacc,"scenarios":scen}
 
 
 def run_rule_of_40(d):
     rev=d["revenue"]; fwd_rev=d.get("fwd_rev"); growth=d["est_growth"]
-    fcf_mar=d["fcf_margin"]; nd=d["total_debt"]-d["cash"]; shares=d["shares"]; price=d["price"]
+    nd=d["total_debt"]-d["cash"]; shares=d["shares"]; price=d["price"]
     rev_g=d.get("rev_growth_pct")
     if not(rev and rev>0 and shares and shares>0): return None
     rg=rev_g if rev_g is not None else growth*100
-    fm=(fcf_mar*100) if fcf_mar is not None else 0.0; ro40=rg+fm
+    # Use operating margin (standard Rule-of-40 definition). op_margin is in %.
+    om=d.get("op_margin") or 0.0; ro40=rg+om
     if ro40>=60:   cohort,lo,mid,hi="Elite (≥60)",       15.0,20.0,25.0
     elif ro40>=40: cohort,lo,mid,hi="Strong (40–60)",     8.0,11.0,15.0
     elif ro40>=20: cohort,lo,mid,hi="Average (20–40)",    4.0, 6.0, 8.0
@@ -706,7 +791,7 @@ def run_rule_of_40(d):
     ntm=fwd_rev if(fwd_rev and fwd_rev>0) else rev*(1+growth)
     def fv_at(m): eq=ntm*m-nd; return(eq/shares) if eq>0 else 0.0
     return{"method":"Rule of 40","fair_value":fv_at(mid),"mos_value":fv_at(mid)*(1-MARGIN_OF_SAFETY),
-           "ro40":round(ro40,1),"rev_growth_pct":round(rg,1),"fcf_margin_pct":round(fm,1),
+           "ro40":round(ro40,1),"rev_growth_pct":round(rg,1),"op_margin_pct":round(om,1),
            "cohort":cohort,"mult_lo":lo,"mult_mid":mid,"mult_hi":hi,
            "fv_lo":fv_at(lo),"fv_mid":fv_at(mid),"fv_hi":fv_at(hi),"ntm_rev":ntm,
            "current_ev_rev":(d["ev_approx"]/rev) if rev>0 else None}
@@ -910,7 +995,10 @@ def run_graham_number(d: dict) -> float:
         return None
     if fwd_eps <= 0 or book_ps <= 0:
         return None
-    fv = (22.5 * fwd_eps * book_ps) ** 0.5
+    product = 22.5 * fwd_eps * book_ps
+    if product <= 0:
+        return None
+    fv = product ** 0.5
     return round(fv, 2) if fv > 0 else None
 
 
@@ -1104,11 +1192,11 @@ def assess_reliability(d: dict, classic_results: list, growth_results: dict) -> 
         gm = d.get("gross_margin")
         if gm and gm < 40:
             f.append("Gross margin of {:.0f}% suggests this isn't a SaaS/software business — Rule of 40 is less applicable".format(gm))
-        ro40 = ro.get("ro40", 0)
+        ro40  = ro.get("ro40", 0)
         rev_g = ro.get("rev_growth_pct", 0)
-        fcf_m = ro.get("fcf_margin_pct", 0)
-        if rev_g < 5 and fcf_m < 5:
-            f.append("Both revenue growth and FCF margin are very low — Rule of 40 lacks discriminating power here")
+        op_m  = ro.get("op_margin_pct", 0)
+        if rev_g < 5 and op_m < 5:
+            f.append("Both revenue growth and operating margin are very low — Rule of 40 lacks discriminating power here")
         flags["Rule of 40"] = f
 
     erg = growth_results.get("erg")
@@ -1483,7 +1571,8 @@ def calc_peg_targets(d):
 
     # Cap growth used in PE calc at MAX_PEG_GROWTH (40%) — beyond that the
     # market does not linearly reward growth with a higher P/E multiple.
-    # Full growth_pct is preserved for bull scenario (PEG_BULL already stretches it).
+    # All three scenarios (bear/base/bull) use the same capped g; the bull
+    # scenario is differentiated by PEG_BULL multiplier, not uncapped growth.
     g = min(growth_pct, MAX_PEG_GROWTH)
 
     bear = fwd_eps * min(g * PEG_BEAR, MAX_FWD_PE)
@@ -2070,9 +2159,10 @@ def run_three_stage_dcf(d: dict) -> dict:
     More realistic than 2-stage for companies mid-way through their growth arc.
     Returns same dict shape as run_dcf.
     """
-    fcf    = d.get("fcf")
+    fcf    = d.get("fcf_adj") or d.get("fcf")   # prefer SBC-adjusted
     shares = d.get("shares")
-    nd     = (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0)
+    nd     = (d["net_debt_adj"] if d.get("net_debt_adj") is not None
+              else (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0))
     g      = d.get("est_growth") or 0.05
 
     if not (fcf and fcf > 0 and shares and shares > 0):
@@ -2100,9 +2190,10 @@ def run_three_stage_dcf(d: dict) -> dict:
         cf = cf * (1 + g2)
         pvs.append(cf / (1 + wacc) ** yr)
 
-    # Stage 3: years 8-12, linear decay from 2*tg to tg
+    # Stage 3: years 8-12, linear decay from 2*tg to tg.
+    # t=0 at yr=8 (g3=mid_g, continuous with stage 2 exit) → t=1 at yr=12 (g3=tg).
     for yr in range(8, 13):
-        t  = (yr - 7) / 5          # 0.2 → 1.0
+        t  = (yr - 8) / 4          # 0.0 → 1.0
         g3 = mid_g * (1 - t) + TERMINAL_GROWTH_RATE * t
         cf = cf * (1 + g3)
         pvs.append(cf / (1 + wacc) ** yr)
@@ -2160,9 +2251,10 @@ def run_monte_carlo_dcf(d: dict, n_sims: int = 5000) -> dict:
     if not _NUMPY_AVAIL:
         return None
 
-    fcf    = d.get("fcf")
+    fcf    = d.get("fcf_adj") or d.get("fcf")   # prefer SBC-adjusted
     shares = d.get("shares")
-    nd     = (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0)
+    nd     = (d["net_debt_adj"] if d.get("net_debt_adj") is not None
+              else (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0))
     g_base = d.get("est_growth") or 0.05
 
     if not (fcf and fcf > 0 and shares and shares > 0):
@@ -2170,13 +2262,16 @@ def run_monte_carlo_dcf(d: dict, n_sims: int = 5000) -> dict:
 
     base_wacc, wacc_source = calculate_wacc(d)
 
-    # Draw samples
+    # Draw samples. Clamp triangular bounds *before* sampling so the distribution
+    # isn't distorted by post-hoc clipping (which would truncate one tail and
+    # shift the effective mean away from the intended mode).
+    g_base = max(0.01, g_base)   # degenerate triangular if g_base ≤ 0
     rng    = np.random.default_rng(seed=42)
-    g_arr  = rng.triangular(g_base * 0.4, g_base, g_base * 1.6, n_sims)
-    w_arr  = rng.triangular(base_wacc * 0.8, base_wacc, base_wacc * 1.2, n_sims)
+    g_arr  = rng.triangular(max(0.0, g_base * 0.4), g_base, g_base * 1.6, n_sims)
+    w_lo   = max(0.05, base_wacc * 0.8)
+    w_hi   = min(0.20, base_wacc * 1.2)
+    w_arr  = rng.triangular(w_lo, base_wacc, w_hi, n_sims)
     tg_arr = rng.triangular(0.010, TERMINAL_GROWTH_RATE, 0.045, n_sims)
-    # Clamp WACC and terminal growth to sane ranges
-    w_arr  = np.clip(w_arr,  0.05, 0.20)
     tg_arr = np.clip(tg_arr, 0.005, 0.05)
     # Ensure wacc > tg for terminal value formula
     valid  = w_arr > tg_arr + 0.005
@@ -2318,10 +2413,12 @@ def run_rim(d: dict) -> dict:
         pvs.append(ri_t / (1 + ke) ** yr)
         bv   += eps_t * (1 - payout)  # book value grows by retained earnings
 
-    # Terminal value: residual income perpetuity
-    ri_terminal = pvs[-1] * (1 + ke) ** 10   # "un-discount" yr10 to get RI_10
-    tv          = ri_terminal / (ke - TERMINAL_GROWTH_RATE) if ke > TERMINAL_GROWTH_RATE else 0
-    pv_tv       = tv / (1 + ke) ** 10
+    # Terminal value: residual income perpetuity beginning in year 11.
+    # pvs[-1] is the *discounted* RI_10; un-discount it to get the raw RI_10,
+    # then apply the Gordon Growth formula: TV = RI_10 * (1+g) / (ke - g).
+    ri_10 = pvs[-1] * (1 + ke) ** 10
+    tv    = ri_10 * (1 + TERMINAL_GROWTH_RATE) / (ke - TERMINAL_GROWTH_RATE) if ke > TERMINAL_GROWTH_RATE else 0
+    pv_tv = tv / (1 + ke) ** 10
 
     sum_pv     = sum(pvs)
     fair_value = book_ps + sum_pv + pv_tv
@@ -2374,7 +2471,9 @@ def run_roic_excess_return(d: dict) -> dict:
     denom       = wacc - TERMINAL_GROWTH_RATE
 
     if denom <= 0:
-        denom = 0.001   # safety guard — shouldn't happen after WACC clamp
+        # WACC ≤ terminal growth breaks the model; return None rather than
+        # dividing by a near-zero denom and producing an inflated fair value.
+        return None
 
     value_driver = spread / denom
     fair_value   = max(0.0, round(ic_ps * (1 + value_driver), 2))
@@ -2676,12 +2775,14 @@ def run_pie(d: dict) -> dict:
             hi = mid
     implied_growth = round((lo + hi) / 2, 4)
 
-    # Adjustment factor — capped to avoid extreme outputs
-    if implied_growth > 0.001 and growth > 0.001:
-        raw_adj = (growth / implied_growth) ** 0.5
-        adj     = round(max(0.30, min(3.0, raw_adj)), 4)
-    elif implied_growth <= 0:
-        adj = 2.0   # market implies decline; analyst thinks growth → big discount
+    # Adjustment factor — capped to avoid extreme outputs.
+    # Use a continuous formula for all cases: floor implied_growth to 0.005 so
+    # that strongly negative market expectations still produce a meaningful (large)
+    # upside adjustment rather than a hardcoded arbitrary value.
+    if growth > 0.001:
+        eff_implied = max(0.005, implied_growth)
+        raw_adj     = (growth / eff_implied) ** 0.5
+        adj         = round(max(0.30, min(3.0, raw_adj)), 4)
     else:
         adj = 1.0
 

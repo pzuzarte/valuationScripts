@@ -60,37 +60,106 @@ try:
 except ImportError:
     PYTRENDS_AVAILABLE = False
 
-# ── Optional VADER sentiment ───────────────────────────────────────────────────
+# ── Sentiment scoring: FinBERT (preferred) → VADER → keyword fallback ──────────
+#
+# FinBERT (ProsusAI/finbert) is a BERT model fine-tuned on financial text.
+# It understands domain-specific language and complex sentence structure far
+# better than VADER's lexicon approach.  We load it lazily on first use so
+# the import overhead only hits when sentiment analysis is actually run.
+#
+# Install: pip install transformers torch  (or transformers sentencepiece)
+# If the protobuf version conflict prevents import, fix with:
+#   pip install protobuf==3.20.*
+#
+_FINBERT_PIPE  = None
+_FINBERT_TRIED = False
+FINBERT_AVAILABLE = False
+
+def _load_finbert():
+    global _FINBERT_PIPE, _FINBERT_TRIED, FINBERT_AVAILABLE
+    if _FINBERT_TRIED:
+        return FINBERT_AVAILABLE
+    _FINBERT_TRIED = True
+    try:
+        from transformers import pipeline as _hf_pipeline
+        _FINBERT_PIPE = _hf_pipeline(
+            "text-classification",
+            model="ProsusAI/finbert",
+            tokenizer="ProsusAI/finbert",
+            top_k=None,          # return all three label scores
+            truncation=True,
+            max_length=512,
+        )
+        FINBERT_AVAILABLE = True
+        print("  [Sentiment] FinBERT loaded — using domain-aware NLP scorer.")
+    except Exception as _e:
+        print("  [Sentiment] FinBERT unavailable ({}); falling back to VADER/keywords.".format(type(_e).__name__))
+        FINBERT_AVAILABLE = False
+    return FINBERT_AVAILABLE
+
+def _score_finbert(text: str) -> float:
+    """Score text with FinBERT. Returns −1 to +1 (positive − negative probability)."""
+    if not text:
+        return 0.0
+    try:
+        results = _FINBERT_PIPE(str(text)[:512])
+        # results is a list of lists: [[{label, score}, ...]]
+        scores_list = results[0] if isinstance(results[0], list) else results
+        label_map = {r["label"].lower(): r["score"] for r in scores_list}
+        pos = label_map.get("positive", 0.0)
+        neg = label_map.get("negative", 0.0)
+        return round(pos - neg, 3)
+    except Exception:
+        return 0.0
+
+# ── VADER fallback ─────────────────────────────────────────────────────────────
+_VADER = None
+VADER_AVAILABLE = False
 try:
-    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-    _VADER = SentimentIntensityAnalyzer()
-    def score_text(text: str) -> float:
-        return round(_VADER.polarity_scores(str(text or ""))["compound"], 3)
+    from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer as _VSA
+    _VADER = _VSA()
     VADER_AVAILABLE = True
 except ImportError:
-    VADER_AVAILABLE = False
-    _POS = {
-        "beat","beats","surpass","record","growth","grew","bullish","buy",
-        "upgrade","upgraded","profit","gain","rise","soar","rally","strong",
-        "outperform","exceed","exceeded","boost","optimistic","recovery",
-        "expand","dividend","buyback","acquisition","launch","launches",
-        "positive","upbeat","accelerate","partnership","approve","approved",
-    }
-    _NEG = {
-        "miss","misses","missed","decline","loss","losses","bearish","sell",
-        "downgrade","downgraded","lawsuit","debt","fall","slump","crash",
-        "weak","warning","concern","uncertain","risk","probe","investigation",
-        "fraud","layoff","layoffs","cut","reduce","penalty","fine","recall",
-        "shortage","delay","negative","disappoints","disappoint",
-    }
-    def score_text(text: str) -> float:
-        if not text:
-            return 0.0
-        words = set(str(text).lower().split())
-        pos   = len(words & _POS)
-        neg   = len(words & _NEG)
-        total = pos + neg
-        return round((pos - neg) / total, 3) if total else 0.0
+    pass
+
+# ── Keyword fallback (last resort, no ML dependency) ──────────────────────────
+_POS = {
+    "beat","beats","surpass","record","growth","grew","bullish","buy",
+    "upgrade","upgraded","profit","gain","rise","soar","rally","strong",
+    "outperform","exceed","exceeded","boost","optimistic","recovery",
+    "expand","dividend","buyback","acquisition","launch","launches",
+    "positive","upbeat","accelerate","partnership","approve","approved",
+}
+_NEG = {
+    "miss","misses","missed","decline","loss","losses","bearish","sell",
+    "downgrade","downgraded","lawsuit","debt","fall","slump","crash",
+    "weak","warning","concern","uncertain","risk","probe","investigation",
+    "fraud","layoff","layoffs","cut","reduce","penalty","fine","recall",
+    "shortage","delay","negative","disappoints","disappoint",
+}
+
+def _score_keyword(text: str) -> float:
+    if not text:
+        return 0.0
+    words = set(str(text).lower().split())
+    pos   = len(words & _POS)
+    neg   = len(words & _NEG)
+    total = pos + neg
+    return round((pos - neg) / total, 3) if total else 0.0
+
+def score_text(text: str) -> float:
+    """
+    Score financial text on a −1 (bearish) to +1 (bullish) scale.
+    Priority: FinBERT (if loaded) → VADER → keyword matching.
+    FinBERT is loaded lazily on the first call; subsequent calls are fast.
+    """
+    if _load_finbert():
+        return _score_finbert(text)
+    if VADER_AVAILABLE and _VADER is not None:
+        return round(_VADER.polarity_scores(str(text or ""))["compound"], 3)
+    return _score_keyword(text)
+
+SENTIMENT_ENGINE = "FinBERT (lazy)" if not _FINBERT_TRIED else ("FinBERT" if FINBERT_AVAILABLE else ("VADER" if VADER_AVAILABLE else "keyword"))
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 ROOT       = os.path.dirname(os.path.abspath(__file__))

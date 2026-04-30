@@ -304,7 +304,9 @@ def fetch_tv_data(ticker: str) -> dict:
     }
 
 
-def fetch_market_benchmarks(sector: str = None, industry: str = None) -> dict:
+def fetch_market_benchmarks(sector: str = None, industry: str = None,
+                            subject_roic: float = None,
+                            subject_growth_pct: float = None) -> dict:
     """
     Fetch live median P/E, P/FCF, and EV/EBITDA multiples.
 
@@ -320,15 +322,23 @@ def fetch_market_benchmarks(sector: str = None, industry: str = None) -> dict:
         Tier 3 — Broad Market (top-200 by market cap)
             Last resort when neither industry nor sector yields enough data.
 
-    Returns dict with keys: pe, pfcf, ev_ebitda, sector_name, peer_count.
+    When subject_roic and subject_growth_pct are supplied, a quality-filtered
+    subset is derived by keeping only peers within ±15pp ROIC and ±10pp growth
+    of the subject company, preventing high-quality companies from being
+    benchmarked against mediocre sector peers. Quality multiples are returned
+    alongside raw ones; valuation models use quality multiples when available.
+
+    Returns dict with keys: pe, pfcf, ev_ebitda, sector_name, peer_count,
+    plus pe_q, pfcf_q, ev_ebitda_q (quality-filtered) when applicable.
     """
     defaults = {"pe": 22.0, "pfcf": 22.0, "ev_ebitda": 14.0,
                 "sector_name": "Broad Market", "peer_count": 0}
 
     BM_FIELDS = ["name", "market_cap_basic", "free_cash_flow",
-                 "price_earnings_ttm", "enterprise_value_ebitda_ttm"]
+                 "price_earnings_ttm", "enterprise_value_ebitda_ttm",
+                 "return_on_invested_capital", "total_revenue_yoy_growth_ttm"]
 
-    def _calc_medians(df):
+    def _calc_medians(df, label="raw"):
         """Compute medians from a DataFrame; returns (benchmarks_dict, True) or (None, False)."""
         if df.empty or len(df) < 10:
             return None, False
@@ -352,6 +362,22 @@ def fetch_market_benchmarks(sector: str = None, industry: str = None) -> dict:
 
         return bm, True
 
+    def _quality_filter(df):
+        """Return a subset of df filtered to peers with similar ROIC and growth."""
+        if subject_roic is None and subject_growth_pct is None:
+            return None
+        try:
+            mask = _pd.Series([True] * len(df), index=df.index)
+            if subject_roic is not None and "return_on_invested_capital" in df.columns:
+                roic_col = df["return_on_invested_capital"].fillna(float('nan'))
+                mask = mask & (roic_col.between(subject_roic - 15, subject_roic + 15))
+            if subject_growth_pct is not None and "total_revenue_yoy_growth_ttm" in df.columns:
+                g_col = df["total_revenue_yoy_growth_ttm"].fillna(float('nan'))
+                mask = mask & (g_col.between(subject_growth_pct - 10, subject_growth_pct + 10))
+            return df[mask]
+        except Exception:
+            return None
+
     # ── Tier 1: industry peers ─────────────────────────────────────
     if industry:
         try:
@@ -368,6 +394,15 @@ def fetch_market_benchmarks(sector: str = None, industry: str = None) -> dict:
             if ok:
                 bm["sector_name"] = industry
                 bm["peer_count"]  = len(df_ind)
+                # Quality-filtered overlay
+                df_q = _quality_filter(df_ind)
+                if df_q is not None and len(df_q) >= 6:
+                    bm_q, ok_q = _calc_medians(df_q)
+                    if ok_q:
+                        bm["pe_q"]       = bm_q["pe"]
+                        bm["pfcf_q"]     = bm_q["pfcf"]
+                        bm["ev_ebitda_q"]= bm_q["ev_ebitda"]
+                        bm["peer_count_q"] = len(df_q)
                 return bm
         except Exception:
             pass
@@ -388,6 +423,14 @@ def fetch_market_benchmarks(sector: str = None, industry: str = None) -> dict:
             if ok:
                 bm["sector_name"] = "{} (sector)".format(sector)
                 bm["peer_count"]  = len(df_sec)
+                df_q = _quality_filter(df_sec)
+                if df_q is not None and len(df_q) >= 6:
+                    bm_q, ok_q = _calc_medians(df_q)
+                    if ok_q:
+                        bm["pe_q"]        = bm_q["pe"]
+                        bm["pfcf_q"]      = bm_q["pfcf"]
+                        bm["ev_ebitda_q"] = bm_q["ev_ebitda"]
+                        bm["peer_count_q"] = len(df_q)
                 return bm
         except Exception:
             pass
@@ -465,7 +508,7 @@ def fetch_peer_erg_data(sector: str = None, industry: str = None) -> dict:
     ERG_FIELDS = [
         "name", "market_cap_basic", "total_debt", "total_revenue",
         "total_revenue_yoy_growth_ttm", "gross_margin_percent_ttm",
-        "free_cash_flow",
+        "operating_margin",
     ]
 
     DEFAULTS = {
@@ -483,7 +526,7 @@ def fetch_peer_erg_data(sector: str = None, industry: str = None) -> dict:
                 rev       = float(row.get("total_revenue") or 0)
                 rev_g_pct = float(row.get("total_revenue_yoy_growth_ttm") or 0)
                 gm        = float(row.get("gross_margin_percent_ttm") or 0)
-                fcf_val   = float(row.get("free_cash_flow") or 0)
+                op_mar    = float(row.get("operating_margin") or 0)   # already in %
                 tkr       = str(row.get("name", ""))
 
                 if mktcap < MIN_MKTCAP:                              continue
@@ -497,8 +540,7 @@ def fetch_peer_erg_data(sector: str = None, industry: str = None) -> dict:
                 erg = ev_rev / rev_g_pct
                 if not (MIN_ERG <= erg <= MAX_ERG):                  continue
 
-                fcf_margin_pct = (fcf_val / rev * 100) if rev > 0 else 0.0
-                ro40 = rev_g_pct + fcf_margin_pct
+                ro40 = rev_g_pct + op_mar   # standard Rule-of-40: growth% + op margin%
 
                 rows.append({
                     "ticker": tkr, "erg": round(erg, 4),
@@ -1181,7 +1223,7 @@ def fetch_all_yfinance(ticker: str) -> tuple:
             beta = "{:.3f}".format(beta_yf)              if beta_yf  is not None else "N/A",
         ))
 
-        # ── Revenue / FCF / EBITDA (yfinance canonical) ──────────────────────
+        # ── Revenue / FCF / EBITDA / SBC (yfinance canonical) ───────────────
         try:
             REV_NAMES   = ["Total Revenue", "Revenue", "Revenues", "Net Revenue",
                            "Operating Revenue", "TotalRevenue"]
@@ -1190,6 +1232,8 @@ def fetch_all_yfinance(ticker: str) -> tuple:
             EBIT2_NAMES = ["Operating Income", "EBIT", "OperatingIncome"]
             DA_NAMES    = ["Depreciation Amortization Depletion",
                            "Depreciation And Amortization", "Reconciled Depreciation"]
+            SBC_NAMES   = ["Stock Based Compensation", "Share Based Compensation",
+                           "StockBasedCompensation", "ShareBasedCompensation"]
 
             q_cf     = tk.quarterly_cashflow
             use_q_cf = q_cf is not None and not q_cf.empty and q_cf.shape[1] >= 4
@@ -1197,6 +1241,7 @@ def fetch_all_yfinance(ticker: str) -> tuple:
             if use_q:
                 rev_yf    = _ttm(q_inc, REV_NAMES)
                 fcf_yf    = _ttm(q_cf, FCF_NAMES) if use_q_cf else None
+                sbc_yf    = _ttm(q_cf, SBC_NAMES) if use_q_cf else None
                 ebitda_yf = _ttm(q_inc, EBIT_NAMES)
                 if ebitda_yf is None:
                     oi = _ttm(q_inc, EBIT2_NAMES)
@@ -1208,6 +1253,7 @@ def fetch_all_yfinance(ticker: str) -> tuple:
                 _a_cf2  = tk.cashflow      # cached by yfinance
                 rev_yf    = _annual(_a_inc2, REV_NAMES)
                 fcf_yf    = _annual(_a_cf2,  FCF_NAMES)
+                sbc_yf    = _annual(_a_cf2,  SBC_NAMES)
                 ebitda_yf = _annual(_a_inc2, EBIT_NAMES)
                 if ebitda_yf is None:
                     oi = _annual(_a_inc2, EBIT2_NAMES)
@@ -1217,6 +1263,7 @@ def fetch_all_yfinance(ticker: str) -> tuple:
 
             if rev_yf    is not None: ext["revenue_yf"] = rev_yf
             if fcf_yf    is not None: ext["fcf_yf"]     = fcf_yf
+            if sbc_yf    is not None: ext["sbc_ttm"]    = abs(sbc_yf)  # SBC is add-back in CF → positive
             if ebitda_yf is not None: ext["ebitda_yf"]  = ebitda_yf
         except Exception:
             pass
@@ -1363,6 +1410,19 @@ def fetch_all_yfinance(ticker: str) -> tuple:
                         tot_l = tot_a - eq_v
                 if tot_l is not None:
                     ext["total_liabilities"] = tot_l
+
+                # ── Operating lease liabilities (post-ASC 842 debt equivalent) ─
+                lease = _annual(bs, ["Operating Lease Liability", "OperatingLeaseLiability",
+                                     "Operating Leases Right Of Use Asset Noncurrent",
+                                     "Finance Lease Liability"])
+                if lease is not None:
+                    ext["operating_lease_liab"] = abs(lease)
+
+                # ── Minority interest (non-controlling claims on enterprise value) ─
+                mi = _annual(bs, ["Minority Interest", "NoncontrollingInterestInNetAssets",
+                                  "Noncontrolling Interest", "Minority Shareholders"])
+                if mi is not None and mi > 0:
+                    ext["minority_interest"] = mi
         except Exception:
             pass
 
@@ -2727,12 +2787,12 @@ def _build_growth_html(d, gr, reliability=None):
             '<div class="gc'+fc+'" style="--gca:'+sc+';">'
             '<div class="gc-head"><span class="gc-name">Rule of 40</span>'+_vm_help_btn("Rule of 40")+'<span class="gc-badge">Quality + Revenue</span></div>'
             +fh+
-            '<div class="gc-sub">Rev growth% + FCF margin% — the SaaS quality benchmark. '
+            '<div class="gc-sub">Rev growth% + Op. margin% — the SaaS quality benchmark. '
             'Score determines which peer cohort EV/Revenue range applies.</div>'
             '<div class="ro40-num" style="color:'+sc+';">'+format(ro["ro40"],".1f")+'</div>'
             '<div class="ro40-cohort">'+ro["cohort"]
             +'&nbsp;·&nbsp;Rev growth '+format(ro["rev_growth_pct"],".1f")
-            +'% + FCF margin '+format(ro["fcf_margin_pct"],".1f")+'%</div>'
+            +'% + Op. margin '+format(ro["op_margin_pct"],".1f")+'%</div>'
             '<div class="gc-fv">'+mo2(fv)+'</div>'
             '<div class="gc-ud '+ud_c+'">'+ud_s+' vs current price (mid cohort)</div>'
             '<div class="gc-mos">MoS Price: '+mo2(ro["mos_value"])+'</div><hr>'
@@ -4479,6 +4539,18 @@ def _build_backtest_html(bt: dict, d: dict, top_8: list = None, applicability_sc
         'to predict multi-year price paths. '
         'Vertical dashed marks on the chart show when a new 10-K filing became available. '
         'The method with the highest tracking accuracy is ranked #1.'
+        '</div>'
+        '<div style="background:rgba(240,165,0,.08);border:1px solid rgba(240,165,0,.3);'
+        'border-radius:8px;padding:12px 16px;font-size:12px;color:#c8a84b;margin-bottom:20px;">'
+        '<strong>Look-ahead bias caveat:</strong>&nbsp; Historical fair values use the '
+        'annual 10-K financials that were publicly available on each backtest date '
+        '(with a 75-day filing lag). However, the <em>forward growth estimates</em> '
+        '(analyst consensus) used in DCF and PEG models are current — not the estimates '
+        'that analysts actually held at each historical date. This means forward-looking '
+        'models (DCF, PEG, TAM) will appear to track better than they truly would have. '
+        'Backward-looking models (P/E, P/FCF, EV/EBITDA, Mean Reversion) are unaffected '
+        'and provide the most reliable backtest signal. True point-in-time analyst '
+        'estimates require a paid data subscription (e.g. Sharadar, FactSet).'
         '</div>'
 
         # KPI row
@@ -6708,14 +6780,41 @@ def main():
     if ext.get("revenue_yf") is not None:
         d["revenue"] = ext["revenue_yf"]
     if ext.get("fcf_yf") is not None:
-        d["fcf"]           = ext["fcf_yf"]
-        d["fcf_per_share"] = (ext["fcf_yf"] / d["shares"]) if d.get("shares") else None
-        d["fcf_margin"]    = (ext["fcf_yf"] / d["revenue"]) if d.get("revenue") and d["revenue"] > 0 else None
-        d["current_pfcf"]  = (d["market_cap"] / ext["fcf_yf"]) if d.get("market_cap") and ext["fcf_yf"] > 0 else None
+        fcf_reported       = ext["fcf_yf"]
+        d["fcf"]           = fcf_reported
+        d["fcf_reported"]  = fcf_reported
+        # SBC-adjusted FCF: subtract stock-based compensation (a real dilution cost
+        # that is added back to operating cash flow, inflating reported FCF).
+        sbc = ext.get("sbc_ttm") or 0.0
+        if sbc > 0:
+            fcf_adj = fcf_reported - sbc
+            d["fcf_adj"]     = fcf_adj
+            d["sbc"]         = sbc
+            d["sbc_pct_rev"] = round(sbc / d["revenue"] * 100, 2) if d.get("revenue") and d["revenue"] > 0 else None
+        else:
+            d["fcf_adj"] = None
+            d["sbc"]     = 0.0
+            d["sbc_pct_rev"] = 0.0
+        # Derive per-share / margin using reported FCF for display, adj for models
+        d["fcf_per_share"] = (fcf_reported / d["shares"]) if d.get("shares") else None
+        d["fcf_margin"]    = (fcf_reported / d["revenue"]) if d.get("revenue") and d["revenue"] > 0 else None
+        d["current_pfcf"]  = (d["market_cap"] / fcf_reported) if d.get("market_cap") and fcf_reported > 0 else None
     if ext.get("ebitda_yf") is not None:
         d["ebitda"]            = ext["ebitda_yf"]
         d["ebitda_method"]     = "yfinance (TTM)"
         d["current_ev_ebitda"] = (d["ev_approx"] / ext["ebitda_yf"]) if d.get("ev_approx") and ext["ebitda_yf"] > 0 else None
+
+    # ── Adjusted net debt: total_debt + operating leases + minority interest − cash ─
+    # Operating leases (post-ASC 842) and minority interest are genuine claims on
+    # enterprise value that a simple total_debt − cash understates.
+    _base_nd = (d.get("total_debt") or 0.0) - (d.get("cash") or 0.0)
+    _lease    = ext.get("operating_lease_liab") or 0.0
+    _mi       = ext.get("minority_interest") or 0.0
+    if _lease > 0 or _mi > 0:
+        d["net_debt_adj"]         = _base_nd + _lease + _mi
+        d["net_debt_adj_detail"]  = {"lease_liab": _lease, "minority_interest": _mi}
+    else:
+        d["net_debt_adj"] = None   # signals models to use inline total_debt − cash
 
     if args.wacc:
         d["wacc_override"] = args.wacc
@@ -6733,10 +6832,18 @@ def main():
         print("  Industry detected: {} ({}) — fetching industry peer medians...".format(industry, sector or "?"))
     elif sector:
         print("  Sector detected: {} — fetching sector peer medians...".format(sector))
-    benchmarks = fetch_market_benchmarks(sector, industry)
+    _subj_roic = (ext.get("roic") or 0) * 100 if ext.get("roic") else None
+    _subj_g_pct = (d.get("est_growth") or 0) * 100
+    benchmarks = fetch_market_benchmarks(sector, industry,
+                                         subject_roic=_subj_roic,
+                                         subject_growth_pct=_subj_g_pct)
     print("  Benchmark source: " + benchmarks.get("sector_name", "Broad Market")
           + " (" + str(benchmarks.get("peer_count", 0)) + " peers)")
-    print("  P/E median=" + str(benchmarks["pe"]) + "x | P/FCF median=" + str(benchmarks["pfcf"]) + "x | EV/EBITDA median=" + str(benchmarks["ev_ebitda"]) + "x")
+    _q_note = ("  Quality-filtered peers: {} (ROIC ±15pp, growth ±10pp)".format(
+                   benchmarks["peer_count_q"]) if benchmarks.get("peer_count_q") else "")
+    print("  P/E median=" + str(benchmarks["pe"]) + "x | P/FCF median=" + str(benchmarks["pfcf"]) + "x | EV/EBITDA median=" + str(benchmarks["ev_ebitda"]) + "x"
+          + (" | Quality-adj P/E=" + str(benchmarks.get("pe_q")) + "x" if benchmarks.get("pe_q") else ""))
+    if _q_note: print(_q_note)
     erg_peer_data = fetch_peer_erg_data(sector, industry)
     peer_group = []
     if sector and industry:
@@ -6770,10 +6877,12 @@ def main():
     else:
         print("  P/FCF:            SKIPPED (no positive FCF per share)")
 
-    if d["eps"] and d["eps"] > 0:
+    _pe_eps = d.get("fwd_eps") or d.get("eps")
+    if _pe_eps and _pe_eps > 0:
         r = run_pe(d, benchmarks)
-        results.append(r)
-        print("  P/E:              " + mo(r["fair_value"]))
+        if r:
+            results.append(r)
+            print("  P/E:              " + mo(r["fair_value"]))
     else:
         print("  P/E:              SKIPPED (no positive EPS)")
 
