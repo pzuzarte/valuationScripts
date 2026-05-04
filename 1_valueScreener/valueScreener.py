@@ -1136,9 +1136,9 @@ def build_html(results, bm, ts, total, suite_port: int = 5050):
     top_sectors  = sorted(sec_freq.items(), key=lambda x: -x[1])[:8]
     all_sectors  = sorted(set(r["sector"] for r in results))
 
-    # Nav pills
+    # Nav pills — most undervalued first
     nav_html = ""
-    for name, lo, hi, color in TIERS:
+    for name, lo, hi, color in reversed(TIERS):
         cnt = len(tier_map[name])
         if cnt == 0: continue
         sid = name.replace(" ", "_")
@@ -1173,9 +1173,9 @@ def build_html(results, bm, ts, total, suite_port: int = 5050):
             '</div>'
         )
 
-    # Tier sections
+    # Tier sections — most undervalued first
     sections_html = ""
-    for tier_name, lo, hi, color in TIERS:
+    for tier_name, lo, hi, color in reversed(TIERS):
         stocks = tier_map[tier_name]
         if not stocks: continue
         sid = tier_name.replace(" ", "_")

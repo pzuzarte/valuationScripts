@@ -33,6 +33,7 @@ pmdarima>=2.0.0            # auto-ARIMA
 arch>=5.0.0                # GARCH / volatility models
 tslearn>=0.6.0             # DTW clustering (classifier)
 dtaidistance>=2.3.0        # DTW fallback (classifier)
+prophet>=1.1.5             # Meta Prophet additive model (priceForecast)
 
 # ── Sentiment ─────────────────────────────────────────────────────────────────
 vaderSentiment>=3.3.2      # VADER rule-based scoring (topicSentiment)
@@ -44,3 +45,23 @@ vaderSentiment>=3.3.2      # VADER rule-based scoring (topicSentiment)
 # the correct binary is used on both macOS and Linux).
 # Model weights are cached in ~/.cache/huggingface on first use.
 transformers>=4.38.0       # Hugging Face model hub + pipeline API (topicSentiment FinBERT)
+
+# ── Foundation time-series models & TFT (priceForecast) ──────────────────────
+# These are intentionally NOT installed from requirements.txt — install.sh
+# handles them in a separate optional step because:
+#   • timesfm            requires JAX or a torch backend and has complex sub-deps
+#   • chronos-forecasting requires torch (installed separately) and git
+#   • pytorch-forecasting requires torch and lightning; installs ~500 MB of deps
+#   • lightning           the PyTorch Lightning training framework for TFT
+# Both foundation models download large checkpoints (~200–300 MB) on first use
+# from HuggingFace; weights are cached in ~/.cache/huggingface.
+# All tools degrade gracefully when these packages are absent.
+#
+# To install manually:
+#   pip install timesfm
+#   pip install chronos-forecasting
+#   pip install pytorch-forecasting lightning
+#
+# N-HiTS and N-BEATS are implemented natively in PyTorch (priceForecast.py) —
+# the neuralforecast package is NOT required and should NOT be installed
+# (it has a pyarrow/protobuf binary conflict with the conda py311 environment).

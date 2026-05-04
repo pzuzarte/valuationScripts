@@ -354,8 +354,8 @@ SCRIPTS = {
     },
     "Price Forecast": {
         "path": os.path.join(ROOT, "11_priceForecast", "priceForecast.py"),
-        "desc": "ARIMA + ETS price forecasting with walk-forward backtest — compares model accuracy against a naive random-walk baseline and surfaces uncertainty cones over the forecast horizon.",
-        "note": "💡 ARIMA models log-returns (stationary). ETS models log-price levels with a damped trend. Both are benchmarked against the naive random-walk. Outputs include residual ACF diagnostics and a full backtest over the last 252 trading days.",
+        "desc": "Multi-model price forecasting with fundamental valuation overlay — blends ARIMA, ETS, XGBoost, LSTM, Prophet, TimesFM and Chronos with inverse-MAPE weighting, and surfaces intrinsic value estimates from DCF, DDM, Graham and peer-multiple models.",
+        "note": "💡 Ensemble mode runs all available models and blends them by inverse walk-forward MAPE. Fundamental targets are overlaid as horizontal reference lines on the forecast chart. LSTM uses MC-Dropout confidence intervals; ARIMA/ETS use GARCH-scaled bands.",
         "icon": "🔮",
         "params": [
             dict(id="ticker",  label="Ticker",           type="entry",  flag="--ticker",
@@ -365,8 +365,8 @@ SCRIPTS = {
                  required=False, default="30",
                  hint="Trading days ahead (5–252, default 30)"),
             dict(id="model",   label="Model",            type="option", flag="--model",
-                 required=False, default="both",
-                 values=["both", "arima", "ets"]),
+                 required=False, default="ensemble",
+                 values=["ensemble", "all", "both", "arima", "ets", "xgb", "lstm", "prophet", "timesfm", "chronos", "montecarlo", "tft", "nhits", "nbeats"]),
             dict(id="period",  label="History",          type="option", flag="--period",
                  required=False, default="5y",
                  values=["2y", "5y", "10y"]),

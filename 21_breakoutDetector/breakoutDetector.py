@@ -20,6 +20,7 @@ import argparse
 import io
 import os
 import sys
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -334,58 +335,114 @@ def build_labels(df: pd.DataFrame, threshold: float) -> pd.Series:
     return label
 
 
-def fetch_ticker_data(ticker: str, period_days: int = 630) -> pd.DataFrame | None:
+def _flatten_ohlcv(raw: pd.DataFrame) -> pd.DataFrame:
+    """Flatten MultiIndex columns to plain OHLCV names."""
+    if isinstance(raw.columns, pd.MultiIndex):
+        _expected = {"Close", "Open", "High", "Low", "Volume", "Adj Close"}
+        l0 = set(raw.columns.get_level_values(0))
+        level = 0 if l0 & _expected else 1
+        raw = raw.copy()
+        raw.columns = raw.columns.get_level_values(level)
+    return raw.loc[:, ~raw.columns.duplicated(keep="first")]
+
+
+def _fetch_single_ticker(ticker: str, start: str, end: str, retries: int = 3) -> pd.DataFrame | None:
+    """Download one ticker with exponential-backoff retry on rate-limit errors."""
+    for attempt in range(retries):
+        try:
+            raw = yf.download(
+                ticker,
+                start=start,
+                end=end,
+                progress=False,
+                auto_adjust=True,
+            )
+            if raw is None or raw.empty:
+                return None
+            raw = _flatten_ohlcv(raw)
+            return raw if len(raw) >= 252 else None
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "rate" in msg or "429" in msg or "too many" in msg or "crumb" in msg or "401" in msg:
+                wait = 2 ** (attempt + 2)  # 4s, 8s, 16s
+                time.sleep(wait)
+            else:
+                return None
+    return None
+
+
+def fetch_batch_ohlcv(
+    tickers: list[str],
+    period_days: int = 630,
+) -> dict[str, pd.DataFrame]:
     """
-    Download ~2.5 years of OHLCV data for one ticker.
-    Returns None if fewer than 252 rows of valid data.
+    Download OHLCV for all tickers in a single yf.download() call.
+    Falls back to individual per-ticker downloads (with retry) for any that
+    are missing from the batch result.
+    Returns {ticker: DataFrame} for tickers with ≥252 rows.
     """
     end   = datetime.today()
     start = end - timedelta(days=period_days)
+    s_str = start.strftime("%Y-%m-%d")
+    e_str = end.strftime("%Y-%m-%d")
+
+    result: dict[str, pd.DataFrame] = {}
+
+    # ── Batch download (one HTTP session for all tickers) ─────────────────────
     try:
-        raw = yf.download(
-            ticker,
-            start=start.strftime("%Y-%m-%d"),
-            end=end.strftime("%Y-%m-%d"),
+        raw_all = yf.download(
+            tickers,
+            start=s_str,
+            end=e_str,
             progress=False,
             auto_adjust=True,
+            group_by="ticker",
         )
-        if raw is None or raw.empty:
-            return None
-        # Flatten MultiIndex columns — handle both old (metric, ticker) and
-        # new (ticker, metric) yfinance MultiIndex layouts, then deduplicate.
-        if isinstance(raw.columns, pd.MultiIndex):
-            _expected = {"Close", "Open", "High", "Low", "Volume", "Adj Close"}
-            l0 = set(raw.columns.get_level_values(0))
-            level = 0 if l0 & _expected else 1
-            raw.columns = raw.columns.get_level_values(level)
-        raw = raw.loc[:, ~raw.columns.duplicated(keep="first")]
-        if len(raw) < 252:
-            return None
-        return raw
     except Exception:
-        return None
+        raw_all = None
+
+    if raw_all is not None and not raw_all.empty:
+        if len(tickers) == 1:
+            flat = _flatten_ohlcv(raw_all)
+            if len(flat) >= 252:
+                result[tickers[0]] = flat
+        else:
+            for t in tickers:
+                try:
+                    df = raw_all[t].dropna(how="all")
+                    df = _flatten_ohlcv(df)
+                    if len(df) >= 252:
+                        result[t] = df
+                except Exception:
+                    pass
+
+    # ── Per-ticker retry for anything missing ─────────────────────────────────
+    missing = [t for t in tickers if t not in result]
+    if missing:
+        # Stagger retries to avoid hammering the API
+        for t in missing:
+            time.sleep(0.4)
+            df = _fetch_single_ticker(t, s_str, e_str)
+            if df is not None:
+                result[t] = df
+
+    return result
 
 
-def fetch_and_build(ticker: str, threshold: float) -> tuple[str, pd.DataFrame | None, dict | None]:
-    """
-    Fetch data, compute features + labels for training, and extract current snapshot.
-    Returns (ticker, train_df_with_label, current_row_dict).
-    """
-    raw = fetch_ticker_data(ticker)
-    if raw is None:
-        return ticker, None, None
-
+def _build_from_raw(
+    ticker: str,
+    raw: pd.DataFrame,
+    threshold: float,
+) -> tuple[str, pd.DataFrame | None, dict | None]:
+    """Compute features + labels from already-fetched OHLCV data."""
     feat   = compute_features(raw)
     labels = build_labels(raw, threshold)
 
-    # Align and drop NaN
     combined = feat.copy()
     combined["label"]  = labels
     combined["ticker"] = ticker
     combined = combined.dropna(subset=FEATURE_COLS + ["label"])
 
-    # Current snapshot = last row of features (before label period cutoff)
-    # Use the last row that has complete features (regardless of label)
     snap_feat = feat.dropna(subset=FEATURE_COLS)
     if snap_feat.empty:
         return ticker, None, None
@@ -394,8 +451,8 @@ def fetch_and_build(ticker: str, threshold: float) -> tuple[str, pd.DataFrame | 
     close_last = raw["Close"].squeeze().iloc[-1]
 
     current = {
-        "ticker":          ticker,
-        "close":           float(close_last),
+        "ticker": ticker,
+        "close":  float(close_last),
         **{c: float(last[c]) for c in FEATURE_COLS},
     }
 
@@ -798,16 +855,23 @@ def main() -> None:
     print(f"  Fetching {args.index} constituents ({n} tickers)...", flush=True)
 
     # ── 2. Download OHLCV ────────────────────────────────────────────────────
-    print("  Downloading OHLCV history...", flush=True)
+    print("  Downloading OHLCV history (batch)...", flush=True)
 
+    ticker_data = fetch_batch_ohlcv(tickers_list)
+    print(f"  Downloaded {len(ticker_data)}/{n} tickers OK", flush=True)
+
+    # ── Feature engineering (CPU-bound — parallelise without network I/O) ────
     all_train_rows: list[pd.DataFrame] = []
     current_snaps: list[dict]          = []
     failed = 0
 
     def _worker(ticker: str) -> tuple[str, pd.DataFrame | None, dict | None]:
-        return fetch_and_build(ticker, args.threshold)
+        raw = ticker_data.get(ticker)
+        if raw is None:
+            return ticker, None, None
+        return _build_from_raw(ticker, raw, args.threshold)
 
-    with ThreadPoolExecutor(max_workers=10) as exe:
+    with ThreadPoolExecutor(max_workers=8) as exe:
         futures = {exe.submit(_worker, t): t for t in tickers_list}
         for fut in as_completed(futures):
             ticker, train_df, current = fut.result()
@@ -815,7 +879,6 @@ def main() -> None:
                 all_train_rows.append(train_df)
             if current is not None:
                 current["sector"] = sector_map.get(ticker, "Unknown")
-                # Enrich sector from yfinance if still Unknown
                 current_snaps.append(current)
             else:
                 failed += 1

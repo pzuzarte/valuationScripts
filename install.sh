@@ -238,6 +238,16 @@ for pkg in "${COMPILE_PKGS[@]}"; do
     fi
 done
 
+# Prophet: has a C compiler dependency (pystan) — retry separately so a compile
+# failure doesn't block the rest of the install.
+if ! "$VENV_PYTHON" -c "from prophet import Prophet" 2>/dev/null; then
+    info "Installing Prophet (additive forecasting model) …"
+    "$VENV_PYTHON" -m pip install prophet \
+        --prefer-binary \
+        --quiet 2>&1 | grep -v "^$" || \
+    warn "Prophet could not be installed — Prophet forecasting will be unavailable"
+fi
+
 # ── PyTorch (CPU wheel) ───────────────────────────────────────────────────────
 # torch is NOT in requirements.txt — we install it here from the official CPU
 # wheel index so the correct binary is always used (avoids the 2 GB CUDA
@@ -253,10 +263,90 @@ if ! "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
     if "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
         ok "PyTorch installed"
     else
-        warn "PyTorch install failed — FinBERT sentiment will be unavailable (VADER still works)"
+        warn "PyTorch install failed — FinBERT sentiment and LSTM forecasting will be unavailable"
     fi
 else
     ok "PyTorch already present"
+fi
+
+# ── Foundation time-series models (optional, ~200-300 MB each) ───────────────
+# TimesFM (Google) and Chronos (Amazon) are zero-shot forecasting models used
+# by priceForecast.  They are large and have complex dependencies, so we install
+# them only if they are not already present, and failures are non-fatal.
+#
+# TimesFM requires the torch backend to already be installed (done above).
+if ! "$VENV_PYTHON" -c "import timesfm" 2>/dev/null; then
+    info "Installing TimesFM (Google zero-shot forecasting) …"
+    "$VENV_PYTHON" -m pip install timesfm \
+        --prefer-binary \
+        --quiet 2>&1 \
+        | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+        | grep -v "^$" \
+        || true
+    if "$VENV_PYTHON" -c "import timesfm" 2>/dev/null; then
+        ok "TimesFM installed"
+    else
+        warn "TimesFM install failed — TimesFM forecasting will be unavailable (pip install timesfm to retry)"
+    fi
+else
+    ok "TimesFM already present"
+fi
+
+if ! "$VENV_PYTHON" -c "from chronos import BaseChronosPipeline" 2>/dev/null; then
+    info "Installing Chronos-Bolt (Amazon zero-shot forecasting) …"
+    "$VENV_PYTHON" -m pip install chronos-forecasting \
+        --prefer-binary \
+        --quiet 2>&1 \
+        | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+        | grep -v "^$" \
+        || true
+    if "$VENV_PYTHON" -c "from chronos import BaseChronosPipeline" 2>/dev/null; then
+        ok "Chronos installed"
+    else
+        warn "Chronos install failed — Chronos forecasting will be unavailable (pip install chronos-forecasting to retry)"
+    fi
+else
+    ok "Chronos already present"
+fi
+
+# ── TFT — Temporal Fusion Transformer (optional, requires torch) ──────────────
+# pytorch-forecasting + lightning are large (~300 MB combined). They require
+# torch to already be installed (done above). Skipped silently if torch failed.
+if "$VENV_PYTHON" -c "import torch" 2>/dev/null; then
+    if ! "$VENV_PYTHON" -c "from pytorch_forecasting import TemporalFusionTransformer" 2>/dev/null; then
+        info "Installing pytorch-forecasting + lightning (TFT model) …"
+        "$VENV_PYTHON" -m pip install pytorch-forecasting lightning \
+            --prefer-binary 2>&1 \
+            | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+            | grep -v "^$" \
+            || true
+        if "$VENV_PYTHON" -c "from pytorch_forecasting import TemporalFusionTransformer" 2>/dev/null; then
+            ok "pytorch-forecasting + lightning installed (TFT enabled)"
+        else
+            warn "pytorch-forecasting install failed — TFT forecasting will be unavailable (pip install pytorch-forecasting lightning to retry)"
+        fi
+    else
+        ok "pytorch-forecasting already present"
+    fi
+else
+    warn "torch not available — skipping pytorch-forecasting / TFT install"
+fi
+
+# ── neuralforecast — N-HiTS / N-BEATS (optional) ─────────────────────────────
+if ! "$VENV_PYTHON" -c "from neuralforecast import NeuralForecast" 2>/dev/null; then
+    info "Installing neuralforecast (N-HiTS / N-BEATS models) …"
+    "$VENV_PYTHON" -m pip install neuralforecast \
+        --prefer-binary 2>&1 \
+        | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+        | grep -v "^$" \
+        || true
+    if "$VENV_PYTHON" -c "from neuralforecast import NeuralForecast" 2>/dev/null; then
+        ok "neuralforecast installed (N-HiTS + N-BEATS enabled)"
+    else
+        warn "neuralforecast install failed — N-HiTS/N-BEATS unavailable (pip install neuralforecast to retry)"
+    fi
+else
+    ok "neuralforecast already present"
 fi
 
 # Spot-check critical imports.
@@ -347,7 +437,17 @@ cat > "$CLI_SCRIPT" <<CLISCRIPT
 # valuation-suite — CLI launcher for ValuationSuite
 # Generated by install.sh on $(date "+%Y-%m-%d").
 # Re-run install.sh if you move the project directory.
-exec "${VENV_PYTHON}" "${PROJECT_ROOT}/app.py" "\$@"
+# Uses conda py311 (same environment as ValuationSuite.app) when available,
+# falls back to the project .venv so behaviour is consistent regardless of
+# how the suite is started.
+CONDA_INIT="\${HOME}/anaconda3/etc/profile.d/conda.sh"
+if [[ -f "\$CONDA_INIT" ]]; then
+    source "\$CONDA_INIT"
+    conda activate py311 2>/dev/null
+    exec python "${PROJECT_ROOT}/app.py" "\$@"
+else
+    exec "${VENV_PYTHON}" "${PROJECT_ROOT}/app.py" "\$@"
+fi
 CLISCRIPT
 chmod +x "$CLI_SCRIPT"
 ok "~/bin/valuation-suite written"
