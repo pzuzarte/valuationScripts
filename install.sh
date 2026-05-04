@@ -90,6 +90,28 @@ if $IS_MACOS; then
     else
         ok "Xcode Command Line Tools: $(xcode-select -p)"
     fi
+
+    # libomp — required by xgboost on macOS (OpenMP runtime).
+    # brew is the only practical way to get it; skip silently if brew absent.
+    if command -v brew >/dev/null 2>&1; then
+        if ! brew list libomp &>/dev/null; then
+            info "Installing libomp (required by xgboost) …"
+            brew install libomp --quiet 2>&1 | tail -1 | sed 's/^/    /' || true
+            brew list libomp &>/dev/null && ok "libomp installed" || \
+                warn "libomp install failed — XGBoost may not load (run: brew install libomp)"
+        else
+            ok "libomp already installed"
+        fi
+    else
+        # No brew — check if libomp is already on the system anyway
+        if [[ ! -f /opt/homebrew/opt/libomp/lib/libomp.dylib && \
+              ! -f /usr/local/opt/libomp/lib/libomp.dylib ]]; then
+            warn "Homebrew not found and libomp is missing — XGBoost may not load."
+            warn "Fix: install Homebrew (https://brew.sh) then run: brew install libomp"
+        else
+            ok "libomp found"
+        fi
+    fi
 fi
 
 # git
