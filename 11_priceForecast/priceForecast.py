@@ -27,7 +27,8 @@ import webbrowser
 import numpy as np
 import pandas as pd
 
-warnings.filterwarnings("ignore")
+warnings.simplefilter("ignore")          # suppress all Python warnings globally
+warnings.filterwarnings("ignore")        # belt-and-suspenders for any re-registrations
 
 try:
     import yfinance as yf
@@ -100,6 +101,9 @@ NEURALFORECAST_OK = TORCH_OK  # alias used by build_html / main
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import acf as _acf
+
+import logging as _logging
+_logging.getLogger("statsmodels").setLevel(_logging.ERROR)
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 ROOT       = os.path.dirname(os.path.abspath(__file__))
@@ -472,12 +476,13 @@ def fit_lstm_forecast(prices: pd.Series, horizon: int,
     if not TORCH_OK:
         return {}
 
-    SEQ_LEN  = 20
-    HIDDEN   = 64
-    N_LAYERS = 2
-    EPOCHS   = 120
-    LR       = 5e-4
-    WD       = 1e-5
+    SEQ_LEN   = 20
+    HIDDEN    = 32      # kept small for CPU speed
+    N_LAYERS  = 2
+    EPOCHS    = 60      # early stopping usually kicks in well before this
+    BATCH     = 64
+    LR        = 5e-4
+    WD        = 1e-5
     MIN_ROWS = SEQ_LEN + horizon + 60   # bare minimum
 
     # Build feature matrix (same pipeline as XGB)
@@ -529,12 +534,14 @@ def fit_lstm_forecast(prices: pd.Series, horizon: int,
     best_val, best_state, patience, counter = float("inf"), None, 15, 0
     for epoch in range(EPOCHS):
         model.train()
-        optimizer.zero_grad()
-        pred = model(X_tr_t)
-        loss = criterion(pred, y_tr_t)
-        loss.backward()
-        _torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
+        idx = _torch.randperm(len(X_tr_t))
+        for b in range(0, len(X_tr_t), BATCH):
+            bi = idx[b:b + BATCH]
+            optimizer.zero_grad()
+            loss = criterion(model(X_tr_t[bi]), y_tr_t[bi])
+            loss.backward()
+            _torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
 
         model.eval()
         with _torch.no_grad():
@@ -561,18 +568,30 @@ def fit_lstm_forecast(prices: pd.Series, horizon: int,
     valid = [(float(a), float(p)) for a, p in zip(y_val, val_pred) if abs(a) > 1e-6]
     bt_mape = float(np.mean([abs(a - p) / abs(a) * 100 for a, p in valid])) if valid else None
 
-    # Retrain on all data
-    model2 = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS)
-    opt2   = _torch.optim.Adam(model2.parameters(), lr=LR, weight_decay=WD)
-    X_all_t = _torch.tensor(X_seq)
-    y_all_t = _torch.tensor(y_seq)
+    # Retrain on all data (with early stopping against training loss to avoid infinite run)
+    model2   = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS)
+    opt2     = _torch.optim.Adam(model2.parameters(), lr=LR, weight_decay=WD)
+    X_all_t  = _torch.tensor(X_seq)
+    y_all_t  = _torch.tensor(y_seq)
+    best_tr, no_improve = float("inf"), 0
     for _ in range(EPOCHS):
         model2.train()
-        opt2.zero_grad()
-        loss = criterion(model2(X_all_t), y_all_t)
-        loss.backward()
-        _torch.nn.utils.clip_grad_norm_(model2.parameters(), 1.0)
-        opt2.step()
+        idx2 = _torch.randperm(len(X_all_t))
+        for b in range(0, len(X_all_t), BATCH):
+            bi = idx2[b:b + BATCH]
+            opt2.zero_grad()
+            loss = criterion(model2(X_all_t[bi]), y_all_t[bi])
+            loss.backward()
+            _torch.nn.utils.clip_grad_norm_(model2.parameters(), 1.0)
+            opt2.step()
+        with _torch.no_grad():
+            tr_loss = criterion(model2(X_all_t), y_all_t).item()
+        if tr_loss < best_tr - 1e-6:
+            best_tr, no_improve = tr_loss, 0
+        else:
+            no_improve += 1
+            if no_improve >= 15:
+                break
 
     # Current snapshot: last SEQ_LEN rows of features
     last_feats = X_norm[-SEQ_LEN:]
