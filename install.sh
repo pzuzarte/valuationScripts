@@ -289,12 +289,12 @@ fi
 # Chronos requires Python ≥3.9 and torch.
 if ! "$VENV_PYTHON" -c "import timesfm" 2>/dev/null; then
     info "Installing TimesFM (Google zero-shot forecasting) …"
+    # Redirect both stdout and stderr — timesfm has unstable transitive deps
+    # (paxml/praxis) that produce noisy ERROR lines even when pip falls back
+    # gracefully.  We check success via import, not pip's exit code.
     "$VENV_PYTHON" -m pip install timesfm \
         --prefer-binary \
-        --quiet 2>&1 \
-        | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
-        | grep -v "^$" \
-        || true
+        --quiet 2>/dev/null || true
     if "$VENV_PYTHON" -c "import timesfm" 2>/dev/null; then
         ok "TimesFM installed"
     else
