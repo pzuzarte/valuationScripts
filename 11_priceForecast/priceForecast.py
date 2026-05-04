@@ -78,8 +78,14 @@ try:
     import torch as _torch
     import torch.nn as _nn
     TORCH_OK = True
+    # On Apple Silicon, MPS (Metal) avoids CPU kernel crashes; fall back to CPU elsewhere.
+    if hasattr(_torch.backends, "mps") and _torch.backends.mps.is_available():
+        _TORCH_DEV = _torch.device("mps")
+    else:
+        _TORCH_DEV = _torch.device("cpu")
 except ImportError:
     TORCH_OK = False
+    _TORCH_DEV = None
     print("[warn] torch not found — LSTM disabled.  pip install torch")
 
 try:
@@ -555,12 +561,13 @@ def _fit_lstm_inner(prices: pd.Series, horizon: int,
     X_tr, X_val = X_seq[:split], X_seq[split:]
     y_tr, y_val = y_seq[:split], y_seq[split:]
 
-    X_tr_t  = _torch.tensor(X_tr)
-    y_tr_t  = _torch.tensor(y_tr)
-    X_val_t = _torch.tensor(X_val)
-    y_val_t = _torch.tensor(y_val)
+    dev = _TORCH_DEV
+    X_tr_t  = _torch.tensor(X_tr).to(dev)
+    y_tr_t  = _torch.tensor(y_tr).to(dev)
+    X_val_t = _torch.tensor(X_val).to(dev)
+    y_val_t = _torch.tensor(y_val).to(dev)
 
-    model     = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS)
+    model     = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS).to(dev)
     optimizer = _torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WD)
     criterion = _nn.MSELoss()
 
@@ -581,7 +588,7 @@ def _fit_lstm_inner(prices: pd.Series, horizon: int,
             val_loss = criterion(model(X_val_t), y_val_t).item()
         if val_loss < best_val - 1e-6:
             best_val   = val_loss
-            best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            best_state = {k: v.cpu() for k, v in model.state_dict().items()}
             counter    = 0
         else:
             counter += 1
@@ -589,12 +596,12 @@ def _fit_lstm_inner(prices: pd.Series, horizon: int,
                 break
 
     if best_state is not None:
-        model.load_state_dict(best_state)
+        model.load_state_dict({k: v.to(dev) for k, v in best_state.items()})
 
     # Residual std on validation set for CI
     model.eval()
     with _torch.no_grad():
-        val_pred = model(X_val_t).numpy()
+        val_pred = model(X_val_t).cpu().numpy()
     resid_std = float(np.std(y_val - val_pred))
 
     # Backtest MAPE on validation
@@ -602,10 +609,10 @@ def _fit_lstm_inner(prices: pd.Series, horizon: int,
     bt_mape = float(np.mean([abs(a - p) / abs(a) * 100 for a, p in valid])) if valid else None
 
     # Retrain on all data (with early stopping against training loss to avoid infinite run)
-    model2   = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS)
+    model2   = _LSTMForecaster(len(FEATURE_COLS), HIDDEN, N_LAYERS).to(dev)
     opt2     = _torch.optim.Adam(model2.parameters(), lr=LR, weight_decay=WD)
-    X_all_t  = _torch.tensor(X_seq)
-    y_all_t  = _torch.tensor(y_seq)
+    X_all_t  = _torch.tensor(X_seq).to(dev)
+    y_all_t  = _torch.tensor(y_seq).to(dev)
     best_tr, no_improve = float("inf"), 0
     for _ in range(EPOCHS):
         model2.train()
@@ -628,14 +635,14 @@ def _fit_lstm_inner(prices: pd.Series, horizon: int,
 
     # Current snapshot: last SEQ_LEN rows of features
     last_feats = X_norm[-SEQ_LEN:]
-    last_t     = _torch.tensor(last_feats[np.newaxis])   # (1, SEQ_LEN, n_feat)
+    last_t     = _torch.tensor(last_feats[np.newaxis]).to(dev)   # (1, SEQ_LEN, n_feat)
 
     # MC Dropout CI: 200 stochastic passes
     model2.train()   # keep dropout active
     mc_preds = []
     with _torch.no_grad():
         for _ in range(200):
-            mc_preds.append(float(model2(last_t).item()))
+            mc_preds.append(float(model2(last_t).cpu().item()))
     pred_lr  = float(np.mean(mc_preds))
     mc_std   = float(np.std(mc_preds))
     ci_std   = max(mc_std, resid_std)   # take wider of the two
@@ -1067,11 +1074,12 @@ def _fit_basis_model(model_name: str, prices: pd.Series, horizon: int,
                     fore = fore + f
                 return fore
 
-        net   = _Stack(blocks)
+        dev = _TORCH_DEV
+        net   = _Stack(blocks).to(dev)
         opt   = _t.optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-5)
         sched = _t.optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
-        Xt = _t.tensor(Xn, dtype=_t.float32)
-        yt = _t.tensor(yn, dtype=_t.float32)
+        Xt = _t.tensor(Xn, dtype=_t.float32).to(dev)
+        yt = _t.tensor(yn, dtype=_t.float32).to(dev)
         split    = max(int(len(Xt) * 0.8), 10)
         Xtr, ytr = Xt[:split], yt[:split]
         Xvl, yvl = Xt[split:], yt[split:]
@@ -1094,29 +1102,29 @@ def _fit_basis_model(model_name: str, prices: pd.Series, horizon: int,
                     vl = _t.nn.functional.mse_loss(net(Xvl), yvl).item()
                 if vl < best_loss - 1e-5:
                     best_loss, patience = vl, 15
-                    best_state = {k: v.clone() for k, v in net.state_dict().items()}
+                    best_state = {k: v.cpu() for k, v in net.state_dict().items()}
                 else:
                     patience -= 1
                     if patience == 0:
                         break
 
         if best_state:
-            net.load_state_dict(best_state)
+            net.load_state_dict({k: v.to(dev) for k, v in best_state.items()})
         net.eval()
 
         last_win = lp[-input_size:]
         mu_f  = float(last_win.mean())
         sig_f = float(last_win.std()) + 1e-6
-        xf    = _t.tensor([(last_win - mu_f) / sig_f], dtype=_t.float32)
+        xf    = _t.tensor([(last_win - mu_f) / sig_f], dtype=_t.float32).to(dev)
         with _t.no_grad():
-            pred_norm = net(xf).numpy()[0]
+            pred_norm = net(xf).cpu().numpy()[0]
         pred_lp    = pred_norm * sig_f + mu_f
         fc = np.exp(pred_lp)
 
         # CI from val residuals
         if len(Xvl) > 0:
             with _t.no_grad():
-                vl_pred = net(Xvl).numpy()
+                vl_pred = net(Xvl).cpu().numpy()
             # Denormalise using the raw log-price windows (X_arr), not Xn
             mu_v  = X_arr[split:].mean(axis=1, keepdims=True)
             sig_v = X_arr[split:].std(axis=1, keepdims=True) + 1e-6
