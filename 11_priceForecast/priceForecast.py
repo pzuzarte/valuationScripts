@@ -14,6 +14,8 @@ Usage:
 Output: forecastData/YYYY_MM_DD_TICKER_forecast.html  (auto-opens in browser)
 """
 
+from __future__ import annotations  # PEP 563 — defers annotation evaluation (Python 3.9 compat)
+
 import argparse
 import datetime
 import json
