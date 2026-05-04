@@ -114,6 +114,23 @@ if $IS_MACOS; then
     fi
 fi
 
+# Linux: ensure libgomp (GNU OpenMP) is present for xgboost.
+# The KMP_DUPLICATE_LIB_OK env var handles the runtime conflict with PyTorch's
+# bundled OpenMP, but the library still needs to be installed.
+if ! $IS_MACOS; then
+    if command -v apt-get >/dev/null 2>&1; then
+        if ! ldconfig -p 2>/dev/null | grep -q libgomp; then
+            info "Installing libgomp (required by xgboost on Linux) …"
+            sudo apt-get install -y libgomp1 --quiet 2>/dev/null || \
+                warn "Could not install libgomp — XGBoost may not load (run: sudo apt-get install libgomp1)"
+        else
+            ok "libgomp found"
+        fi
+    elif command -v yum >/dev/null 2>&1; then
+        rpm -q libgomp &>/dev/null || sudo yum install -y libgomp --quiet 2>/dev/null || true
+    fi
+fi
+
 # git
 command -v git >/dev/null 2>&1 || fail \
     "git is required but not installed.\n\
@@ -156,6 +173,10 @@ if [[ -z "$PROJECT_ROOT" ]]; then
         }
         echo "$_pull_out" | tail -1 | sed 's/^/    /'
         ok "Repository up to date"
+        # Clear Python bytecode cache so updated .py files are always used.
+        find "$PROJECT_ROOT" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+        find "$PROJECT_ROOT" -name "*.pyc" -delete 2>/dev/null || true
+        ok "Bytecode cache cleared"
     else
         info "Cloning into $PROJECT_ROOT …"
         git clone --depth=1 "$REPO_URL" "$PROJECT_ROOT"
@@ -383,6 +404,24 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 else
     ok "All critical packages verified"
 fi
+
+# Deep-check: actually run a tiny forecast to confirm torch + xgboost load cleanly
+# together (the OpenMP conflict only surfaces at runtime, not at import).
+info "Running quick smoke-test (torch + xgboost load check) …"
+SMOKE_OK=false
+KMP_DUPLICATE_LIB_OK=TRUE OMP_NUM_THREADS=1 \
+    "$VENV_PYTHON" - <<'PYSMOKE' 2>/dev/null && SMOKE_OK=true
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
+from xgboost import XGBRegressor
+import torch, numpy as np
+x = torch.tensor([[1.0, 2.0]])
+_ = torch.nn.Linear(2, 1)(x)
+print("ok")
+PYSMOKE
+$SMOKE_OK && ok "torch + xgboost load cleanly — no OpenMP conflict" || \
+    warn "Smoke-test failed — torch or xgboost may have a runtime conflict on this machine"
 
 # ── Step 6: Launchers + project setup ─────────────────────────────────────────
 step 6 "Project setup & launchers"

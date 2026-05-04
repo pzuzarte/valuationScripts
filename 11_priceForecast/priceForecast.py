@@ -74,11 +74,9 @@ try:
     import torch as _torch
     import torch.nn as _nn
     TORCH_OK = True
-    # On Apple Silicon, MPS (Metal) avoids CPU kernel crashes; fall back to CPU elsewhere.
-    if hasattr(_torch.backends, "mps") and _torch.backends.mps.is_available():
-        _TORCH_DEV = _torch.device("mps")
-    else:
-        _TORCH_DEV = _torch.device("cpu")
+    # Always use CPU — thread limits above prevent the OpenMP SIGSEGV and
+    # CPU is the only universally stable backend across all platforms/versions.
+    _TORCH_DEV = _torch.device("cpu")
 except ImportError:
     TORCH_OK = False
     _TORCH_DEV = None
@@ -1171,9 +1169,20 @@ def fit_nhits_nbeats_forecast(prices: pd.Series, horizon: int) -> tuple[dict, di
     """
     if not TORCH_OK:
         return {}, {}
-    nhits_r  = _fit_basis_model("N-HiTS",  prices, horizon)
-    nbeats_r = _fit_basis_model("N-BEATS", prices, horizon)
-    return nhits_r, nbeats_r
+    import concurrent.futures as _cf
+    def _run():
+        return (_fit_basis_model("N-HiTS",  prices, horizon),
+                _fit_basis_model("N-BEATS", prices, horizon))
+    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+        _fut = _ex.submit(_run)
+        try:
+            return _fut.result(timeout=300)   # 5-minute cap
+        except _cf.TimeoutError:
+            print("  [warn] N-HiTS/N-BEATS timed out — skipping", flush=True)
+            return {}, {}
+        except Exception as _e:
+            print(f"  [warn] N-HiTS/N-BEATS failed: {_e}", flush=True)
+            return {}, {}
 
 def ensemble_forecast(**named_forecasts) -> dict:
     """
@@ -4226,35 +4235,50 @@ def main():
     timesfm_result = {}
     if do_timesfm:
         _step("TimesFM-1.0-200M (zero-shot)")
-        timesfm_result = fit_timesfm_forecast(prices, horizon)
-        print(f"  TimesFM: {'OK' if timesfm_result else 'failed'}", flush=True)
+        try:
+            timesfm_result = fit_timesfm_forecast(prices, horizon)
+            print(f"  TimesFM: {'OK' if timesfm_result else 'failed'}", flush=True)
+        except Exception as _e:
+            print(f"  [warn] TimesFM failed: {_e}", flush=True)
 
     # 5f. Chronos forecast (zero-shot)
     chronos_result = {}
     if do_chronos:
         _step("Chronos-Bolt-Small (zero-shot)")
-        chronos_result = fit_chronos_forecast(prices, horizon)
-        print(f"  Chronos: {'OK' if chronos_result else 'failed'}", flush=True)
+        try:
+            chronos_result = fit_chronos_forecast(prices, horizon)
+            print(f"  Chronos: {'OK' if chronos_result else 'failed'}", flush=True)
+        except Exception as _e:
+            print(f"  [warn] Chronos failed: {_e}", flush=True)
 
     # 5g. Monte Carlo GBM
     montecarlo_result = {}
     if do_montecarlo:
         n_mc_steps = n_steps
         print(f"\n[{n_mc_steps}/{n_steps}] Monte Carlo GBM (1000 simulations)", flush=True)
-        montecarlo_result = fit_montecarlo_forecast(prices, horizon)
+        try:
+            montecarlo_result = fit_montecarlo_forecast(prices, horizon)
+        except Exception as _e:
+            print(f"  [warn] Monte Carlo failed: {_e}", flush=True)
 
     # 5h. TFT
     tft_result = {}
     if do_tft:
         print(f"\n[TFT] Temporal Fusion Transformer", flush=True)
-        tft_result = fit_tft_forecast(prices, horizon, macro_df=macro_df)
+        try:
+            tft_result = fit_tft_forecast(prices, horizon, macro_df=macro_df)
+        except Exception as _e:
+            print(f"  [warn] TFT failed: {_e}", flush=True)
 
     # 5i. N-HiTS / N-BEATS
     nhits_result = {}
     nbeats_result = {}
     if do_nhits_nbeats:
         print(f"\n[N-HiTS/N-BEATS] Neural basis expansion models", flush=True)
-        nhits_result, nbeats_result = fit_nhits_nbeats_forecast(prices, horizon)
+        try:
+            nhits_result, nbeats_result = fit_nhits_nbeats_forecast(prices, horizon)
+        except Exception as _e:
+            print(f"  [warn] N-HiTS/N-BEATS failed: {_e}", flush=True)
 
     # STL decomposition (always, uses existing prices)
     stl_result = compute_stl(prices)
