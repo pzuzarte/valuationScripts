@@ -24,11 +24,19 @@ import sys
 import warnings
 import webbrowser
 
+# Suppress all Python warnings before any library imports.
+# os.environ is set first so it's inherited by any child processes.
+os.environ.setdefault("PYTHONWARNINGS", "ignore")
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
+
+# On macOS, PyTorch bundles its own OpenMP (libiomp5) and brew's libomp may
+# also be present (installed for xgboost).  Having both loaded simultaneously
+# causes a SIGSEGV.  KMP_DUPLICATE_LIB_OK=TRUE suppresses the conflict.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import numpy as np
 import pandas as pd
-
-warnings.simplefilter("ignore")          # suppress all Python warnings globally
-warnings.filterwarnings("ignore")        # belt-and-suspenders for any re-registrations
 
 try:
     import yfinance as yf
@@ -473,6 +481,31 @@ def fit_lstm_forecast(prices: pd.Series, horizon: int,
     Sequence length: 20 trading days.
     Target: horizon-day cumulative log-return.
     """
+    if not TORCH_OK:
+        return {}
+
+    # Hard wall-clock timeout — if training takes more than 3 minutes on slow
+    # hardware, skip LSTM rather than hanging the whole run.
+    import concurrent.futures as _cf
+    def _lstm_inner():
+        return _fit_lstm_inner(prices, horizon, backtest_window, macro_df)
+    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+        _fut = _ex.submit(_lstm_inner)
+        try:
+            return _fut.result(timeout=180)
+        except _cf.TimeoutError:
+            print("  [warn] LSTM timed out (>3 min) — skipping on this hardware",
+                  flush=True)
+            return {}
+        except Exception as _e:
+            print(f"  [warn] LSTM failed: {_e}", flush=True)
+            return {}
+
+
+def _fit_lstm_inner(prices: pd.Series, horizon: int,
+                    backtest_window: int = 252,
+                    macro_df: pd.DataFrame = None) -> dict:
+    """Inner LSTM training — called via fit_lstm_forecast with a timeout wrapper."""
     if not TORCH_OK:
         return {}
 
