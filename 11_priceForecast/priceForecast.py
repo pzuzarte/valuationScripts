@@ -24,16 +24,12 @@ import sys
 import warnings
 import webbrowser
 
-# Suppress all Python warnings before any library imports.
-# os.environ is set first so it's inherited by any child processes.
-os.environ.setdefault("PYTHONWARNINGS", "ignore")
-warnings.simplefilter("ignore")
-warnings.filterwarnings("ignore")
-
-# On macOS, PyTorch bundles its own OpenMP (libiomp5) and brew's libomp may
-# also be present (installed for xgboost).  Having both loaded simultaneously
-# causes a SIGSEGV.  KMP_DUPLICATE_LIB_OK=TRUE suppresses the conflict.
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Set env vars before ANY imports — these must be in place before numpy/torch load.
+os.environ.setdefault("PYTHONWARNINGS",        "ignore")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK",  "TRUE")   # prevents OpenMP SIGSEGV on macOS
+os.environ.setdefault("OMP_NUM_THREADS",        "1")      # serialise OpenMP — prevents crashes
+os.environ.setdefault("MKL_NUM_THREADS",        "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")      # Apple Accelerate thread limit
 
 import numpy as np
 import pandas as pd
@@ -115,6 +111,14 @@ NEURALFORECAST_OK = TORCH_OK  # alias used by build_html / main
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.stattools import acf as _acf
+
+# Re-apply warning suppression after all imports — some libraries (statsmodels,
+# prophet, lightning) reset or add to the filter chain during import.
+warnings.simplefilter("ignore")
+warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", module="statsmodels")
+warnings.filterwarnings("ignore", module="prophet")
+warnings.filterwarnings("ignore", module="lightning")
 
 import logging as _logging
 _logging.getLogger("statsmodels").setLevel(_logging.ERROR)
