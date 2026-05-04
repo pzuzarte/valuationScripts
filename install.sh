@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 #  ValuationSuite — Universal Installer
 #
-#  Works on any macOS or Linux machine with Python 3.9+ and git installed.
+#  Works on any macOS or Linux machine with Python 3.11+ and git installed.
 #  Does NOT require conda, py311, or any pre-existing environment.
 #
 #  One-command install (no git clone needed first):
@@ -33,7 +33,8 @@ set -euo pipefail
 REPO_URL="https://github.com/pzuzarte/valuationScripts.git"
 DEFAULT_INSTALL_DIR="$HOME/valuationScripts"
 VENV_DIR_NAME=".venv"
-MIN_PYTHON_MINOR=9          # require Python 3.9+
+MIN_PYTHON_MINOR=11         # require Python 3.11+ (3.9/3.10 are EOL or near-EOL;
+                            # 3.11 is needed for TimesFM and full package compatibility)
 TOTAL=6
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
@@ -170,11 +171,13 @@ if [[ -z "$PYTHON_CMD" ]]; then
     fail "Python 3.${MIN_PYTHON_MINOR}+ is required but was not found.\n\
 \n\
   Install options:\n\
-    macOS:  brew install python@3.12\n\
+    macOS:  brew install python@3.11\n\
             — or — https://www.python.org/downloads/\n\
-    Ubuntu: sudo apt install python3.12 python3.12-venv\n\
-    Fedora: sudo dnf install python3.12\n\
-    Any:    https://www.python.org/downloads/"
+    Ubuntu: sudo apt install python3.11 python3.11-venv\n\
+    Fedora: sudo dnf install python3.11\n\
+    Any:    https://www.python.org/downloads/\n\
+\n\
+  After installing, re-run:  bash install.sh"
 fi
 
 PYTHON_VER="$("$PYTHON_CMD" --version 2>&1)"
@@ -192,11 +195,19 @@ step 4 "Virtual environment"
 VENV_PATH="$PROJECT_ROOT/$VENV_DIR_NAME"
 
 if [[ -d "$VENV_PATH/bin" ]]; then
-    ok "Existing venv found at $VENV_PATH"
+    _venv_minor="$("$VENV_PATH/bin/python" -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo "0")"
+    if [[ "$_venv_minor" -ge "$MIN_PYTHON_MINOR" ]]; then
+        ok "Existing venv found at $VENV_PATH (Python 3.${_venv_minor})"
+    else
+        info "Existing venv uses Python 3.${_venv_minor} — too old, rebuilding with $PYTHON_CMD …"
+        rm -rf "$VENV_PATH"
+        "$PYTHON_CMD" -m venv "$VENV_PATH"
+        ok "Virtual environment rebuilt ($(${VENV_PATH}/bin/python --version))"
+    fi
 else
     info "Creating $VENV_PATH …"
     "$PYTHON_CMD" -m venv "$VENV_PATH"
-    ok "Virtual environment created"
+    ok "Virtual environment created ($(${VENV_PATH}/bin/python --version))"
 fi
 
 VENV_PYTHON="$VENV_PATH/bin/python"
@@ -274,7 +285,8 @@ fi
 # by priceForecast.  They are large and have complex dependencies, so we install
 # them only if they are not already present, and failures are non-fatal.
 #
-# TimesFM requires the torch backend to already be installed (done above).
+# TimesFM requires Python ≥3.10 and the torch backend (installed above).
+# Chronos requires Python ≥3.9 and torch.
 if ! "$VENV_PYTHON" -c "import timesfm" 2>/dev/null; then
     info "Installing TimesFM (Google zero-shot forecasting) …"
     "$VENV_PYTHON" -m pip install timesfm \
