@@ -2238,7 +2238,7 @@ def _build_growth_interpretation(d, gr, reliability, price):
                       ("tam_scenario","TAM Scenario"),("rule_of_40","Rule of 40"),
                       ("erg","ERG")]:
         r = gr.get(key)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             fvs[lbl] = r["fair_value"]
 
     if len(fvs) < 2:
@@ -2423,8 +2423,8 @@ def _build_growth_interpretation(d, gr, reliability, price):
                 .format(ig * 100, sg * 100))
 
     if erg_r and fpeg_r:
-        erg_fv = erg_r.get("fair_value", 0)
-        peg_fv = fpeg_r.get("fair_value", 0)
+        erg_fv = erg_r.get("fair_value") or 0
+        peg_fv = fpeg_r.get("fair_value") or 0
         if erg_fv > 0 and peg_fv > 0:
             ratio = erg_fv / peg_fv
             if ratio > 1.40:
@@ -3645,22 +3645,22 @@ def _run_methods_for_snapshot(d_hist: dict, benchmarks: dict, erg_peer_data: dic
 
     if d_hist.get("fcf") and d_hist["fcf"] > 0 and d_hist.get("shares"):
         r = run_dcf(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["DCF"] = r["fair_value"]
 
     if d_hist.get("fcf_per_share") and d_hist["fcf_per_share"] > 0:
         r = run_pfcf(d_hist, bm)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["P/FCF"] = r["fair_value"]
 
     if d_hist.get("eps") and d_hist["eps"] > 0:
         r = run_pe(d_hist, bm)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["P/E"] = r["fair_value"]
 
     if d_hist.get("ebitda") and d_hist["ebitda"] > 0 and d_hist.get("shares"):
         r = run_ev_ebitda(d_hist, bm)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["EV/EBITDA"] = r["fair_value"]
 
     r = run_reverse_dcf(d_hist)
@@ -3671,38 +3671,38 @@ def _run_methods_for_snapshot(d_hist: dict, benchmarks: dict, erg_peer_data: dic
                 break
 
     r = run_forward_peg(d_hist)
-    if r and r.get("fair_value", 0) > 0:
+    if r and (r.get("fair_value") or 0) > 0:
         results["Fwd PEG"] = r["fair_value"]
 
     r = run_ev_ntm_revenue(d_hist)
-    if r and r.get("fair_value", 0) > 0:
+    if r and (r.get("fair_value") or 0) > 0:
         results["EV/NTM Rev"] = r["fair_value"]
 
     r = run_tam_scenario(d_hist)
-    if r and r.get("fair_value", 0) > 0:
+    if r and (r.get("fair_value") or 0) > 0:
         results["TAM Scenario"] = r["fair_value"]
 
     r = run_rule_of_40(d_hist)
-    if r and r.get("fair_value", 0) > 0:
+    if r and (r.get("fair_value") or 0) > 0:
         results["Rule of 40"] = r["fair_value"]
 
     r = run_erg_valuation(d_hist, erg_peer_data)
-    if r and r.get("fair_value", 0) > 0:
+    if r and (r.get("fair_value") or 0) > 0:
         results["ERG"] = r["fair_value"]
 
     if d_hist.get("fcf") and d_hist["fcf"] > 0 and d_hist.get("shares"):
         r = run_three_stage_dcf(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["Three-Stage DCF"] = r["fair_value"]
 
     if d_hist.get("fcf") and d_hist["fcf"] > 0 and d_hist.get("shares"):
         r = run_monte_carlo_dcf(d_hist, n_sims=500)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["Monte Carlo DCF"] = r["fair_value"]
 
     if d_hist.get("fcf_per_share") and d_hist["fcf_per_share"] > 0:
         r = run_fcf_yield(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["FCF Yield"] = r["fair_value"]
 
     # Balance-sheet dependent models — use current ext data as proxy
@@ -3710,32 +3710,32 @@ def _run_methods_for_snapshot(d_hist: dict, benchmarks: dict, erg_peer_data: dic
     ext = d_hist.get("ext") or {}
     if ext.get("book_value_ps") and ext["book_value_ps"] > 0 and d_hist.get("eps", 0) > 0:
         r = run_rim(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["RIM"] = r["fair_value"]
 
     if ext.get("roic") and ext.get("stockholders_equity"):
         r = run_roic_excess_return(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["ROIC Excess Return"] = r["fair_value"]
 
     if ext.get("total_current_assets") is not None and ext.get("total_liabilities") is not None:
         r = run_ncav(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["NCAV"] = r["fair_value"]
 
     if ext.get("dividends_per_share") and ext["dividends_per_share"] > 0:
         r = run_ddm_hmodel(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["DDM"] = r["fair_value"]
 
     if d_hist.get("revenue") and d_hist.get("est_growth") and d_hist.get("shares"):
         r = run_scurve_tam(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["S-Curve TAM"] = r["fair_value"]
 
     if d_hist.get("price") and d_hist.get("revenue") and d_hist.get("shares"):
         r = run_pie(d_hist)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["PIE"] = r["fair_value"]
 
     # Bayesian Ensemble — weighted consensus of all snapshot results
@@ -3745,7 +3745,7 @@ def _run_methods_for_snapshot(d_hist: dict, benchmarks: dict, erg_peer_data: dic
         _appl = {m: score_model_applicability(m, {"method": m, "fair_value": fv}, d_hist, [])
                  for m, fv in results.items() if fv and fv > 0}
         r = run_bayesian_ensemble(d_hist, _result_dicts, _appl, None)
-        if r and r.get("fair_value", 0) > 0:
+        if r and (r.get("fair_value") or 0) > 0:
             results["Bayesian Ensemble"] = r["fair_value"]
 
     return results
@@ -4481,7 +4481,7 @@ def _build_backtest_html(bt: dict, d: dict, top_8: list = None, applicability_sc
         fv = current_fvs.get(mname)
         if not fv or fv <= 0:
             for r2 in (top_8 or []):
-                if r2.get("method") == mname and r2.get("fair_value", 0) > 0:
+                if r2.get("method") == mname and (r2.get("fair_value") or 0) > 0:
                     return r2["fair_value"]
         return fv
 

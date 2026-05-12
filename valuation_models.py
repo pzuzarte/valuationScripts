@@ -1074,7 +1074,7 @@ def assess_reliability(d: dict, classic_results: list, growth_results: dict) -> 
         f = []
 
         if m == "DCF":
-            tp = r["details"].get("term_pct", 0)
+            tp = r.get("details", {}).get("term_pct", 0)
             if tp > 85:
                 f.append("Terminal value is {:.0f}% of EV — result is dominated by far-future assumptions".format(tp))
             if r.get("debt_heavy"):
