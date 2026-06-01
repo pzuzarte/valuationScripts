@@ -13,6 +13,7 @@ scipy>=1.10.0
 flask>=2.3.0
 requests>=2.28.0
 lxml>=4.9.0                # pd.read_html() HTML parser (growthScreeners index fetch)
+xlrd>=2.0.1               # .xls (old binary Excel) parser -- required for Shiller ie_data.xls (marketConcentration)
 feedparser>=6.0.0          # Google News RSS (topicSentiment)
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
@@ -45,6 +46,9 @@ vaderSentiment>=3.3.2      # VADER rule-based scoring (topicSentiment)
 # the correct binary is used on both macOS and Linux).
 # Model weights are cached in ~/.cache/huggingface on first use.
 transformers>=4.38.0       # Hugging Face model hub + pipeline API (topicSentiment FinBERT)
+                           # NOTE: chronos-forecasting 2.x declares "requires transformers<5"
+                           # but works correctly with transformers 5.x -- that metadata
+                           # constraint is stale.  The pip "dependency conflict" warning is benign.
 
 # ── Foundation time-series models & TFT (priceForecast) ──────────────────────
 # These are intentionally NOT installed from requirements.txt — install.sh

@@ -53,6 +53,8 @@ plots/
 20_riskModel/riskData/
 21_breakoutDetector/breakoutData/
 22_sentimentLead/sentimentLeadData/
+23_intlMomentum/momentumData/
+24_marketConcentration/concentrationData/
 
 # yfinance cache written by growthScreener
 2_growthScreener/.yf_cache.json

@@ -853,7 +853,7 @@ def main() -> None:
 
         # ── 4. Cross-validate ──────────────────────────────────────────────
         print(f"  Training {model_name} (CV, {n_train} samples)...", flush=True)
-        skf = StratifiedKFold(n_splits=min(5, int(y.value_counts().min())), shuffle=True, random_state=42)
+        skf = StratifiedKFold(n_splits=max(2, min(5, int(y.value_counts().min()))), shuffle=True, random_state=42)
         try:
             cv_res = cross_validate(
                 model, X, y, cv=skf,

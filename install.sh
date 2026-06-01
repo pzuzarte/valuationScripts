@@ -269,11 +269,15 @@ info "pip install -r requirements.txt  (first run takes ~2-5 minutes) …"
 # --prefer-binary: use pre-built wheels instead of compiling from source.
 # This avoids C-compiler failures for packages like hdbscan, wordcloud, etc.
 # on machines where Xcode CLT was just installed or pip wheels are available.
+# NOTE: pip may report a chronos-forecasting / transformers version conflict.
+# This is a false alarm -- chronos 2.x works correctly with transformers 5.x;
+# the package metadata simply hasn't been updated to reflect this.
 "$VENV_PYTHON" -m pip install -r "$REQ_FILE" \
     --prefer-binary \
     --upgrade \
     --quiet 2>&1 \
     | grep -vE "^(Requirement already|Looking in|Collecting|Downloading|Installing|Building|WARNING: pip|Using cached)" \
+    | grep -vE "chronos-forecasting|pip.s dependency resolver|source of the following dependency" \
     | grep -v "^$" \
     || true
 

@@ -468,6 +468,25 @@ SCRIPTS = {
                  required=False, default="8.0"),
         ],
     },
+    "Intl. Momentum": {
+        "path": os.path.join(ROOT, "23_intlMomentum", "intlMomentum.py"),
+        "desc": "International ETF momentum screener -- ranks ~130 non-leveraged single-country, regional and thematic ETFs by multi-timeframe momentum score. Covers Developed, Emerging, Europe, Asia-Pac, LatAm and MEA. Leveraged/inverse ETFs excluded.",
+        "icon": "🌍",
+        "params": [
+            dict(id="region",  label="Region",      type="option", flag="--region",
+                 required=False, default="ALL",
+                 values=["ALL","DEVELOPED","EMERGING","EUROPE","ASIA-PAC",
+                         "LATAM","MEA","CHINA","INDIA","JAPAN","FACTOR"]),
+            dict(id="top",     label="Top N",        type="entry",  flag="--top",
+                 required=False, default="",
+                 hint="Show top N by momentum score (blank = all)"),
+            dict(id="min_aum", label="Min AUM ($M)", type="entry",  flag="--min-aum",
+                 required=False, default="100",
+                 hint="Filter out ETFs smaller than this AUM in $M"),
+            dict(id="csv",     label="Export CSV",   type="check",  flag="--csv",
+                 required=False, default=False),
+        ],
+    },
     "Sentiment Lead": {
         "path": os.path.join(ROOT, "22_sentimentLead", "sentimentLead.py"),
         "desc": "Tests whether news sentiment leads price for a ticker — VADER scoring, lead-lag correlation, walk-forward OLS regression & OOS R² signal-quality badge.",
@@ -487,15 +506,26 @@ SCRIPTS = {
                  hint="Free key at finnhub.io — unlocks up to 1 year of historical news"),
         ],
     },
+    "Mkt Concentration": {
+        "path": os.path.join(ROOT, "24_marketConcentration", "marketConcentration.py"),
+        "desc": "Market Concentration & Macro Valuation Dashboard -- four long-run valuation gauges: S&P 500 top-10 concentration (1927-present), Buffett Indicator (FRED, 1945-present), Shiller CAPE (Yale, 1871-present), Fed Model earnings yield vs 10-Year Treasury (1953-present).",
+        "icon": "📡",
+        "params": [
+            dict(id="no_conc", label="Skip concentration fetch", type="check",
+                 flag="--no-concentration",
+                 required=False, default=False,
+                 hint="Skip TradingView screener call -- faster but omits the live top-10 data point"),
+        ],
+    },
 }
 
 # Sidebar group layout — defines sections and order shown in the UI
 SIDEBAR_GROUPS = [
-    {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard"]},
+    {"label": "MACRO TRENDS",      "scripts": ["Macro Dashboard", "Mkt Concentration"]},
     {"label": "SCREENERS",         "scripts": ["Value Screener", "Growth Screener",
                                                "Magic Formula", "Quality Screener",
                                                "CANSLIM", "Earnings Acceleration",
-                                               "Multi-Factor Growth"]},
+                                               "Multi-Factor Growth", "Intl. Momentum"]},
     {"label": "VALUATION",         "scripts": ["Valuation Master", "Run Model", "Scatter Plots",
                                                "Price Forecast"]},
     {"label": "PORTFOLIO ANALYSIS","scripts": ["Sentiment Analyzer", "Portfolio Analyzer"]},
