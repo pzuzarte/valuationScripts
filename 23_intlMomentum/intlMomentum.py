@@ -1,7 +1,7 @@
 """
 International ETF Momentum Screener
 =====================================
-Ranks ~130 non-leveraged international ETFs by multi-timeframe momentum.
+Ranks ~155 non-leveraged international ETFs by multi-timeframe momentum.
 Covers single-country, regional, and thematic ETFs across developed and
 emerging markets -- Europe, Asia-Pacific, Latin America, Middle East & Africa.
 Leveraged and inverse ETFs are excluded automatically.
@@ -64,6 +64,9 @@ ETF_UNIVERSE = {
     "SCHF": {"name": "Schwab International Equity",             "region": "DEVELOPED", "category": "Broad"},
     "SPDW": {"name": "SPDR Portfolio Developed World ex-US",    "region": "DEVELOPED", "category": "Broad"},
     "VXUS": {"name": "Vanguard Total International Stock",      "region": "DEVELOPED", "category": "Broad"},
+    "VEU":  {"name": "Vanguard FTSE All-World ex-US",           "region": "DEVELOPED", "category": "Broad"},
+    "IXUS": {"name": "iShares Core MSCI Total Intl Stock",      "region": "DEVELOPED", "category": "Broad"},
+    "DFAI": {"name": "Dimensional Intl Core Equity Market",     "region": "DEVELOPED", "category": "Broad"},
     "ACWX": {"name": "iShares MSCI ACWI ex-US",                "region": "DEVELOPED", "category": "Broad"},
     "IOO":  {"name": "iShares Global 100",                      "region": "DEVELOPED", "category": "Large Cap"},
     "SCZ":  {"name": "iShares MSCI EAFE Small-Cap",             "region": "DEVELOPED", "category": "Small Cap"},
@@ -88,6 +91,9 @@ ETF_UNIVERSE = {
     "EEMS": {"name": "iShares MSCI EM Small-Cap",              "region": "EMERGING",  "category": "Small Cap"},
     "EWX":  {"name": "SPDR S&P EM Small Cap",                  "region": "EMERGING",  "category": "Small Cap"},
     "FNDE": {"name": "Schwab Fundamental EM Large Co",          "region": "EMERGING",  "category": "Value"},
+    "DFEM": {"name": "Dimensional Emerging Markets Core Equity", "region": "EMERGING",  "category": "Broad"},
+    "JPEM": {"name": "JPMorgan BetaBuilders Emerging Markets",  "region": "EMERGING",  "category": "Broad"},
+    "XSOE": {"name": "WisdomTree EM ex-State-Owned Enterprises","region": "EMERGING",  "category": "ex-SOE"},
     "AAXJ": {"name": "iShares MSCI All Country Asia ex-JP",    "region": "EMERGING",  "category": "Asia Broad"},
     "GMF":  {"name": "SPDR S&P Emerging Asia Pacific",         "region": "EMERGING",  "category": "Asia Broad"},
     # ── Europe ───────────────────────────────────────────────────────────────
@@ -98,6 +104,7 @@ ETF_UNIVERSE = {
     "FEZ":  {"name": "SPDR EURO STOXX 50",                      "region": "EUROPE",    "category": "Large Cap"},
     "HEDJ": {"name": "WisdomTree Europe Hedged Equity",         "region": "EUROPE",    "category": "Hedged"},
     "DBEU": {"name": "Xtrackers MSCI Europe Hedged Equity",     "region": "EUROPE",    "category": "Hedged"},
+    "HEZU": {"name": "iShares Currency Hedged MSCI Eurozone",   "region": "EUROPE",    "category": "Hedged"},
     "EWG":  {"name": "iShares MSCI Germany",                    "region": "EUROPE",    "category": "Germany"},
     "EWU":  {"name": "iShares MSCI United Kingdom",             "region": "EUROPE",    "category": "UK"},
     "EWQ":  {"name": "iShares MSCI France",                     "region": "EUROPE",    "category": "France"},
@@ -113,12 +120,19 @@ ETF_UNIVERSE = {
     "EPOL": {"name": "iShares MSCI Poland",                     "region": "EUROPE",    "category": "Poland"},
     "TUR":  {"name": "iShares MSCI Turkey",                     "region": "EUROPE",    "category": "Turkey"},
     "HEWG": {"name": "iShares Currency Hedged MSCI Germany",    "region": "EUROPE",    "category": "Germany Hedged"},
+    "EUFN": {"name": "iShares MSCI Europe Financials",          "region": "EUROPE",    "category": "Financials"},
+    "EFNL": {"name": "iShares MSCI Finland",                    "region": "EUROPE",    "category": "Finland"},
+    "FLDE": {"name": "Franklin FTSE Germany",                   "region": "EUROPE",    "category": "Germany"},
+    "FLFR": {"name": "Franklin FTSE France",                    "region": "EUROPE",    "category": "France"},
+    "FLIT": {"name": "Franklin FTSE Italy",                     "region": "EUROPE",    "category": "Italy"},
+    "FLSW": {"name": "Franklin FTSE Switzerland",               "region": "EUROPE",    "category": "Switzerland"},
     "FLGB": {"name": "Franklin FTSE United Kingdom",            "region": "EUROPE",    "category": "UK"},
     # ── Japan ────────────────────────────────────────────────────────────────
     "EWJ":  {"name": "iShares MSCI Japan",                      "region": "JAPAN",     "category": "Broad"},
     "HEWJ": {"name": "iShares Currency Hedged MSCI Japan",      "region": "JAPAN",     "category": "Hedged"},
     "DXJ":  {"name": "WisdomTree Japan Hedged Equity",          "region": "JAPAN",     "category": "Hedged"},
     "DBJP": {"name": "Xtrackers MSCI Japan Hedged Equity",      "region": "JAPAN",     "category": "Hedged"},
+    "BBJP": {"name": "JPMorgan BetaBuilders Japan",             "region": "JAPAN",     "category": "Broad"},
     "FLJP": {"name": "Franklin FTSE Japan",                     "region": "JAPAN",     "category": "Broad"},
     "DFJ":  {"name": "WisdomTree Japan Small Cap Dividend",     "region": "JAPAN",     "category": "Small Cap"},
     "VPL":  {"name": "Vanguard FTSE Pacific",                   "region": "JAPAN",     "category": "Asia-Pacific"},
@@ -134,6 +148,8 @@ ETF_UNIVERSE = {
     "VNM":  {"name": "VanEck Vietnam",                          "region": "ASIA",      "category": "Vietnam"},
     "ENZL": {"name": "iShares MSCI New Zealand",                "region": "ASIA",      "category": "New Zealand"},
     "EPP":  {"name": "iShares MSCI Pacific ex-Japan",           "region": "ASIA",      "category": "Pacific ex-JP"},
+    "FLTW": {"name": "Franklin FTSE Taiwan",                    "region": "ASIA",      "category": "Taiwan"},
+    "DVYA": {"name": "iShares Asia/Pacific Dividend",           "region": "ASIA",      "category": "Dividend"},
     "FLKR": {"name": "Franklin FTSE South Korea",               "region": "ASIA",      "category": "South Korea"},
     # ── China ────────────────────────────────────────────────────────────────
     "FXI":  {"name": "iShares China Large-Cap",                 "region": "CHINA",     "category": "Large Cap"},
@@ -191,6 +207,21 @@ ETF_UNIVERSE = {
     "FIVA": {"name": "Fidelity Intl Value Factor",                 "region": "FACTOR",   "category": "Value"},
     "VIGI": {"name": "Vanguard Intl Dividend Appreciation",        "region": "FACTOR",   "category": "Dividend Growth"},
     "IGRO": {"name": "iShares Intl Dividend Growth",               "region": "FACTOR",   "category": "Dividend Growth"},
+    "INTF": {"name": "iShares MSCI Intl Multifactor",             "region": "FACTOR",   "category": "Multi-Factor"},
+    "IHDG": {"name": "WisdomTree Intl Hedged Quality Div Growth",  "region": "FACTOR",   "category": "Dividend Growth"},
+    "GVAL": {"name": "Cambria Global Value",                       "region": "FACTOR",   "category": "Value"},
+    # ── Global / Commodity Thematic ─────────────────────────────────────────
+    # Cross-regional commodity producers & thematic plays with minimal US weight.
+    # Gold/silver miners are headquartered in Canada, Australia, South Africa;
+    # copper miners in Chile, Peru, Australia; rare-earth in China, Australia.
+    "GDX":  {"name": "VanEck Gold Miners",                         "region": "GLOBAL",   "category": "Gold Miners"},
+    "GDXJ": {"name": "VanEck Junior Gold Miners",                  "region": "GLOBAL",   "category": "Gold Miners Jr"},
+    "RING": {"name": "iShares MSCI Global Gold Miners",            "region": "GLOBAL",   "category": "Gold Miners"},
+    "COPX": {"name": "Global X Copper Miners",                     "region": "GLOBAL",   "category": "Copper Miners"},
+    "PICK": {"name": "iShares MSCI Global Metals & Mining",        "region": "GLOBAL",   "category": "Metals & Mining"},
+    "REMX": {"name": "VanEck Rare Earth & Strategic Metals",       "region": "GLOBAL",   "category": "Rare Earth"},
+    "MOO":  {"name": "VanEck Agribusiness",                        "region": "GLOBAL",   "category": "Agribusiness"},
+    "ICLN": {"name": "iShares Global Clean Energy",                "region": "GLOBAL",   "category": "Clean Energy"},
     # ── Additional Country ETFs ──────────────────────────────────────────────
     "GREK": {"name": "Global X MSCI Greece",                       "region": "EUROPE",   "category": "Greece"},
     "NORW": {"name": "Global X MSCI Norway",                       "region": "EUROPE",   "category": "Norway"},
@@ -218,6 +249,7 @@ FILTER_GROUPS = {
     "INDIA":     ["INDIA"],
     "JAPAN":     ["JAPAN"],
     "FACTOR":    ["FACTOR"],
+    "GLOBAL":    ["GLOBAL"],
 }
 
 TIERS = [
@@ -465,7 +497,7 @@ _HELP_MODAL = """
   <button class="help-close" onclick="closeHelp()">&#x2715;</button>
   <h2>International ETF Momentum Screener</h2>
   <p class="help-desc">
-   Ranks ~130 non-leveraged international ETFs by multi-timeframe price momentum.
+   Ranks ~155 non-leveraged international ETFs by multi-timeframe price momentum.
    Covers single-country, regional, and thematic ETFs across developed and emerging
    markets. Leveraged and inverse ETFs are excluded. All data is fetched from yfinance.
    Use the region buttons to focus on a specific area; sort any column by clicking its header.
