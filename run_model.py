@@ -272,17 +272,28 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
 
     print("OK")
 
-    # ── Growth estimate
+    # ── Analyst forward revenue (NTM) ─────────────────────────────────────────
+    fwd_rev = None
+    try:
+        rev_est = tk.get_revenue_estimate()
+        if rev_est is not None and not rev_est.empty and "+1y" in rev_est.index:
+            v = rev_est.loc["+1y", "avg"]
+            if v is not None and not math.isnan(float(v)):
+                fwd_rev = float(v)
+    except Exception:
+        pass
+
+    # TTM revenue growth from financial statements (already fetched)
+    rev_growth_pct = None
+    if revenue and revenue_py and revenue_py > 0:
+        rev_growth_pct = (revenue - revenue_py) / revenue_py * 100
+
+    # ── Growth estimate — matching valuationMaster.py priority logic ──────────
     fcf_per_share = (fcf / shares) if (fcf and shares and shares > 0) else None
     fcf_margin_v  = (fcf / revenue) if (fcf and revenue and revenue > 0) else None
 
-    if growth_override is not None:
-        growth      = growth_override
-        growth_src  = "CLI override"
-    elif fwd_eps and eps and eps > 0 and fwd_eps > eps:
-        growth      = max(0.02, min((fwd_eps / eps) - 1.0, 0.80))
-        growth_src  = f"implied from fwd EPS ({fwd_eps:.2f} / {eps:.2f})"
-    elif fcf_margin_v and fcf_margin_v > 0.40:
+    # FCF-margin baseline
+    if fcf_margin_v and fcf_margin_v > 0.40:
         growth = 0.15; growth_src = "FCF margin proxy (>40%)"
     elif fcf_margin_v and fcf_margin_v > 0.20:
         growth = 0.12; growth_src = "FCF margin proxy (>20%)"
@@ -290,6 +301,22 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
         growth = 0.09; growth_src = "FCF margin proxy (>10%)"
     else:
         growth = 0.06; growth_src = "FCF margin proxy (default)"
+
+    if growth_override is not None:
+        growth     = growth_override
+        growth_src = "CLI override"
+    elif rev_growth_pct is not None and fwd_eps and eps and eps > 0 and fwd_eps != eps:
+        eps_implied = (fwd_eps / eps) - 1.0
+        rev_g_dec   = rev_growth_pct / 100.0
+        growth      = max(0.02, min(eps_implied * 0.5 + rev_g_dec * 0.5, 0.80))
+        growth_src  = "analyst fwd EPS + TTM revenue (50/50 blend)"
+    elif fwd_eps and eps and eps > 0 and fwd_eps > eps:
+        eps_implied = (fwd_eps / eps) - 1.0
+        growth      = max(0.02, min(eps_implied * 0.7 + growth * 0.3, 0.80))
+        growth_src  = f"analyst fwd EPS (blended w/ FCF proxy) ({fwd_eps:.2f} / {eps:.2f})"
+    elif rev_growth_pct is not None:
+        growth = max(0.02, min(rev_growth_pct / 100.0, 0.80))
+        growth_src = "TTM reported revenue growth"
 
     # ── WACC inputs
     wacc_raw = {
@@ -325,7 +352,7 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
         "shares":           shares,
         "eps":              eps,
         "fwd_eps":          fwd_eps,
-        "fwd_rev":          None,
+        "fwd_rev":          fwd_rev,
         "revenue":          revenue,
         "net_income":       net_income,
         "ebitda":           ebitda,
@@ -669,10 +696,17 @@ def _print_peg(r, price):
 
 def _print_ev_ntm(r, price):
     _section("EV/NTM Revenue Result")
-    _line("Fair value",    _mo(r["fair_value"]), _upside(r["fair_value"], price))
-    _line("MoS price",     _mo(r["mos_value"]))
-    _line("NTM Revenue",   _mo(r.get("ntm_revenue")))
-    _line("EV mult used",  f"{r.get('ev_mult_used','?')}x")
+    _line("Fair value (base)", _mo(r["fair_value"]), _upside(r["fair_value"], price))
+    _line("Bear / Bull",       f"{_mo(r.get('fv_lo'))} / {_mo(r.get('fv_hi'))}")
+    _line("MoS price",         _mo(r["mos_value"]))
+    _ntm = r.get("ntm_rev")
+    _ntm_str = f"${_ntm/1e9:.1f}B" if _ntm else "—"
+    _line("NTM Revenue",       _ntm_str)
+    _line("Rev source",        r.get("rev_source", "—"))
+    _line("EV/Rev mult (lo/mid/hi)",
+          f"{r.get('mult_lo','?')}x / {r.get('mult_mid','?')}x / {r.get('mult_hi','?')}x")
+    _line("Margin tier",       r.get("tier", "—"))
+    _line("Anchor",            r.get("anchor_source", "—"))
     if r.get("warning"):
         _warn(r["warning"])
 

@@ -1073,8 +1073,28 @@ def _build_vm_dict(r, yf_data=None):
     # ── Gross margin: yfinance (fraction→% already converted) > TV ───────────
     gross_margin = yf.get("gross_margin") or r.get("gross_margin")
 
-    rev_growth = (r.get("rev_growth") or 0.0) / 100.0
-    est_growth = max(0.02, min(0.80, rev_growth))
+    # Growth rate — valuationMaster priority order (was: raw rev_growth only)
+    _fcf_margin_pct = (fcf / rev * 100) if (fcf and rev and rev > 0) else 0.0
+    if   _fcf_margin_pct > 40: _proxy = 0.15
+    elif _fcf_margin_pct > 20: _proxy = 0.12
+    elif _fcf_margin_pct > 10: _proxy = 0.09
+    else:                       _proxy = 0.06
+
+    _eps     = r.get("eps_ttm")
+    _fwd_eps = yf.get("fwd_eps") or r.get("eps_fwd")
+    _rev_g   = (r.get("rev_growth") or 0.0) / 100.0
+
+    if _rev_g and _fwd_eps and _eps and _eps > 0 and _fwd_eps != _eps:
+        _eps_imp   = (_fwd_eps / _eps) - 1.0
+        est_growth = max(0.02, min(_eps_imp * 0.5 + _rev_g * 0.5, 0.80))
+    elif _fwd_eps and _eps and _eps > 0 and _fwd_eps > _eps:
+        _eps_imp   = (_fwd_eps / _eps) - 1.0
+        est_growth = max(0.02, min(_eps_imp * 0.7 + _proxy * 0.3, 0.80))
+    elif _rev_g:
+        est_growth = max(0.02, min(_rev_g, 0.80))
+    else:
+        est_growth = _proxy
+
     mktcap     = r.get("market_cap") or 0.0
 
     shares = r["shares"]

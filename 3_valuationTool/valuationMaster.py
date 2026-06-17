@@ -146,6 +146,9 @@ FIELDS = [
 FIELDS_V4 = [
     "earnings_per_share_forecast_next_fy",
     "revenue_forecast_next_fy",
+    "revenue_forecast_next_fh",
+    "revenue_forecast_next_fq",
+    "revenue_forecast_fq",
     "total_revenue_yoy_growth_ttm",
     "earnings_per_share_diluted_yoy_growth_ttm",
 ]
@@ -227,10 +230,26 @@ def fetch_tv_data(ticker: str) -> dict:
                 if v is None or v!=v: return None
                 try: return float(v)
                 except Exception: return None
-            fwd_eps=safev4("earnings_per_share_forecast_next_fy")
-            fwd_rev=safev4("revenue_forecast_next_fy")
-            rev_growth_pct=safev4("total_revenue_yoy_growth_ttm")
-            eps_growth_pct=safev4("earnings_per_share_diluted_yoy_growth_ttm")
+            fwd_eps = safev4("earnings_per_share_forecast_next_fy")
+            rev_growth_pct = safev4("total_revenue_yoy_growth_ttm")
+            eps_growth_pct = safev4("earnings_per_share_diluted_yoy_growth_ttm")
+            # fwd_rev hierarchy: fy -> fh*2 -> (fq+nfq)*2 -> nfq*4 -> fq*4
+            _rv_fy  = safev4("revenue_forecast_next_fy")
+            _rv_fh  = safev4("revenue_forecast_next_fh")
+            _rv_nfq = safev4("revenue_forecast_next_fq")
+            _rv_fq  = safev4("revenue_forecast_fq")
+            if _rv_fy and _rv_fy > 0:
+                fwd_rev = _rv_fy
+            elif _rv_fh and _rv_fh > 0:
+                fwd_rev = _rv_fh * 2
+            elif _rv_fq and _rv_nfq and _rv_fq > 0 and _rv_nfq > 0:
+                fwd_rev = (_rv_fq + _rv_nfq) * 2
+            elif _rv_nfq and _rv_nfq > 0:
+                fwd_rev = _rv_nfq * 4
+            elif _rv_fq and _rv_fq > 0:
+                fwd_rev = _rv_fq * 4
+            else:
+                fwd_rev = None
     except Exception:
         pass
 
