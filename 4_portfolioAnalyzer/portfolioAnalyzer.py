@@ -147,7 +147,7 @@ TV_FIELDS = [
     "total_shares_outstanding", "float_shares_outstanding",
     "total_debt", "free_cash_flow",
     "earnings_per_share_diluted_ttm", "earnings_per_share_basic_ttm",
-    "gross_margin_percent_ttm", "net_income", "total_revenue",
+    "gross_margin_percent_ttm", "gross_margin", "net_income", "total_revenue",
     "operating_margin", "price_earnings_ttm",
     "enterprise_value_ebitda_ttm", "ebitda",
     "sector", "industry",
@@ -198,7 +198,7 @@ def fetch_tv_fundamentals(ticker: str) -> dict:
         ni      = safe("net_income")
         rev     = safe("total_revenue", 0) or 0
         ebitda  = safe("ebitda")
-        gm      = safe("gross_margin_percent_ttm")     # percent e.g. 74.5
+        gm      = safe("gross_margin_percent_ttm") or safe("gross_margin")  # percent e.g. 74.5
         op_mar  = safe("operating_margin")
         beta    = safe("beta_1_year", 1.0) or 1.0
         eps     = safe("earnings_per_share_diluted_ttm") or safe("earnings_per_share_basic_ttm")
