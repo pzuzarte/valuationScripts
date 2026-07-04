@@ -1,0 +1,35 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PIT Estimate Store &mdash; Jul 04, 2026  11:34</title><style>
+:root{--bg:#0f1117;--s1:#161a27;--bd:#252a3a;--text:#e2e8f0;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;padding:0 0 60px}
+.hero{padding:26px 30px 20px;background:linear-gradient(135deg,#0f1117,#161a27 70%);border-bottom:1px solid #252a3a}
+.hero h1{font-size:21px;font-weight:800}
+.hero .sub{font-size:12px;color:#94a3b8;margin-top:4px}
+.stats{display:flex;gap:30px;margin-top:16px;flex-wrap:wrap}
+.sv{font-size:22px;font-weight:800;color:#6366f1}.sl{font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px}
+.wrap{padding:22px 30px;max-width:900px}
+h2{font-size:14px;margin:22px 0 10px;color:#e2e8f0}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:10px}
+th,td{padding:6px 10px;border-bottom:1px solid #252a3a;text-align:left}
+th{color:#94a3b8;font-size:10.5px;text-transform:uppercase;letter-spacing:.6px}
+td.r,th.r{text-align:right}td.tk{font-weight:700}
+.note{font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.5}
+</style></head><body>
+<div class="hero"><h1>Point-in-Time Estimate Store</h1>
+<div class="sub">Generated Jul 04, 2026  11:34 &bull; Timestamped analyst estimates for PIT backtesting</div>
+<div class="stats">
+  <div><div class="sv">1</div><div class="sl">Snapshot dates</div></div>
+  <div><div class="sv">150</div><div class="sl">Total rows</div></div>
+  <div><div class="sv">150</div><div class="sl">Unique tickers</div></div>
+</div></div>
+<div class="wrap">
+<h2>Snapshot history</h2>
+<table><thead><tr><th>Date</th><th class="r">Tickers</th><th>Captured at</th></tr></thead>
+<tbody><tr><td>2026-07-04</td><td class="r">150</td><td style="color:#94a3b8">2026-07-04T11:03:54</td></tr></tbody></table>
+
+<div class="note">Programmatic access: <code>from estimateStore import get_estimate_asof</code> returns the
+estimate on record on-or-before any date &mdash; wire this into the valuationMaster / growthScreener
+backtests to remove look-ahead bias. Schedule a monthly capture so the history accumulates.</div>
+</div></body></html>
