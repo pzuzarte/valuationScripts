@@ -67,7 +67,44 @@ TERM_PE                = 25.0
 TERM_PE_PROXY          = 20.0
 
 
+def set_market_rates(risk_free_rate=None, equity_risk_premium=None):
+    """
+    Override the module-level risk-free rate and/or equity risk premium so every
+    model (WACC, CAPM cost of equity, FCF-yield) discounts at current market
+    rates.  Front-end tools fetch the live 10-year Treasury yield and call this
+    ONCE at startup; the model functions read these globals at call time, so the
+    new value propagates everywhere without threading it through each function.
+
+    Values are validated to sane ranges and silently ignored otherwise, so a bad
+    fetch can never poison the models.
+    """
+    global RISK_FREE_RATE, EQUITY_RISK_PREMIUM
+    if risk_free_rate is not None and 0.0 < risk_free_rate < 0.15:
+        RISK_FREE_RATE = round(float(risk_free_rate), 4)
+    if equity_risk_premium is not None and 0.0 < equity_risk_premium < 0.12:
+        EQUITY_RISK_PREMIUM = round(float(equity_risk_premium), 4)
+    return RISK_FREE_RATE, EQUITY_RISK_PREMIUM
+
+
 # ── § 2  WACC ─────────────────────────────────────────────────────────────────
+
+def cost_of_equity_beta(d: dict) -> tuple:
+    """
+    Select the beta used for CAPM cost of equity.
+
+    Prefers the yfinance 5-year monthly beta (stable, standard for discount
+    rates) over the TradingView 1-year beta (too noisy).  Shared by every model
+    that computes a cost of equity (WACC, RIM, DDM) so a given stock discounts
+    at the SAME beta everywhere.
+
+    Returns (beta: float, source: str).
+    """
+    raw     = d.get("wacc_raw", {}) or {}
+    beta_yf = raw.get("beta_yf")
+    if beta_yf is not None:
+        return float(beta_yf), "yfinance 5Y"
+    return (d.get("beta", 1.0) or 1.0), "TradingView 1Y"
+
 
 def calculate_wacc(d: dict) -> tuple:
     """
@@ -94,10 +131,7 @@ def calculate_wacc(d: dict) -> tuple:
 
     # Prefer 5-year monthly beta from yfinance (standard for WACC);
     # 1-year beta from TradingView is too noisy for discount rate purposes.
-    beta_tv  = d.get("beta", 1.0) or 1.0
-    beta_yf  = raw.get("beta_yf")
-    beta     = beta_yf if (beta_yf is not None) else beta_tv
-    beta_src = "yfinance 5Y" if (beta_yf is not None) else "TradingView 1Y"
+    beta, beta_src = cost_of_equity_beta(d)
 
     # Prefer yfinance balance sheet debt (more reliable than TV screener for WACC)
     debt_yf = raw.get("total_debt_yf")
@@ -988,9 +1022,11 @@ def run_graham_number(d: dict) -> float:
     shares = d.get("shares") or 0
     mktcap = d.get("market_cap") or 0
     total_debt = d.get("total_debt") or 0
-    # Estimate book value from market cap proxy (rough — yfinance book value)
-    # We use the wacc_raw field if equity was fetched
-    book_ps = d.get("wacc_raw", {}).get("book_value_ps")
+    # Book value per share is stored in d["ext"] by every data fetcher
+    # (run_model.py and valuationMaster.py both populate ext["book_value_ps"]).
+    # Fall back to wacc_raw for any legacy caller that put it there.
+    book_ps = ((d.get("ext") or {}).get("book_value_ps")
+               or (d.get("wacc_raw") or {}).get("book_value_ps"))
     if not (book_ps and book_ps > 0):
         return None
     if fwd_eps <= 0 or book_ps <= 0:
@@ -2393,22 +2429,23 @@ def run_rim(d: dict) -> dict:
     eps        = d.get("eps")
     growth     = d.get("est_growth") or 0.05
     divs_ps    = ext.get("dividends_per_share") or 0.0
-    beta       = d.get("beta") or 1.0
 
     if not (book_ps and book_ps > 0 and eps and eps > 0):
         return None
 
+    beta, _ = cost_of_equity_beta(d)                      # 5Y beta, consistent w/ WACC
     ke     = RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM  # CAPM cost of equity
     payout = min(0.95, max(0.0, divs_ps / eps)) if eps > 0 else 0.0
     DECAY  = 0.15
 
     bv     = book_ps
     g      = growth
+    eps_t  = eps
     pvs    = []
 
     for yr in range(1, 11):
         g     = max(g * (1 - DECAY), TERMINAL_GROWTH_RATE)
-        eps_t = eps * (1 + g) ** yr   # approximate — grows at decaying rate
+        eps_t = eps_t * (1 + g)       # compound year-over-year at the decaying rate
         ri_t  = eps_t - (ke * bv)
         pvs.append(ri_t / (1 + ke) ** yr)
         bv   += eps_t * (1 - payout)  # book value grows by retained earnings
@@ -2517,7 +2554,7 @@ def run_ddm_hmodel(d: dict) -> dict:
     """
     ext    = d.get("ext") or {}
     D0     = ext.get("dividends_per_share")
-    beta   = d.get("beta") or 1.0
+    beta, _ = cost_of_equity_beta(d)                     # 5Y beta, consistent w/ WACC
     gS     = d.get("est_growth") or 0.05
     gL     = TERMINAL_GROWTH_RATE
     H      = 5.0

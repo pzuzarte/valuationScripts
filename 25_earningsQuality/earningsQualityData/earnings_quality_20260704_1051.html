@@ -1,0 +1,1877 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Earnings Quality &amp; Accruals Screener &mdash; Jul 04, 2026  10:51</title>
+<style>
+:root{--bg:#0f1117;--s1:#161a27;--s2:#1a1e2e;--bd:#252a3a;--text:#e2e8f0;--sub:#94a3b8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text)}
+.hero{padding:26px 30px 20px;background:linear-gradient(135deg,#0f1117,#161a27 60%,#1a1e2e);border-bottom:1px solid var(--bd)}
+.hero h1{font-size:21px;font-weight:800}
+.hero .sub{font-size:12px;color:var(--sub);margin-top:4px}
+.stats{display:flex;gap:26px;margin-top:16px;flex-wrap:wrap}
+.stat-val{font-size:20px;font-weight:800}
+.stat-lbl{font-size:10px;color:var(--sub);text-transform:uppercase;letter-spacing:1px}
+.wrap{padding:22px 30px 60px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{padding:7px 9px;border-bottom:1px solid var(--bd);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:var(--s1);color:var(--sub);font-size:10.5px;text-transform:uppercase;
+    letter-spacing:.6px;cursor:pointer;user-select:none;z-index:5}
+th:hover{color:var(--text)}
+td.r,th.r{text-align:right}
+td.num{color:var(--sub);font-size:11px}
+td.tk{font-weight:700}
+td.co{color:var(--sub);max-width:230px;overflow:hidden;text-overflow:ellipsis}
+td.sec{color:var(--sub);font-size:11px}
+.score{display:inline-block;min-width:34px;text-align:center;padding:2px 7px;border-radius:8px;font-weight:700}
+.flags{display:flex;gap:5px;flex-wrap:wrap;max-width:340px;white-space:normal}
+.flag{font-size:10px;background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.3);
+       padding:1px 6px;border-radius:8px}
+tr:hover td{background:rgba(255,255,255,.02)}
+.footer{padding:16px 30px;border-top:1px solid var(--bd);font-size:11px;color:var(--sub)}
+</style></head>
+<body>
+<div class="hero">
+  <h1>Earnings Quality &amp; Accruals Screener</h1>
+  <div class="sub">Generated Jul 04, 2026  10:51 &bull; 120 US large caps screened &bull; Higher score = earnings better backed by cash</div>
+  <div class="stats">
+    <div><div class="stat-val" style="color:#22c55e">99</div><div class="stat-lbl">Excellent (80+)</div></div>
+    <div><div class="stat-val" style="color:#f59e0b">4</div><div class="stat-lbl">Poor (&lt;35)</div></div>
+    <div><div class="stat-val" style="color:#ef4444">2</div><div class="stat-lbl">Cash-flow red flags</div></div>
+  </div>
+</div>
+<div class="wrap">
+<table id="t">
+<thead><tr>
+  <th>#</th><th onclick="sortT(1,'s')">Ticker</th><th onclick="sortT(2,'s')">Company</th>
+  <th onclick="sortT(3,'s')">Sector</th><th class="r" onclick="sortT(4,'n')">Score</th>
+  <th onclick="sortT(5,'s')">Tier</th><th class="r" onclick="sortT(6,'n')">Accruals</th>
+  <th class="r" onclick="sortT(7,'n')">CFO/NI</th><th class="r" onclick="sortT(8,'n')">FCF/NI</th>
+  <th class="r" onclick="sortT(9,'n')">Net Mgn</th><th class="r" onclick="sortT(10,'n')">ROA</th>
+  <th class="r" onclick="sortT(11,'n')">Mkt Cap</th><th>Flags</th>
+</tr></thead>
+<tbody>
+<tr>
+  <td class="num">1</td>
+  <td class="tk">AVGO</td>
+  <td class="co">Broadcom Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.86%</td>
+  <td class="r">1.45x</td>
+  <td class="r">1.42x</td>
+  <td class="r">38.8%</td>
+  <td class="r">17.1%</td>
+  <td class="r">1715B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">2</td>
+  <td class="tk">TSLA</td>
+  <td class="co">Tesla, Inc.</td>
+  <td class="sec">Consumer Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.86%</td>
+  <td class="r">4.36x</td>
+  <td class="r">1.85x</td>
+  <td class="r">3.9%</td>
+  <td class="r">2.9%</td>
+  <td class="r">1478B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">3</td>
+  <td class="tk">MU</td>
+  <td class="co">Micron Technology, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-31.98%</td>
+  <td class="r">6.02x</td>
+  <td class="r">3.06x</td>
+  <td class="r">55.9%</td>
+  <td class="r">47.5%</td>
+  <td class="r">1102B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">4</td>
+  <td class="tk">AMD</td>
+  <td class="co">Advanced Micro Devices, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-6.77%</td>
+  <td class="r">2.24x</td>
+  <td class="r">1.98x</td>
+  <td class="r">13.2%</td>
+  <td class="r">6.5%</td>
+  <td class="r">844B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">5</td>
+  <td class="tk">LRCX</td>
+  <td class="co">Lam Research Corporation</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-7.68%</td>
+  <td class="r">1.30x</td>
+  <td class="r">1.12x</td>
+  <td class="r">30.9%</td>
+  <td class="r">32.9%</td>
+  <td class="r">439B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">6</td>
+  <td class="tk">ARM</td>
+  <td class="co">Arm Holdings plc</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.79%</td>
+  <td class="r">1.69x</td>
+  <td class="r">1.08x</td>
+  <td class="r">18.4%</td>
+  <td class="r">9.2%</td>
+  <td class="r">335B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">7</td>
+  <td class="tk">PLTR</td>
+  <td class="co">Palantir Technologies Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-10.77%</td>
+  <td class="r">1.68x</td>
+  <td class="r">1.65x</td>
+  <td class="r">43.7%</td>
+  <td class="r">26.9%</td>
+  <td class="r">310B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">8</td>
+  <td class="tk">ANET</td>
+  <td class="co">Arista Networks, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.83%</td>
+  <td class="r">1.54x</td>
+  <td class="r">1.50x</td>
+  <td class="r">38.3%</td>
+  <td class="r">20.6%</td>
+  <td class="r">201B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">9</td>
+  <td class="tk">WDC</td>
+  <td class="co">Western Digital Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-10.22%</td>
+  <td class="r">1.88x</td>
+  <td class="r">1.66x</td>
+  <td class="r">54.2%</td>
+  <td class="r">40.6%</td>
+  <td class="r">186B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">10</td>
+  <td class="tk">QCOM</td>
+  <td class="co">QUALCOMM Incorporated</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-15.30%</td>
+  <td class="r">2.58x</td>
+  <td class="r">2.26x</td>
+  <td class="r">22.3%</td>
+  <td class="r">17.6%</td>
+  <td class="r">186B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">11</td>
+  <td class="tk">ADI</td>
+  <td class="co">Analog Devices, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.92%</td>
+  <td class="r">2.25x</td>
+  <td class="r">2.01x</td>
+  <td class="r">26.0%</td>
+  <td class="r">7.0%</td>
+  <td class="r">184B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">12</td>
+  <td class="tk">SHOP</td>
+  <td class="co">Shopify Inc.</td>
+  <td class="sec">Commercial Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-6.25%</td>
+  <td class="r">1.71x</td>
+  <td class="r">1.69x</td>
+  <td class="r">10.9%</td>
+  <td class="r">9.5%</td>
+  <td class="r">155B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">13</td>
+  <td class="tk">VRT</td>
+  <td class="co">Vertiv Holdings, LLC</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-9.29%</td>
+  <td class="r">1.93x</td>
+  <td class="r">1.71x</td>
+  <td class="r">14.4%</td>
+  <td class="r">13.6%</td>
+  <td class="r">115B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">14</td>
+  <td class="tk">NEM</td>
+  <td class="co">Newmont Corporation</td>
+  <td class="sec">Non-Energy Minerals</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.68%</td>
+  <td class="r">1.71x</td>
+  <td class="r">1.30x</td>
+  <td class="r">34.6%</td>
+  <td class="r">14.9%</td>
+  <td class="r">104B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">15</td>
+  <td class="tk">SCCO</td>
+  <td class="co">Southern Copper Corporation</td>
+  <td class="sec">Non-Energy Minerals</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">100</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-6.34%</td>
+  <td class="r">1.32x</td>
+  <td class="r">0.99x</td>
+  <td class="r">34.1%</td>
+  <td class="r">23.8%</td>
+  <td class="r">144B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">16</td>
+  <td class="tk">SYK</td>
+  <td class="co">Stryker Corporation</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">99</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.60%</td>
+  <td class="r">1.66x</td>
+  <td class="r">1.41x</td>
+  <td class="r">13.2%</td>
+  <td class="r">7.2%</td>
+  <td class="r">125B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">17</td>
+  <td class="tk">HWM</td>
+  <td class="co">Howmet Aerospace Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">99</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.41%</td>
+  <td class="r">1.38x</td>
+  <td class="r">1.10x</td>
+  <td class="r">20.2%</td>
+  <td class="r">14.6%</td>
+  <td class="r">108B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">18</td>
+  <td class="tk">FTNT</td>
+  <td class="co">Fortinet, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-9.62%</td>
+  <td class="r">1.51x</td>
+  <td class="r">1.31x</td>
+  <td class="r">27.5%</td>
+  <td class="r">19.3%</td>
+  <td class="r">114B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">19</td>
+  <td class="tk">GILD</td>
+  <td class="co">Gilead Sciences, Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.08%</td>
+  <td class="r">1.27x</td>
+  <td class="r">1.20x</td>
+  <td class="r">30.9%</td>
+  <td class="r">16.4%</td>
+  <td class="r">163B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">20</td>
+  <td class="tk">CVX</td>
+  <td class="co">Chevron Corporation</td>
+  <td class="sec">Energy Minerals</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.75%</td>
+  <td class="r">2.54x</td>
+  <td class="r">1.14x</td>
+  <td class="r">5.8%</td>
+  <td class="r">3.8%</td>
+  <td class="r">337B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">21</td>
+  <td class="tk">AAPL</td>
+  <td class="co">Apple Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-7.60%</td>
+  <td class="r">1.25x</td>
+  <td class="r">1.15x</td>
+  <td class="r">27.2%</td>
+  <td class="r">34.9%</td>
+  <td class="r">4533B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">22</td>
+  <td class="tk">COST</td>
+  <td class="co">Costco Wholesale Corporation</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-7.98%</td>
+  <td class="r">1.85x</td>
+  <td class="r">1.09x</td>
+  <td class="r">3.0%</td>
+  <td class="r">10.9%</td>
+  <td class="r">422B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">23</td>
+  <td class="tk">CDNS</td>
+  <td class="co">Cadence Design Systems, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.04%</td>
+  <td class="r">1.44x</td>
+  <td class="r">1.29x</td>
+  <td class="r">21.2%</td>
+  <td class="r">11.1%</td>
+  <td class="r">103B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">24</td>
+  <td class="tk">COF</td>
+  <td class="co">Capital One Financial Corporation</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.90%</td>
+  <td class="r">11.98x</td>
+  <td class="r">11.24x</td>
+  <td class="r">3.7%</td>
+  <td class="r">0.5%</td>
+  <td class="r">126B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">25</td>
+  <td class="tk">APP</td>
+  <td class="co">Applovin Corporation</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">98</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-12.95%</td>
+  <td class="r">1.29x</td>
+  <td class="r">1.29x</td>
+  <td class="r">63.5%</td>
+  <td class="r">58.4%</td>
+  <td class="r">177B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">26</td>
+  <td class="tk">GLW</td>
+  <td class="co">Corning Incorporated</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">97</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.19%</td>
+  <td class="r">1.82x</td>
+  <td class="r">0.94x</td>
+  <td class="r">11.1%</td>
+  <td class="r">6.2%</td>
+  <td class="r">169B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">27</td>
+  <td class="tk">GEV</td>
+  <td class="co">GE Vernova Inc.</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">97</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.46%</td>
+  <td class="r">1.85x</td>
+  <td class="r">1.54x</td>
+  <td class="r">23.8%</td>
+  <td class="r">14.7%</td>
+  <td class="r">299B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">28</td>
+  <td class="tk">WELL</td>
+  <td class="co">Welltower Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">97</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.46%</td>
+  <td class="r">3.49x</td>
+  <td class="r">2.33x</td>
+  <td class="r">12.0%</td>
+  <td class="r">2.3%</td>
+  <td class="r">167B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">29</td>
+  <td class="tk">DHR</td>
+  <td class="co">Danaher Corporation</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">97</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.38%</td>
+  <td class="r">1.78x</td>
+  <td class="r">1.46x</td>
+  <td class="r">14.8%</td>
+  <td class="r">4.5%</td>
+  <td class="r">140B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">30</td>
+  <td class="tk">PANW</td>
+  <td class="co">Palo Alto Networks, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-6.66%</td>
+  <td class="r">3.72x</td>
+  <td class="r">3.35x</td>
+  <td class="r">7.9%</td>
+  <td class="r">2.5%</td>
+  <td class="r">284B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">31</td>
+  <td class="tk">NOW</td>
+  <td class="co">ServiceNow, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-15.13%</td>
+  <td class="r">3.11x</td>
+  <td class="r">2.65x</td>
+  <td class="r">12.6%</td>
+  <td class="r">7.7%</td>
+  <td class="r">110B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">32</td>
+  <td class="tk">TJX</td>
+  <td class="co">TJX Companies, Inc. (The)</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.82%</td>
+  <td class="r">1.38x</td>
+  <td class="r">1.00x</td>
+  <td class="r">9.4%</td>
+  <td class="r">17.0%</td>
+  <td class="r">170B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">33</td>
+  <td class="tk">META</td>
+  <td class="co">Meta Platforms, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-16.08%</td>
+  <td class="r">2.05x</td>
+  <td class="r">0.80x</td>
+  <td class="r">32.8%</td>
+  <td class="r">20.9%</td>
+  <td class="r">1480B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">34</td>
+  <td class="tk">PGR</td>
+  <td class="co">Progressive Corporation (The)</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.63%</td>
+  <td class="r">1.48x</td>
+  <td class="r">1.45x</td>
+  <td class="r">12.9%</td>
+  <td class="r">10.3%</td>
+  <td class="r">136B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">35</td>
+  <td class="tk">LOW</td>
+  <td class="co">Lowe's Companies, Inc.</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">96</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.82%</td>
+  <td class="r">1.48x</td>
+  <td class="r">1.15x</td>
+  <td class="r">7.5%</td>
+  <td class="r">13.2%</td>
+  <td class="r">128B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">36</td>
+  <td class="tk">MDT</td>
+  <td class="co">Medtronic plc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.72%</td>
+  <td class="r">1.53x</td>
+  <td class="r">1.13x</td>
+  <td class="r">13.2%</td>
+  <td class="r">5.2%</td>
+  <td class="r">106B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">37</td>
+  <td class="tk">BKNG</td>
+  <td class="co">Booking Holdings Inc. Common Stock</td>
+  <td class="sec">Consumer Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-14.20%</td>
+  <td class="r">1.73x</td>
+  <td class="r">1.67x</td>
+  <td class="r">22.2%</td>
+  <td class="r">22.4%</td>
+  <td class="r">143B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">38</td>
+  <td class="tk">APH</td>
+  <td class="co">Amphenol Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.47%</td>
+  <td class="r">1.34x</td>
+  <td class="r">1.08x</td>
+  <td class="r">17.2%</td>
+  <td class="r">13.7%</td>
+  <td class="r">202B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">39</td>
+  <td class="tk">ABT</td>
+  <td class="co">Abbott Laboratories</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.68%</td>
+  <td class="r">1.46x</td>
+  <td class="r">1.14x</td>
+  <td class="r">13.9%</td>
+  <td class="r">6.5%</td>
+  <td class="r">166B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">40</td>
+  <td class="tk">CRM</td>
+  <td class="co">Salesforce, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-7.28%</td>
+  <td class="r">2.04x</td>
+  <td class="r">1.97x</td>
+  <td class="r">18.7%</td>
+  <td class="r">7.8%</td>
+  <td class="r">136B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">41</td>
+  <td class="tk">DELL</td>
+  <td class="co">Dell Technologies Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.69%</td>
+  <td class="r">2.10x</td>
+  <td class="r">1.59x</td>
+  <td class="r">6.3%</td>
+  <td class="r">8.3%</td>
+  <td class="r">256B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">42</td>
+  <td class="tk">TXN</td>
+  <td class="co">Texas Instruments Incorporated</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.29%</td>
+  <td class="r">1.57x</td>
+  <td class="r">0.75x</td>
+  <td class="r">28.9%</td>
+  <td class="r">15.7%</td>
+  <td class="r">267B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">43</td>
+  <td class="tk">SBUX</td>
+  <td class="co">Starbucks Corporation</td>
+  <td class="sec">Consumer Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.15%</td>
+  <td class="r">2.34x</td>
+  <td class="r">1.47x</td>
+  <td class="r">3.9%</td>
+  <td class="r">4.8%</td>
+  <td class="r">119B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">44</td>
+  <td class="tk">BMY</td>
+  <td class="co">Bristol-Myers Squibb Company</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">95</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-7.23%</td>
+  <td class="r">1.89x</td>
+  <td class="r">1.69x</td>
+  <td class="r">15.0%</td>
+  <td class="r">8.1%</td>
+  <td class="r">119B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">45</td>
+  <td class="tk">ISRG</td>
+  <td class="co">Intuitive Surgical, Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.51%</td>
+  <td class="r">1.18x</td>
+  <td class="r">0.99x</td>
+  <td class="r">28.2%</td>
+  <td class="r">15.1%</td>
+  <td class="r">151B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">46</td>
+  <td class="tk">STX</td>
+  <td class="co">Seagate Technology Holdings PLC</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-15.83%</td>
+  <td class="r">1.96x</td>
+  <td class="r">1.64x</td>
+  <td class="r">21.6%</td>
+  <td class="r">28.9%</td>
+  <td class="r">184B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span></div></td>
+</tr>
+<tr>
+  <td class="num">47</td>
+  <td class="tk">ABBV</td>
+  <td class="co">AbbVie Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-12.49%</td>
+  <td class="r">5.07x</td>
+  <td class="r">4.77x</td>
+  <td class="r">5.7%</td>
+  <td class="r">2.6%</td>
+  <td class="r">461B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">48</td>
+  <td class="tk">NFLX</td>
+  <td class="co">Netflix, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.74%</td>
+  <td class="r">1.15x</td>
+  <td class="r">1.08x</td>
+  <td class="r">28.3%</td>
+  <td class="r">23.6%</td>
+  <td class="r">327B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">49</td>
+  <td class="tk">TT</td>
+  <td class="co">Trane Technologies plc</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.90%</td>
+  <td class="r">1.23x</td>
+  <td class="r">1.10x</td>
+  <td class="r">13.6%</td>
+  <td class="r">13.7%</td>
+  <td class="r">106B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">50</td>
+  <td class="tk">UNH</td>
+  <td class="co">UnitedHealth Group Incorporated</td>
+  <td class="sec">Health Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.55%</td>
+  <td class="r">1.92x</td>
+  <td class="r">1.63x</td>
+  <td class="r">2.7%</td>
+  <td class="r">3.9%</td>
+  <td class="r">386B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">51</td>
+  <td class="tk">CVS</td>
+  <td class="co">CVS Health Corporation</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">94</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.39%</td>
+  <td class="r">5.84x</td>
+  <td class="r">4.18x</td>
+  <td class="r">0.7%</td>
+  <td class="r">1.2%</td>
+  <td class="r">134B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">52</td>
+  <td class="tk">COP</td>
+  <td class="co">ConocoPhillips</td>
+  <td class="sec">Energy Minerals</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.16%</td>
+  <td class="r">2.26x</td>
+  <td class="r">0.74x</td>
+  <td class="r">12.6%</td>
+  <td class="r">5.9%</td>
+  <td class="r">128B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">53</td>
+  <td class="tk">MO</td>
+  <td class="co">Altria Group, Inc.</td>
+  <td class="sec">Consumer Non-Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.69%</td>
+  <td class="r">1.28x</td>
+  <td class="r">1.24x</td>
+  <td class="r">39.4%</td>
+  <td class="r">22.8%</td>
+  <td class="r">121B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">54</td>
+  <td class="tk">V</td>
+  <td class="co">Visa Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.05%</td>
+  <td class="r">1.15x</td>
+  <td class="r">1.07x</td>
+  <td class="r">51.2%</td>
+  <td class="r">23.5%</td>
+  <td class="r">682B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">55</td>
+  <td class="tk">TMUS</td>
+  <td class="co">T-Mobile US, Inc.</td>
+  <td class="sec">Communications</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-8.07%</td>
+  <td class="r">2.58x</td>
+  <td class="r">1.42x</td>
+  <td class="r">11.6%</td>
+  <td class="r">4.9%</td>
+  <td class="r">192B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">56</td>
+  <td class="tk">RTX</td>
+  <td class="co">RTX Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.57%</td>
+  <td class="r">1.65x</td>
+  <td class="r">1.26x</td>
+  <td class="r">8.0%</td>
+  <td class="r">4.3%</td>
+  <td class="r">268B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">57</td>
+  <td class="tk">TMO</td>
+  <td class="co">Thermo Fisher Scientific Inc</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.40%</td>
+  <td class="r">1.24x</td>
+  <td class="r">1.01x</td>
+  <td class="r">15.2%</td>
+  <td class="r">6.5%</td>
+  <td class="r">195B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">58</td>
+  <td class="tk">PFE</td>
+  <td class="co">Pfizer, Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.03%</td>
+  <td class="r">1.54x</td>
+  <td class="r">1.22x</td>
+  <td class="r">11.8%</td>
+  <td class="r">3.6%</td>
+  <td class="r">139B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">59</td>
+  <td class="tk">MSFT</td>
+  <td class="co">Microsoft Corporation</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-9.84%</td>
+  <td class="r">1.67x</td>
+  <td class="r">0.72x</td>
+  <td class="r">39.3%</td>
+  <td class="r">19.9%</td>
+  <td class="r">2901B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">60</td>
+  <td class="tk">GS</td>
+  <td class="co">Goldman Sachs Group, Inc. (The)</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.74%</td>
+  <td class="r">6.69x</td>
+  <td class="r">6.56x</td>
+  <td class="r">14.0%</td>
+  <td class="r">0.9%</td>
+  <td class="r">301B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">61</td>
+  <td class="tk">IBKR</td>
+  <td class="co">Interactive Brokers Group, Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">93</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-15.96%</td>
+  <td class="r">36.48x</td>
+  <td class="r">36.40x</td>
+  <td class="r">9.6%</td>
+  <td class="r">0.6%</td>
+  <td class="r">155B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">62</td>
+  <td class="tk">MA</td>
+  <td class="co">Mastercard Incorporated</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">92</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.49%</td>
+  <td class="r">1.19x</td>
+  <td class="r">1.16x</td>
+  <td class="r">45.8%</td>
+  <td class="r">30.9%</td>
+  <td class="r">477B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">63</td>
+  <td class="tk">CSCO</td>
+  <td class="co">Cisco Systems, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">92</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.27%</td>
+  <td class="r">1.28x</td>
+  <td class="r">1.16x</td>
+  <td class="r">20.1%</td>
+  <td class="r">10.0%</td>
+  <td class="r">444B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">64</td>
+  <td class="tk">KLAC</td>
+  <td class="co">KLA Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.01%</td>
+  <td class="r">1.08x</td>
+  <td class="r">0.99x</td>
+  <td class="r">35.7%</td>
+  <td class="r">29.1%</td>
+  <td class="r">308B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">65</td>
+  <td class="tk">NVDA</td>
+  <td class="co">NVIDIA Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.15%</td>
+  <td class="r">1.05x</td>
+  <td class="r">0.99x</td>
+  <td class="r">63.0%</td>
+  <td class="r">83.0%</td>
+  <td class="r">4715B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">66</td>
+  <td class="tk">LMT</td>
+  <td class="co">Lockheed Martin Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.97%</td>
+  <td class="r">1.47x</td>
+  <td class="r">1.13x</td>
+  <td class="r">6.4%</td>
+  <td class="r">8.3%</td>
+  <td class="r">126B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">67</td>
+  <td class="tk">PH</td>
+  <td class="co">Parker-Hannifin Corporation</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.84%</td>
+  <td class="r">1.16x</td>
+  <td class="r">1.04x</td>
+  <td class="r">16.6%</td>
+  <td class="r">11.7%</td>
+  <td class="r">121B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">68</td>
+  <td class="tk">PEP</td>
+  <td class="co">PepsiCo, Inc.</td>
+  <td class="sec">Consumer Non-Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.39%</td>
+  <td class="r">1.59x</td>
+  <td class="r">1.07x</td>
+  <td class="r">9.1%</td>
+  <td class="r">8.2%</td>
+  <td class="r">197B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">69</td>
+  <td class="tk">VZ</td>
+  <td class="co">Verizon Communications Inc.</td>
+  <td class="sec">Communications</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">91</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.83%</td>
+  <td class="r">2.17x</td>
+  <td class="r">1.18x</td>
+  <td class="r">12.5%</td>
+  <td class="r">4.3%</td>
+  <td class="r">178B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">70</td>
+  <td class="tk">AXP</td>
+  <td class="co">American Express Company</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.21%</td>
+  <td class="r">1.63x</td>
+  <td class="r">1.34x</td>
+  <td class="r">13.5%</td>
+  <td class="r">3.8%</td>
+  <td class="r">240B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">71</td>
+  <td class="tk">AMGN</td>
+  <td class="co">Amgen Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.29%</td>
+  <td class="r">1.39x</td>
+  <td class="r">1.11x</td>
+  <td class="r">20.9%</td>
+  <td class="r">8.6%</td>
+  <td class="r">202B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span></div></td>
+</tr>
+<tr>
+  <td class="num">72</td>
+  <td class="tk">PG</td>
+  <td class="co">Procter & Gamble Company (The)</td>
+  <td class="sec">Consumer Non-Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.68%</td>
+  <td class="r">1.22x</td>
+  <td class="r">0.94x</td>
+  <td class="r">19.2%</td>
+  <td class="r">13.2%</td>
+  <td class="r">353B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">73</td>
+  <td class="tk">CB</td>
+  <td class="co">Chubb Limited</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.64%</td>
+  <td class="r">1.64x</td>
+  <td class="r">1.64x</td>
+  <td class="r">18.5%</td>
+  <td class="r">4.7%</td>
+  <td class="r">140B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">74</td>
+  <td class="tk">SPGI</td>
+  <td class="co">S&P Global Inc.</td>
+  <td class="sec">Commercial Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.08%</td>
+  <td class="r">1.28x</td>
+  <td class="r">1.24x</td>
+  <td class="r">30.4%</td>
+  <td class="r">7.9%</td>
+  <td class="r">130B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">75</td>
+  <td class="tk">HD</td>
+  <td class="co">Home Depot, Inc. (The)</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">90</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.59%</td>
+  <td class="r">1.27x</td>
+  <td class="r">1.01x</td>
+  <td class="r">8.4%</td>
+  <td class="r">13.5%</td>
+  <td class="r">357B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span></div></td>
+</tr>
+<tr>
+  <td class="num">76</td>
+  <td class="tk">CAT</td>
+  <td class="co">Caterpillar, Inc.</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">89</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.60%</td>
+  <td class="r">1.39x</td>
+  <td class="r">0.89x</td>
+  <td class="r">13.3%</td>
+  <td class="r">10.4%</td>
+  <td class="r">444B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">77</td>
+  <td class="tk">LIN</td>
+  <td class="co">Linde plc</td>
+  <td class="sec">Process Industries</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">89</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.09%</td>
+  <td class="r">1.51x</td>
+  <td class="r">0.74x</td>
+  <td class="r">20.4%</td>
+  <td class="r">8.4%</td>
+  <td class="r">253B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">78</td>
+  <td class="tk">AMAT</td>
+  <td class="co">Applied Materials, Inc.</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">89</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.47%</td>
+  <td class="r">1.14x</td>
+  <td class="r">0.76x</td>
+  <td class="r">29.3%</td>
+  <td class="r">23.0%</td>
+  <td class="r">479B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">79</td>
+  <td class="tk">MCD</td>
+  <td class="co">McDonald's Corporation</td>
+  <td class="sec">Consumer Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">89</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.28%</td>
+  <td class="r">1.23x</td>
+  <td class="r">0.82x</td>
+  <td class="r">31.6%</td>
+  <td class="r">14.9%</td>
+  <td class="r">199B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">80</td>
+  <td class="tk">PLD</td>
+  <td class="co">Prologis, Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">89</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.84%</td>
+  <td class="r">1.54x</td>
+  <td class="r">1.28x</td>
+  <td class="r">41.5%</td>
+  <td class="r">3.8%</td>
+  <td class="r">133B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">81</td>
+  <td class="tk">SCHW</td>
+  <td class="co">Charles Schwab Corporation (The)</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-0.30%</td>
+  <td class="r">1.17x</td>
+  <td class="r">1.10x</td>
+  <td class="r">33.3%</td>
+  <td class="r">2.0%</td>
+  <td class="r">169B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">82</td>
+  <td class="tk">VRTX</td>
+  <td class="co">Vertex Pharmaceuticals Incorporate</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.09%</td>
+  <td class="r">1.07x</td>
+  <td class="r">0.94x</td>
+  <td class="r">35.2%</td>
+  <td class="r">17.6%</td>
+  <td class="r">134B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">83</td>
+  <td class="tk">KO</td>
+  <td class="co">Coca-Cola Company (The)</td>
+  <td class="sec">Consumer Non-Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.46%</td>
+  <td class="r">1.12x</td>
+  <td class="r">0.96x</td>
+  <td class="r">27.5%</td>
+  <td class="r">13.3%</td>
+  <td class="r">362B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">84</td>
+  <td class="tk">T</td>
+  <td class="co">AT&T Inc.</td>
+  <td class="sec">Communications</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.00%</td>
+  <td class="r">1.77x</td>
+  <td class="r">0.79x</td>
+  <td class="r">17.0%</td>
+  <td class="r">5.2%</td>
+  <td class="r">143B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">85</td>
+  <td class="tk">ETN</td>
+  <td class="co">Eaton Corporation, PLC</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.19%</td>
+  <td class="r">1.16x</td>
+  <td class="r">0.92x</td>
+  <td class="r">14.0%</td>
+  <td class="r">8.5%</td>
+  <td class="r">155B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">86</td>
+  <td class="tk">XOM</td>
+  <td class="co">ExxonMobil Holdings Corporation</td>
+  <td class="sec">Energy Minerals</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-4.06%</td>
+  <td class="r">1.65x</td>
+  <td class="r">0.65x</td>
+  <td class="r">7.7%</td>
+  <td class="r">5.5%</td>
+  <td class="r">568B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">87</td>
+  <td class="tk">GOOG</td>
+  <td class="co">Alphabet Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-5.99%</td>
+  <td class="r">1.32x</td>
+  <td class="r">0.49x</td>
+  <td class="r">37.9%</td>
+  <td class="r">27.2%</td>
+  <td class="r">4340B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">88</td>
+  <td class="tk">MS</td>
+  <td class="co">Morgan Stanley</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">88</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.59%</td>
+  <td class="r">2.49x</td>
+  <td class="r">2.31x</td>
+  <td class="r">14.6%</td>
+  <td class="r">1.3%</td>
+  <td class="r">337B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">89</td>
+  <td class="tk">C</td>
+  <td class="co">Citigroup, Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">87</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.10%</td>
+  <td class="r">3.16x</td>
+  <td class="r">2.71x</td>
+  <td class="r">9.1%</td>
+  <td class="r">0.6%</td>
+  <td class="r">240B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">90</td>
+  <td class="tk">JPM</td>
+  <td class="co">JP Morgan Chase & Co.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">87</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.87%</td>
+  <td class="r">2.61x</td>
+  <td class="r">2.61x</td>
+  <td class="r">20.6%</td>
+  <td class="r">1.3%</td>
+  <td class="r">896B</td>
+  <td><div class="flags"><span class="flag">High leverage (D/E > 3)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">91</td>
+  <td class="tk">UNP</td>
+  <td class="co">Union Pacific Corporation</td>
+  <td class="sec">Transportation</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">87</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-3.42%</td>
+  <td class="r">1.33x</td>
+  <td class="r">0.80x</td>
+  <td class="r">29.2%</td>
+  <td class="r">10.4%</td>
+  <td class="r">168B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">92</td>
+  <td class="tk">WMT</td>
+  <td class="co">Walmart Inc.</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">86</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-6.56%</td>
+  <td class="r">1.87x</td>
+  <td class="r">0.57x</td>
+  <td class="r">3.1%</td>
+  <td class="r">8.2%</td>
+  <td class="r">890B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">93</td>
+  <td class="tk">IBM</td>
+  <td class="co">International Business Machines Co</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">86</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.18%</td>
+  <td class="r">1.32x</td>
+  <td class="r">1.22x</td>
+  <td class="r">15.6%</td>
+  <td class="r">7.1%</td>
+  <td class="r">272B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">94</td>
+  <td class="tk">BAC</td>
+  <td class="co">Bank of America Corporation</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">84</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-0.97%</td>
+  <td class="r">2.12x</td>
+  <td class="r">2.12x</td>
+  <td class="r">16.3%</td>
+  <td class="r">0.9%</td>
+  <td class="r">417B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">95</td>
+  <td class="tk">PM</td>
+  <td class="co">Philip Morris International Inc</td>
+  <td class="sec">Consumer Non-Durables</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">84</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.26%</td>
+  <td class="r">1.08x</td>
+  <td class="r">0.94x</td>
+  <td class="r">26.7%</td>
+  <td class="r">16.5%</td>
+  <td class="r">284B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">96</td>
+  <td class="tk">UBER</td>
+  <td class="co">Uber Technologies, Inc.</td>
+  <td class="sec">Transportation</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">84</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-0.12%</td>
+  <td class="r">1.01x</td>
+  <td class="r">0.97x</td>
+  <td class="r">15.9%</td>
+  <td class="r">15.2%</td>
+  <td class="r">152B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">97</td>
+  <td class="tk">DE</td>
+  <td class="co">Deere & Company</td>
+  <td class="sec">Producer Manufacturing</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">82</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-2.72%</td>
+  <td class="r">1.58x</td>
+  <td class="r">0.75x</td>
+  <td class="r">10.1%</td>
+  <td class="r">4.5%</td>
+  <td class="r">168B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">98</td>
+  <td class="tk">PDD</td>
+  <td class="co">PDD Holdings Inc.</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">81</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-1.61%</td>
+  <td class="r">1.11x</td>
+  <td class="r">--</td>
+  <td class="r">21.9%</td>
+  <td class="r">16.5%</td>
+  <td class="r">117B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">99</td>
+  <td class="tk">GE</td>
+  <td class="co">GE Aerospace</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#22c55e22;color:#22c55e;border:1px solid #22c55e55">80</span></td>
+  <td class="r" style="color:#22c55e;font-weight:600">Excellent</td>
+  <td class="r" style="color:#22c55e">-0.13%</td>
+  <td class="r">1.02x</td>
+  <td class="r">0.86x</td>
+  <td class="r">17.7%</td>
+  <td class="r">6.8%</td>
+  <td class="r">394B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">100</td>
+  <td class="tk">DIS</td>
+  <td class="co">Walt Disney Company (The)</td>
+  <td class="sec">Consumer Services</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">79</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-1.65%</td>
+  <td class="r">1.27x</td>
+  <td class="r">0.57x</td>
+  <td class="r">11.5%</td>
+  <td class="r">5.6%</td>
+  <td class="r">173B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">101</td>
+  <td class="tk">MRK</td>
+  <td class="co">Merck & Company, Inc.</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">78</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#94a3b8">0.28%</td>
+  <td class="r">0.98x</td>
+  <td class="r">0.77x</td>
+  <td class="r">13.6%</td>
+  <td class="r">7.3%</td>
+  <td class="r">320B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">102</td>
+  <td class="tk">AMZN</td>
+  <td class="co">Amazon.com, Inc.</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">78</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-7.73%</td>
+  <td class="r">1.91x</td>
+  <td class="r">-0.03x</td>
+  <td class="r">12.2%</td>
+  <td class="r">11.6%</td>
+  <td class="r">2610B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span></div></td>
+</tr>
+<tr>
+  <td class="num">103</td>
+  <td class="tk">LLY</td>
+  <td class="co">Eli Lilly and Company</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">73</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#94a3b8">0.14%</td>
+  <td class="r">0.99x</td>
+  <td class="r">0.57x</td>
+  <td class="r">35.0%</td>
+  <td class="r">24.5%</td>
+  <td class="r">1143B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">104</td>
+  <td class="tk">ORCL</td>
+  <td class="co">Oracle Corporation</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">73</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-5.69%</td>
+  <td class="r">1.87x</td>
+  <td class="r">-1.39x</td>
+  <td class="r">25.4%</td>
+  <td class="r">7.9%</td>
+  <td class="r">404B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span><span class="flag">High leverage (D/E > 3)</span></div></td>
+</tr>
+<tr>
+  <td class="num">105</td>
+  <td class="tk">NEE</td>
+  <td class="co">NextEra Energy, Inc.</td>
+  <td class="sec">Utilities</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">71</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-2.48%</td>
+  <td class="r">1.80x</td>
+  <td class="r">0.35x</td>
+  <td class="r">29.7%</td>
+  <td class="r">3.9%</td>
+  <td class="r">184B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">106</td>
+  <td class="tk">DUK</td>
+  <td class="co">Duke Energy Corporation (Holding C</td>
+  <td class="sec">Utilities</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">69</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-3.39%</td>
+  <td class="r">2.35x</td>
+  <td class="r">-0.66x</td>
+  <td class="r">15.5%</td>
+  <td class="r">2.7%</td>
+  <td class="r">101B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span></div></td>
+</tr>
+<tr>
+  <td class="num">107</td>
+  <td class="tk">SO</td>
+  <td class="co">Southern Company (The)</td>
+  <td class="sec">Utilities</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">68</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#22c55e">-3.46%</td>
+  <td class="r">2.25x</td>
+  <td class="r">-0.95x</td>
+  <td class="r">14.5%</td>
+  <td class="r">2.9%</td>
+  <td class="r">110B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span></div></td>
+</tr>
+<tr>
+  <td class="num">108</td>
+  <td class="tk">BLK</td>
+  <td class="co">BlackRock, Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">67</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#94a3b8">0.82%</td>
+  <td class="r">0.75x</td>
+  <td class="r">0.68x</td>
+  <td class="r">23.8%</td>
+  <td class="r">4.0%</td>
+  <td class="r">162B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">109</td>
+  <td class="tk">JNJ</td>
+  <td class="co">Johnson & Johnson</td>
+  <td class="sec">Health Technology</td>
+  <td class="r"><span class="score" style="background:#14b8a622;color:#14b8a6;border:1px solid #14b8a655">65</span></td>
+  <td class="r" style="color:#14b8a6;font-weight:600">Good</td>
+  <td class="r" style="color:#94a3b8">1.96%</td>
+  <td class="r">0.85x</td>
+  <td class="r">0.66x</td>
+  <td class="r">21.8%</td>
+  <td class="r">10.7%</td>
+  <td class="r">633B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">110</td>
+  <td class="tk">MRVL</td>
+  <td class="co">Marvell Technology, Inc.</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">63</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#94a3b8">2.28%</td>
+  <td class="r">0.77x</td>
+  <td class="r">0.62x</td>
+  <td class="r">29.0%</td>
+  <td class="r">10.8%</td>
+  <td class="r">215B</td>
+  <td></td>
+</tr>
+<tr>
+  <td class="num">111</td>
+  <td class="tk">BA</td>
+  <td class="co">Boeing Company (The)</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">62</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#22c55e">-0.16%</td>
+  <td class="r">1.12x</td>
+  <td class="r">-0.47x</td>
+  <td class="r">2.5%</td>
+  <td class="r">1.4%</td>
+  <td class="r">179B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span><span class="flag">High leverage (D/E > 3)</span></div></td>
+</tr>
+<tr>
+  <td class="num">112</td>
+  <td class="tk">BRK.A</td>
+  <td class="co">Berkshire Hathaway Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">56</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#94a3b8">1.71%</td>
+  <td class="r">0.68x</td>
+  <td class="r">0.36x</td>
+  <td class="r">19.3%</td>
+  <td class="r">6.0%</td>
+  <td class="r">1095B</td>
+  <td><div class="flags"><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">113</td>
+  <td class="tk">SNDK</td>
+  <td class="co">Sandisk Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">55</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#22c55e">-36.78%</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">34.2%</td>
+  <td class="r">30.0%</td>
+  <td class="r">258B</td>
+  <td><div class="flags"><span class="flag">Net loss (TTM) -- accruals model N/A</span></div></td>
+</tr>
+<tr>
+  <td class="num">114</td>
+  <td class="tk">CRWD</td>
+  <td class="co">CrowdStrike Holdings, Inc.</td>
+  <td class="sec">Technology Services</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">55</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#22c55e">-17.58%</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">-0.9%</td>
+  <td class="r">-0.5%</td>
+  <td class="r">198B</td>
+  <td><div class="flags"><span class="flag">Net loss (TTM) -- accruals model N/A</span></div></td>
+</tr>
+<tr>
+  <td class="num">115</td>
+  <td class="tk">BABA</td>
+  <td class="co">Alibaba Group Holding Limited</td>
+  <td class="sec">Retail Trade</td>
+  <td class="r"><span class="score" style="background:#eab30822;color:#eab308;border:1px solid #eab30855">51</span></td>
+  <td class="r" style="color:#eab308;font-weight:600">Fair</td>
+  <td class="r" style="color:#94a3b8">1.51%</td>
+  <td class="r">0.72x</td>
+  <td class="r">-0.48x</td>
+  <td class="r">10.3%</td>
+  <td class="r">5.7%</td>
+  <td class="r">230B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but negative FCF</span></div></td>
+</tr>
+<tr>
+  <td class="num">116</td>
+  <td class="tk">INTC</td>
+  <td class="co">Intel Corporation</td>
+  <td class="sec">Electronic Technology</td>
+  <td class="r"><span class="score" style="background:#f59e0b22;color:#f59e0b;border:1px solid #f59e0b55">38</span></td>
+  <td class="r" style="color:#f59e0b;font-weight:600">Weak</td>
+  <td class="r" style="color:#22c55e">-4.99%</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">-5.9%</td>
+  <td class="r">-1.6%</td>
+  <td class="r">605B</td>
+  <td><div class="flags"><span class="flag">Net loss (TTM) -- accruals model N/A</span></div></td>
+</tr>
+<tr>
+  <td class="num">117</td>
+  <td class="tk">BX</td>
+  <td class="co">Blackstone Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#ef444422;color:#ef4444;border:1px solid #ef444455">32</span></td>
+  <td class="r" style="color:#ef4444;font-weight:600">Poor</td>
+  <td class="r" style="color:#94a3b8">4.20%</td>
+  <td class="r">0.33x</td>
+  <td class="r">0.29x</td>
+  <td class="r">20.5%</td>
+  <td class="r">6.5%</td>
+  <td class="r">150B</td>
+  <td><div class="flags"><span class="flag">Weak cash conversion (CFO < 60% of NI)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">118</td>
+  <td class="tk">WFC</td>
+  <td class="co">Wells Fargo & Company</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#ef444422;color:#ef4444;border:1px solid #ef444455">30</span></td>
+  <td class="r" style="color:#ef4444;font-weight:600">Poor</td>
+  <td class="r" style="color:#94a3b8">1.07%</td>
+  <td class="r">-0.11x</td>
+  <td class="r">-0.11x</td>
+  <td class="r">17.2%</td>
+  <td class="r">1.0%</td>
+  <td class="r">262B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but NEGATIVE operating cash flow</span><span class="flag">Positive earnings but negative FCF</span><span class="flag">Weak cash conversion (CFO < 60% of NI)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr>
+<tr>
+  <td class="num">119</td>
+  <td class="tk">SPCX</td>
+  <td class="co">Space Exploration Technologies Cor</td>
+  <td class="sec">Communications</td>
+  <td class="r"><span class="score" style="background:#ef444422;color:#ef4444;border:1px solid #ef444455">17</span></td>
+  <td class="r" style="color:#ef4444;font-weight:600">Poor</td>
+  <td class="r" style="color:#94a3b8">--</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">--</td>
+  <td class="r">2136B</td>
+  <td><div class="flags"><span class="flag">Net loss (TTM) -- accruals model N/A</span></div></td>
+</tr>
+<tr>
+  <td class="num">120</td>
+  <td class="tk">HOOD</td>
+  <td class="co">Robinhood Markets, Inc.</td>
+  <td class="sec">Finance</td>
+  <td class="r"><span class="score" style="background:#ef444422;color:#ef4444;border:1px solid #ef444455">15</span></td>
+  <td class="r" style="color:#ef4444;font-weight:600">Poor</td>
+  <td class="r" style="color:#94a3b8">8.60%</td>
+  <td class="r">-1.08x</td>
+  <td class="r">-1.11x</td>
+  <td class="r">40.7%</td>
+  <td class="r">5.2%</td>
+  <td class="r">102B</td>
+  <td><div class="flags"><span class="flag">Positive earnings but NEGATIVE operating cash flow</span><span class="flag">Positive earnings but negative FCF</span><span class="flag">Weak cash conversion (CFO < 60% of NI)</span><span class="flag">Financial -- accruals metric less meaningful</span></div></td>
+</tr></tbody>
+</table>
+</div>
+<div class="footer">
+  Accruals ratio = (Net Income - Operating Cash Flow) / Total Assets (TTM).  Lower / negative is better.
+  &bull; Data: TradingView.  &bull; Not investment advice.
+</div>
+<script>
+let dir={};
+function sortT(col,type){
+  const tb=document.querySelector('#t tbody');
+  const rows=[...tb.rows];
+  dir[col]=!dir[col];
+  const s=dir[col]?1:-1;
+  rows.sort((a,b)=>{
+    let x=a.cells[col].innerText.replace(/[%xB,]/g,'').trim();
+    let y=b.cells[col].innerText.replace(/[%xB,]/g,'').trim();
+    if(type==='n'){x=parseFloat(x);y=parseFloat(y);
+       if(isNaN(x))x=-1e9;if(isNaN(y))y=-1e9;return (x-y)*s;}
+    return x.localeCompare(y)*s;
+  });
+  rows.forEach(r=>tb.appendChild(r));
+}
+</script>
+</body></html>

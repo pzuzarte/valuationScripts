@@ -16,6 +16,12 @@ Pulls together four long-run market-valuation gauges into a single HTML report:
   4. Fed Model -- S&P 500 earnings yield minus 10-Year Treasury yield.
      Source: Shiller CAPE earnings yield + FRED GS10.  History from 1953.
 
+  5. Sector CAPE proxy -- per-sector valuation over time.  No free historical
+     sector-level earnings series exists, so the real market CAPE is anchored
+     and modulated by each sector's real-price stretch vs the market's.
+     Source: SPDR sector ETFs (yfinance) + Shiller CAPE + FRED CPI.  A
+     relative-valuation proxy, NOT an earnings-based P/E.
+
 All charts are embedded in the HTML as base-64 PNG images (no CDN required).
 
 USAGE
@@ -63,6 +69,33 @@ CONCENTRATION_HIST = [
     (1980, 23), (1985, 20), (1990, 19), (1995, 21),
     (2000, 25), (2005, 20), (2010, 19), (2015, 18),
     (2018, 21), (2020, 27), (2021, 30), (2022, 27),
+]
+
+# ── SPDR Select-Sector ETFs -> readable sector names ──────────────────────────
+# Used to build a per-sector CAPE *proxy*.  No free historical sector-level
+# earnings series exists, so a true Shiller CAPE cannot be computed per sector;
+# we anchor the real market CAPE and modulate it by each sector's real-price
+# 'stretch' vs the market's (see fetch_sector_cape_history).
+# XLRE (Real Estate) starts 2015, XLC (Comm Svcs) starts 2018 -- both get a
+# shorter effective look-back until 10 yrs of history accrue.
+_SECTOR_ETFS = {
+    "XLK":  "Technology",
+    "XLF":  "Financials",
+    "XLV":  "Health Care",
+    "XLY":  "Consumer Discretionary",
+    "XLP":  "Consumer Staples",
+    "XLE":  "Energy",
+    "XLI":  "Industrials",
+    "XLB":  "Materials",
+    "XLU":  "Utilities",
+    "XLRE": "Real Estate",
+    "XLC":  "Communication Svcs",
+}
+
+# Qualitative palette for the 11 sector lines (distinct hues).
+_SECTOR_PALETTE = [
+    "#f59e0b", "#14b8a6", "#6366f1", "#ef4444", "#22c55e", "#eab308",
+    "#ec4899", "#38bdf8", "#a855f7", "#f97316", "#84cc16",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -408,6 +441,86 @@ def fetch_sector_composition(sp500_tickers=None):
         return out
     except Exception as exc:
         print(f"  [sector] fetch failed: {exc}")
+        return None
+
+
+def fetch_sector_cape_history(df_shiller, lookback_months=120, min_months=60):
+    """
+    Build a per-sector CAPE *proxy* time series.
+
+    No free historical sector-level earnings series exists, so a true Shiller
+    CAPE cannot be computed per sector.  Instead we anchor the real market CAPE
+    (from df_shiller) and modulate it by each sector's real-price 'stretch'
+    relative to the market's:
+
+        stretch(t)      = real_price(t) / trailing-10yr-avg(real_price)
+        sector_CAPE(t)  = market_CAPE(t) * stretch_sector(t) / stretch_market(t)
+
+    Interpretation: when a sector is stretched vs its own 10-yr real-price trend
+    by the same amount as the market, its proxy CAPE equals the market CAPE;
+    more stretched -> higher.  This is a RELATIVE-valuation proxy, not an
+    earnings-based P/E.  Caveat: structurally fast-growing sectors (whose real
+    price rises steadily) read persistently 'expensive', much as true CAPE
+    penalises fast earnings growth through its lagging 10-yr denominator.
+
+    Returns a month-indexed DataFrame (columns = sector names + 'Market'),
+    or None on failure.
+    """
+    try:
+        import yfinance as yf
+    except Exception:
+        return None
+    if df_shiller is None or "cape" not in df_shiller.columns:
+        return None
+    try:
+        # -- CPI for inflation-adjustment (normalised so latest = 1.0) --------
+        cpi = _fred("CPIAUCSL", start="1990-01-01")["value"]
+        cpi = cpi / cpi.iloc[-1]
+
+        tickers = list(_SECTOR_ETFS.keys()) + ["SPY"]
+        raw = yf.download(tickers, period="max", interval="1mo",
+                          auto_adjust=True, progress=False)
+        if raw is None or raw.empty:
+            return None
+        close = raw["Close"] if "Close" in raw.columns.get_level_values(0) else raw
+        close = close.dropna(how="all")
+        close.index = pd.to_datetime(close.index)
+
+        # Align CPI onto the ETF monthly grid
+        cpi_m = (cpi.reindex(close.index.union(cpi.index))
+                    .sort_index().ffill().reindex(close.index))
+
+        def _stretch(px):
+            real = px / cpi_m
+            avg  = real.rolling(lookback_months, min_periods=min_months).mean()
+            return real / avg
+
+        if "SPY" not in close.columns:
+            return None
+        mkt_stretch = _stretch(close["SPY"])
+
+        # Market CAPE (Shiller) mapped onto the ETF monthly grid
+        mkt_cape = df_shiller["cape"].copy()
+        mkt_cape.index = pd.to_datetime(mkt_cape.index)
+        mkt_cape = (mkt_cape.reindex(mkt_cape.index.union(close.index))
+                            .sort_index().interpolate()
+                            .reindex(close.index).ffill())
+
+        out = {}
+        for etf, name in _SECTOR_ETFS.items():
+            if etf not in close.columns:
+                continue
+            rel = _stretch(close[etf]) / mkt_stretch
+            out[name] = mkt_cape * rel
+
+        out["Market"] = mkt_cape
+        df = pd.DataFrame(out)
+        # Keep rows where at least one sector proxy is defined
+        sector_cols = [c for c in df.columns if c != "Market"]
+        df = df[df[sector_cols].notna().any(axis=1)]
+        return df if len(df) else None
+    except Exception as exc:
+        print(f"  [sector CAPE] fetch failed: {exc}")
         return None
 
 
@@ -1004,6 +1117,99 @@ def chart_sector_decomp(df_sectors):
     return _fig_to_b64(fig)
 
 
+def chart_sector_cape(df):
+    """
+    Time series of the per-sector CAPE proxy, one line per sector, with the
+    market (Shiller) CAPE as a thick reference line.  Styled like chart_cape.
+    """
+    if df is None or len(df) == 0:
+        return None
+    fig, ax = _base_fig(h=4.8)
+
+    sectors = [c for c in df.columns if c != "Market"]
+    for i, sec in enumerate(sectors):
+        s = df[sec].dropna()
+        if len(s) < 12:
+            continue
+        ax.plot(s.index.to_pydatetime(), s.values,
+                color=_SECTOR_PALETTE[i % len(_SECTOR_PALETTE)],
+                lw=1.3, alpha=0.9, label=sec, zorder=3)
+
+    m = df["Market"].dropna()
+    if len(m):
+        ax.plot(m.index.to_pydatetime(), m.values, color=TEXT, lw=2.4,
+                alpha=0.9, label="Market (Shiller CAPE)", zorder=6)
+        _extend_to_today(ax, m, TEXT)
+
+    ax.set_ylabel("CAPE proxy (x)", color=SUB, fontsize=9)
+    ax.set_title("Sector CAPE Proxy  --  relative valuation anchored to Shiller CAPE",
+                 color=TEXT, fontsize=11, pad=10, loc="left")
+    ax.legend(fontsize=7, framealpha=0.2, facecolor=S2, edgecolor=BD,
+              labelcolor=SUB, loc="upper left", ncol=2)
+
+    fig.text(0.01, 0.01,
+             "Proxy = market CAPE x (sector real-price stretch / market real-price stretch), 10-yr trailing.  "
+             "Sources: SPDR sector ETFs (yfinance), Shiller CAPE, FRED CPI.  Relative-valuation proxy -- NOT an earnings P/E.",
+             color=SUB, fontsize=7, va="bottom")
+    plt.tight_layout(pad=1.2)
+    return _fig_to_b64(fig)
+
+
+def chart_sector_cape_current(df):
+    """
+    Horizontal bar chart of the latest sector CAPE proxy vs the market,
+    sorted low-to-high and coloured cheap (green) -> extended (red).
+    """
+    if df is None or len(df) == 0:
+        return None
+    latest   = df.ffill().iloc[-1]
+    mkt      = float(latest["Market"]) if pd.notna(latest.get("Market")) else None
+    sectors  = [c for c in df.columns if c != "Market"]
+    vals     = [(s, float(latest[s])) for s in sectors if pd.notna(latest.get(s))]
+    if not vals:
+        return None
+    vals.sort(key=lambda x: x[1])
+    names = [v[0] for v in vals]
+    nums  = [v[1] for v in vals]
+
+    colors = []
+    for n in nums:
+        if   mkt and n > mkt * 1.15: colors.append(RED)
+        elif mkt and n > mkt:        colors.append(YLW)
+        elif mkt and n > mkt * 0.85: colors.append(LINE2)
+        else:                         colors.append(GRN)
+
+    fig, ax = _base_fig(h=4.2)
+    ypos = list(range(len(names)))
+    ax.barh(ypos, nums, color=colors, alpha=0.88, zorder=3)
+    ax.set_yticks(ypos)
+    ax.set_yticklabels(names, fontsize=8, color=TEXT)
+    for i, v in enumerate(nums):
+        ax.annotate(f"{v:.1f}x", xy=(v, i), xytext=(4, 0),
+                    textcoords="offset points", va="center",
+                    color=TEXT, fontsize=8, fontweight="bold")
+
+    if mkt:
+        ax.axvline(mkt, color=TEXT, lw=1.5, ls="--", alpha=0.85,
+                   label=f"Market {mkt:.1f}x", zorder=5)
+        ax.legend(fontsize=8, framealpha=0.2, facecolor=S2, edgecolor=BD,
+                  labelcolor=SUB, loc="lower right")
+
+    ax.set_xlim(0, max(nums) * 1.18)
+    ax.set_xlabel("CAPE proxy (x)", color=SUB, fontsize=9)
+    ax.set_title("Current Sector CAPE Proxy vs Market", color=TEXT,
+                 fontsize=11, pad=10, loc="left")
+    ax.grid(axis="x", color=BD, linewidth=0.6, zorder=0)
+    ax.grid(axis="y", visible=False)
+
+    fig.text(0.01, 0.01,
+             "Latest month.  Green = below market, amber = above, red = >15% above market CAPE.  "
+             "Relative-valuation proxy, not a P/E.",
+             color=SUB, fontsize=7, va="bottom")
+    plt.tight_layout(pad=1.2)
+    return _fig_to_b64(fig)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Help modal
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1078,8 +1284,10 @@ _HELP_MODAL = """
 # ─────────────────────────────────────────────────────────────────────────────
 def build_html(charts, summary, holdings, ts, suite_port=5050):
     conc_chart, buffett_chart, cape_chart, fed_chart = charts[:4]
-    pe_ctx_chart   = charts[4] if len(charts) > 4 else None
-    sector_chart   = charts[5] if len(charts) > 5 else None
+    pe_ctx_chart        = charts[4] if len(charts) > 4 else None
+    sector_chart        = charts[5] if len(charts) > 5 else None
+    sector_cape_chart   = charts[6] if len(charts) > 6 else None
+    sector_cape_cur_chart = charts[7] if len(charts) > 7 else None
     cur_conc, cur_buffett, cur_cape, cur_erp = summary
 
     def _stat(label, value, note="", color=TEXT):
@@ -1229,6 +1437,25 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   <img class="chart-img" src="data:image/png;base64,{sector_chart}" alt="sector PE decomposition chart">
 </div>"""
 
+    sector_cape_section = ""
+    if sector_cape_chart:
+        cur_img = (f'<img class="chart-img" src="data:image/png;base64,{sector_cape_cur_chart}" '
+                   f'alt="current sector CAPE proxy chart" style="border-top:1px solid var(--bd)">'
+                   if sector_cape_cur_chart else "")
+        sector_cape_section = f"""
+<div class="section" style="margin-top:4px">
+  <div class="sec-hdr">
+    <span class="sec-title">Sector CAPE Proxy  --  Valuation by Sector Over Time</span>
+    <span class="sec-sub">
+      No free historical sector-level earnings exist, so this anchors real Shiller CAPE and
+      modulates it by each sector's real-price stretch vs the market &bull;
+      Relative-valuation proxy, <em>not</em> an earnings-based P/E &bull; SPDR sector ETFs, 2009-present
+    </span>
+  </div>
+  <img class="chart-img" src="data:image/png;base64,{sector_cape_chart}" alt="sector CAPE proxy chart">
+  {cur_img}
+</div>"""
+
     conc_val_s = (f"{cur_conc:.1f}%" if cur_conc is not None else "--")
     buffett_val_s = (f"{cur_buffett[0]:.0f}%" if cur_buffett[0] is not None else "--")
     cape_val_s = (f"{cur_cape[0]:.1f}x" if cur_cape[0] is not None else "--")
@@ -1264,6 +1491,7 @@ body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgro
   {fed_section}
   {pe_ctx_section}
   {sector_section}
+  {sector_cape_section}
 </div>
 <div class="footer">
   Market Concentration &amp; Macro Valuation Dashboard &bull;
@@ -1295,14 +1523,15 @@ def main():
     print("  MARKET CONCENTRATION & MACRO VALUATION DASHBOARD")
     print("=" * 58)
 
-    charts   = [None] * 6   # [conc, buffett, cape, fed, pe_context, sector_decomp]
+    charts   = [None] * 8   # [conc, buffett, cape, fed, pe_context, sector_decomp,
+                            #  sector_cape_ts, sector_cape_current]
     summary  = [(None, None, None), (None, None, None), (None, None, None), None]
     holdings = []
     cur_conc = None
 
     # ── 1. S&P 500 concentration ─────────────────────────────────────────────
     if not args.no_conc:
-        print("\n[1/6] Fetching S&P 500 market concentration...")
+        print("\n[1/7] Fetching S&P 500 market concentration...")
         cur_conc, holdings = fetch_concentration()
         if cur_conc is not None:
             print(f"  Top-10 concentration: {cur_conc:.1f}%")
@@ -1311,14 +1540,14 @@ def main():
         else:
             print("  Concentration data unavailable -- chart will use historical anchors only.")
     else:
-        print("\n[1/6] Skipping live concentration fetch (--no-concentration).")
+        print("\n[1/7] Skipping live concentration fetch (--no-concentration).")
         cur_conc, holdings = None, []
 
     charts[0] = chart_concentration(CONCENTRATION_HIST, cur_conc, holdings)
     summary[0] = cur_conc
 
     # ── 2. Buffett Indicator ─────────────────────────────────────────────────
-    print("\n[2/6] Fetching Buffett Indicator (FRED NCBEILQ027S / GDP)...")
+    print("\n[2/7] Fetching Buffett Indicator (FRED NCBEILQ027S / GDP)...")
     try:
         df_b = fetch_buffett()
         cur_b = float(df_b["ratio"].iloc[-1])
@@ -1332,7 +1561,7 @@ def main():
         summary[1] = (None, None, None)
 
     # ── 3. Shiller CAPE ──────────────────────────────────────────────────────
-    print("\n[3/6] Fetching Shiller CAPE from Yale (ie_data.xls)...")
+    print("\n[3/7] Fetching Shiller CAPE from Yale (ie_data.xls)...")
     df_shiller = None
     try:
         df_shiller = fetch_shiller()
@@ -1354,7 +1583,7 @@ def main():
         summary[3] = None
 
     # ── 4. Fed Model ─────────────────────────────────────────────────────────
-    print("\n[4/6] Building Fed Model chart...")
+    print("\n[4/7] Building Fed Model chart...")
     if df_shiller is not None:
         try:
             charts[3] = chart_fed_model(df_shiller)
@@ -1364,7 +1593,7 @@ def main():
         print("  Skipped (Shiller data unavailable).")
 
     # ── 5. Sector composition + live blended P/E ─────────────────────────────
-    print("\n[5/6] Fetching sector composition & P/E breakdown...")
+    print("\n[5/7] Fetching sector composition & P/E breakdown...")
     df_sectors = None
     live_pe    = None
     try:
@@ -1381,7 +1610,7 @@ def main():
         print(f"  FAILED: {e}")
 
     # ── 6. Valuation context charts ───────────────────────────────────────────
-    print("\n[6/6] Building valuation context charts...")
+    print("\n[6/7] Building valuation context charts...")
     if df_shiller is not None:
         try:
             charts[4] = chart_pe_context(df_shiller, live_pe=live_pe)
@@ -1394,6 +1623,31 @@ def main():
             print("  Sector P/E decomposition chart done.")
         except Exception as e:
             print(f"  Sector decomp chart failed: {e}")
+
+    # ── 7. Sector CAPE proxy (historical + current snapshot) ──────────────────
+    print("\n[7/7] Building sector CAPE proxy charts...")
+    if df_shiller is not None:
+        try:
+            df_sector_cape = fetch_sector_cape_history(df_shiller)
+            if df_sector_cape is not None and len(df_sector_cape):
+                charts[6] = chart_sector_cape(df_sector_cape)
+                charts[7] = chart_sector_cape_current(df_sector_cape)
+                latest = df_sector_cape.ffill().iloc[-1]
+                mkt = latest.get("Market")
+                print(f"  Sector CAPE proxy done  (market anchor: "
+                      f"{mkt:.1f}x)" if pd.notna(mkt) else "  Sector CAPE proxy done.")
+                ranked = sorted(
+                    [(s, float(latest[s])) for s in df_sector_cape.columns
+                     if s != "Market" and pd.notna(latest.get(s))],
+                    key=lambda x: x[1], reverse=True)
+                for name, val in ranked:
+                    print(f"    {name:<24} {val:5.1f}x")
+            else:
+                print("  Sector CAPE proxy unavailable (ETF/CPI data missing).")
+        except Exception as e:
+            print(f"  Sector CAPE proxy failed: {e}")
+    else:
+        print("  Skipped (Shiller data unavailable).")
 
     # ── Build HTML ────────────────────────────────────────────────────────────
     ts      = datetime.datetime.now().strftime("%b %d, %Y  %H:%M")

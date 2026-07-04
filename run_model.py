@@ -79,7 +79,7 @@ from valuation_models import (
     run_tam_scenario, run_rule_of_40, run_erg_valuation,
     run_scurve_tam, run_pie, run_ddm_hmodel,
     run_graham_number, run_multifactor_price_target, run_bayesian_ensemble,
-    calibrate_erg_multiple,
+    calibrate_erg_multiple, set_market_rates,
 )
 
 try:
@@ -199,7 +199,19 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
     except Exception:
         inc = cf = bs = None
 
-    revenue    = _first(inc, ["Total Revenue"])
+    revenue_annual = _first(inc, ["Total Revenue"])
+
+    # Rolling TTM revenue: sum of last 4 quarters (more accurate than the last
+    # fiscal-year figure for high-growth names).  Falls back to annual.
+    revenue = revenue_annual
+    try:
+        q_inc = tk.quarterly_income_stmt
+        if q_inc is not None and not q_inc.empty and "Total Revenue" in q_inc.index:
+            q_vals = q_inc.loc["Total Revenue"].dropna().iloc[:4].tolist()
+            if len(q_vals) == 4:
+                revenue = sum(q_vals)
+    except Exception:
+        pass
     net_income = _first(inc, ["Net Income", "Net Income Common Stockholders"])
     ebitda     = _first(inc, ["EBITDA", "Normalized EBITDA"]) or _i("ebitda")
     op_margin  = _first(inc, ["Operating Income"])
@@ -276,17 +288,17 @@ def fetch_data(ticker: str, wacc_override=None, growth_override=None) -> dict:
     fwd_rev = None
     try:
         rev_est = tk.get_revenue_estimate()
-        if rev_est is not None and not rev_est.empty and "+1y" in rev_est.index:
-            v = rev_est.loc["+1y", "avg"]
+        if rev_est is not None and not rev_est.empty and "0y" in rev_est.index:
+            v = rev_est.loc["0y", "avg"]
             if v is not None and not math.isnan(float(v)):
                 fwd_rev = float(v)
     except Exception:
         pass
 
-    # TTM revenue growth from financial statements (already fetched)
+    # YoY revenue growth -- use annual figures for an apples-to-apples comparison
     rev_growth_pct = None
-    if revenue and revenue_py and revenue_py > 0:
-        rev_growth_pct = (revenue - revenue_py) / revenue_py * 100
+    if revenue_annual and revenue_py and revenue_py > 0:
+        rev_growth_pct = (revenue_annual - revenue_py) / revenue_py * 100
 
     # ── Growth estimate — matching valuationMaster.py priority logic ──────────
     fcf_per_share = (fcf / shares) if (fcf and shares and shares > 0) else None
@@ -638,8 +650,8 @@ def _print_rim(r, price):
     _line("Fair value",   _mo(r["fair_value"]), _upside(r["fair_value"], price))
     _line("MoS price",    _mo(r["mos_value"]))
     _line("Book value/sh",_mo(r.get("book_value_ps")))
-    _line("Cost of equity",f"{r.get('cost_of_equity',0)*100:.2f}%")
-    _line("ROE used",     f"{r.get('roe',0)*100:.1f}%")
+    _line("Cost of equity",f"{r.get('cost_of_equity',0):.2f}%")
+    _line("ROE used",     f"{r.get('roe_used',0):.1f}%")
     if r.get("warning"):
         _warn(r["warning"])
 
@@ -1678,6 +1690,26 @@ def _plot_backtest_body(ticker, d, benchmarks, model_key, days, label,
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+def _live_risk_free_rate(default=RISK_FREE_RATE):
+    """
+    Fetch the current 10-year US Treasury yield (^TNX) as a decimal, e.g. 0.0437.
+    ^TNX quotes the yield in percent (4.37 = 4.37%); some legacy feeds use a ×10
+    convention (43.7), which is normalised.  Falls back to `default` on any error.
+    """
+    try:
+        h = yf.Ticker("^TNX").history(period="5d")
+        if h is not None and not h.empty:
+            last = float(h["Close"].dropna().iloc[-1])
+            if last > 20:            # implausible as a percent -> ×10 form
+                last /= 10.0
+            rate = last / 100.0
+            if 0.005 < rate < 0.12:
+                return round(rate, 4)
+    except Exception:
+        pass
+    return default
+
+
 def main():
     p = argparse.ArgumentParser(
         description="Run a single valuation model on a ticker and print to terminal.",
@@ -1700,8 +1732,14 @@ def main():
         sys.exit(1)
     model_key = ALIASES[model_input]
 
+    # Pull the live 10Y Treasury yield so WACC / CAPM / FCF-yield discount at
+    # current market rates instead of a stale hardcoded constant.
+    rf = _live_risk_free_rate()
+    set_market_rates(risk_free_rate=rf)
+    print(f"\nRisk-free rate (10Y Treasury): {rf*100:.2f}%")
+
     ticker = args.ticker.upper()
-    print(f"\nFetching data for {ticker}...")
+    print(f"Fetching data for {ticker}...")
     try:
         d, benchmarks = fetch_data(ticker, args.wacc, args.growth)
     except Exception as e:
